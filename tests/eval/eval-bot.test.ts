@@ -445,8 +445,11 @@ describe('cases 60 and 61 check the lead-in line their titles promise (review ro
   // 61). They are pinned so that a later change of the splitter has to decide about them.
   it('case 61 keeps the documented limits of its sentence splitter (truth check R6-1, R6-2)', async () => {
     const LEAD = 'the quote lead line is not in English';
-    // A statement that ends with a bracketed question counts as a question.
+    // A statement that ends with a bracketed or quoted question counts as a question.
     expect(await failuresOf(61, `${H}You can see the quote below (any questions?). Shall I go ahead?`)).toContain(LEAD);
+    // So does a statement that ends with a quoted question (truth check R8 F10-D1).
+    expect(await failuresOf(61, `${H}The quote below answers "how much will it cost?". Shall I go ahead?`)).toContain(LEAD);
+    expect(await failuresOf(61, 'The quote below is for "Send to mummy?". Shall I go ahead?')).toContain(LEAD);
     // With no space, an all-capitals word starts a sentence only after a lowercase letter and a mark.
     expect(await failuresOf(61, `${H}Check the quote in USD.USD 200 goes to mummy, shall I go ahead?`)).toContain(LEAD);
     // An abbreviation's full stop ends a sentence, so the first part of this question counts as a statement.

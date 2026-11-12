@@ -1505,9 +1505,10 @@ export const EVAL_CASES: EvalCase[] = [
       // counts; a question with no "?" counts as a statement; a comma-joined lead without a
       // declarative start ("You can check the quote below, shall I go ahead?") does not count.
       // An abbreviation's full stop ends a sentence ("U.S. dollars", "U.S.Dollars"). A statement that
-      // ends with a bracketed question ("You can see the quote below (any questions?).") counts as
-      // a question, so it is not a lead. With no space, an all-capitals word starts a sentence only
-      // after a lowercase letter and a mark ("above.USD 200" splits, "USD.USD 200" does not).
+      // ends with a bracketed or quoted question ("You can see the quote below (any questions?).",
+      // "The quote below answers \"how much?\".") counts as a question, so it is not a lead. With no
+      // space, an all-capitals word starts a sentence only after a lowercase letter and a mark
+      // ("above.USD 200" splits, "USD.USD 200" does not).
       // Sentences: WhatsApp markup (* _ ~) is dropped first; a sentence ends at . ! or ? (plus any
       // closing bracket or quote) before a space; or with no space before a capitalised word, "OK"
       // or the word "I" ("below.Shall", "USD.Shall", "$200.Shall", "below...Shall", "below.I can");
