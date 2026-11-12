@@ -12,7 +12,8 @@ import { freshDb } from './helpers-db';
 import { __setFieldCryptoWriteV2ForTests } from '@/lib/field-crypto';
 
 let db: Awaited<ReturnType<typeof freshDb>>;
-const KEY = ['sk', 'test', 'repo', 'only'].join('_');
+// Fix pack 5 T16 (P16): only a restricted key is accepted at write.
+const KEY = ['rk', 'test', 'repoonly'].join('_');
 const WH = ['whsec', 'repo', 'only'].join('_');
 
 beforeEach(async () => {
@@ -68,12 +69,34 @@ describe('integrations-repo funding config', () => {
     const repo = createIntegrationsRepo(db);
     await db.execute(sql`INSERT INTO partners (id, name) VALUES ('globex', 'Globex') ON CONFLICT DO NOTHING`);
     await repo.setFundingConfig('acme', { providerType: 'stripe', secretKey: KEY, webhookSecrets: [WH] });
-    await repo.setFundingConfig('globex', { providerType: 'stripe', secretKey: 'x', webhookSecrets: ['y'] });
+    await repo.setFundingConfig('globex', { providerType: 'stripe', secretKey: ['rk', 'test', 'globex'].join('_'), webhookSecrets: ['y'] });
     await db.execute(sql`UPDATE partner_integrations SET funding_credentials_enc = (SELECT funding_credentials_enc FROM partner_integrations WHERE partner_id = 'acme') WHERE partner_id = 'globex'`);
     try {
       await expect(repo.getFundingConfig('globex')).rejects.toThrow();
     } finally {
       __setFieldCryptoWriteV2ForTests(false);
     }
+  });
+
+  it('fix pack 5 T16 (P16): an unrestricted key is refused at write (throws /restricted/, no key in the message) and nothing is written', async () => {
+    const repo = createIntegrationsRepo(db);
+    const sk = ['sk', 'test', 'repoonly'].join('_');
+    let msg = '';
+    await repo.setFundingConfig('acme', { providerType: 'stripe', secretKey: sk, webhookSecrets: [WH] }).catch((e: Error) => { msg = e.message; });
+    expect(msg).toMatch(/restricted/);
+    expect(msg).not.toContain('repoonly');
+    expect(await repo.getFundingConfig('acme')).toBeNull();
+    // An existing restricted config is kept when a later write is refused.
+    await repo.setFundingConfig('acme', { providerType: 'stripe', secretKey: KEY, webhookSecrets: [WH] });
+    for (const bad of [sk, ['sk', 'org', 'x'].join('_'), ['pk', 'live', 'x'].join('_'), '', undefined]) {
+      await expect(repo.setFundingConfig('acme', { providerType: 'stripe', secretKey: bad, webhookSecrets: [WH] })).rejects.toThrow(/restricted/);
+    }
+    expect(await repo.getFundingConfig('acme')).toEqual({ providerType: 'stripe', secretKey: KEY, webhookSecrets: [WH] });
+    // Clearing (null) and a non-Stripe config are not checked.
+    await expect(repo.setFundingConfig('acme', {})).resolves.toBeUndefined();
+    expect(await repo.getFundingConfig('acme')).toBeNull();
+    await repo.setFundingConfig('acme', { providerType: 'stripe', secretKey: KEY, webhookSecrets: [WH] });
+    await expect(repo.setFundingConfig('acme', null)).resolves.toBeUndefined();
+    expect(await repo.getFundingConfig('acme')).toBeNull();
   });
 });

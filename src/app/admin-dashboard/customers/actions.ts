@@ -8,7 +8,9 @@ import { getDb } from '@/db/client';
 import { createAuditRepo } from '@/db/repos/aux-repos';
 import { getStore } from '@/lib/store';
 import { createCustomerStore, getCustomerStore } from '@/lib/customer-store';
-import { validateSendLimitInput, requireStaffReason, isUnchangedPartnerSetEntry } from '@/lib/send-limits';
+import { validateSendLimitInput, requireStaffReason, isUnchangedPartnerSetEntry, PLATFORM_SEND_LIMITS } from '@/lib/send-limits';
+import { ownerAddressCheck } from '@/lib/originator-info';
+import { LIMIT_NEEDS_ADDRESS_COPY, limitRaiseNeedsAddress } from '@/lib/travel-rule';
 import { getKycCaseStore } from '@/lib/kyc-case-store';
 import { notifyKycReviewDecision } from '@/lib/kyc-notify';
 import { canDecideCustomerKyc, senderScreeningHoldActive } from '@/lib/compliance-config';
@@ -328,6 +330,14 @@ export async function setCustomerSendLimitAction(formData: FormData): Promise<vo
 
   const customer = await getCustomerStore(getStore()).getCustomer(partnerId, phone);
   if (!customer) throw new Error('Customer not found.');
+  // Fix pack 5 (P23, T24): a per-transfer cap above $2,999 needs the sender's address on file
+  // when the customer's OWNER is on a real-money rail (a failed rail read counts as real money).
+  // Checked before any write; a cap up to $2,999, a daily-only raise and a clear make no read.
+  const perTransferCapCents = validated.value?.perTransferCapCents;
+  if (perTransferCapCents !== undefined && perTransferCapCents > PLATFORM_SEND_LIMITS.perTransferCapCents) {
+    const check = await ownerAddressCheck(getDb(), customer.partnerId, customer.senderPhone);
+    if (limitRaiseNeedsAddress({ perTransferCapCents, ...check })) throw new Error(LIMIT_NEEDS_ADDRESS_COPY);
+  }
 
   const nowIso = new Date().toISOString();
   // UI redesign M3-12: setScope 'platform' marks a SmartRemit decision, which a partner admin can

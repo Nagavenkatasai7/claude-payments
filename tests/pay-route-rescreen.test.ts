@@ -13,12 +13,13 @@ import { createStore } from '@/lib/store';
 import { createCustomerStore } from '@/lib/customer-store';
 import { fakeRedis } from './helpers';
 import { freshDb } from './helpers-db';
-import { approveDisclosureForTest, certifyPartnerForTest } from './helpers-live';
+import { approveDisclosureForTest, certifyPartnerForTest, seedOriginatorForTest } from './helpers-live';
 import { realMoneyPayBody } from './helpers-pay-evidence';
 import { createTransferRepo } from '@/db/repos/transfer-repo';
 import { SanctionsListUnavailableError } from '@/lib/sanctions/list-screener';
 import {
   LIST_UNAVAILABLE_REASON,
+  ORIGINATOR_INFO_MISSING_REASON,
   POSSIBLE_MATCH_REASON,
   RECIPIENT_WATCHLIST_REASON,
   SENDER_WATCHLIST_REASON,
@@ -28,6 +29,9 @@ import type { PartnerIntegrations } from '@/lib/partner-integrations';
 import { primeOfacSource, restoreOfacSource, seedLiveEvidence, setRailProviderType } from './helpers-sanctions';
 import { SENDER_IDENTITY_MISSING_REASON } from '@/lib/compliance-config';
 
+// Fix pack 5 T13a: this file tests the real-money re-screen, not the funding rule; stands in for a Stripe-funded row
+// (the mock-funding refusal is pinned in tests/pay-funding-refusal.test.ts).
+vi.mock('@/lib/funding-class', async (orig) => ({ ...(await orig<typeof import('@/lib/funding-class')>()), payFundingRefusal: () => false }));
 vi.mock('next/server', async (orig) => {
   const real = await orig<typeof import('next/server')>();
   return { ...real, after: (_cb: () => unknown) => {} };
@@ -137,6 +141,9 @@ async function seedOwner(fullName: string | undefined, partnerId = 'default') {
     createdAt: nowIso, updatedAt: nowIso,
     ...(fullName !== undefined ? { fullName } : {}),
   });
+  // Fix pack 5 T20b (P0 rule 9): the sender's travel-rule data on file, so the settle-time
+  // ORIGINATOR_INFO_MISSING hold (P22) stays out of the cases about the re-screen.
+  await seedOriginatorForTest(db, partnerId, SENDER_PHONE, { address: true, dob: true });
 }
 
 async function screenRows(id: string) {
@@ -379,7 +386,9 @@ describe('pay route — real-money re-screen needs a live list (fix pack 2 T3)',
     primeOfacSource({ checkedAgoMs: 37 * H });
     await store.saveTransfer(makeTransfer({ id: 'lv-routed', partnerId: OWNER, settlementPartnerId: 'railp', recipientLegalName: 'Anita Legal' }));
     expect(await (await post('lv-routed', realMoneyPayBody({ otp: '000000' }))).json()).toEqual({ ok: true, status: 'in_review' });
-    expect((await store.getTransfer('lv-routed'))?.complianceReasons).toEqual([LIST_UNAVAILABLE_REASON]);
+    // Fix pack 5 T20b (P22, owner Q1): a ROUTED real-money row is also held for the travel rule
+    // (its originator data cannot be sent), even with everything on file.
+    expect((await store.getTransfer('lv-routed'))?.complianceReasons).toEqual([LIST_UNAVAILABLE_REASON, ORIGINATOR_INFO_MISSING_REASON]);
   });
 
   it('a default-tenant transfer routed to an http partner -> 409 not_available from the route\'s early R18 gate (code not checked, no live-gate warn), never charged, nothing written to the outbox', async () => {

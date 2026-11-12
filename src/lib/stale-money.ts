@@ -5,6 +5,7 @@ import { createAuditRepo } from '@/db/repos/aux-repos';
 import { createPaymentLinkRepo } from '@/db/repos/payment-link-repo';
 import { liveRefusalFor } from './live-gate';
 import { alertStuckLivegate } from './livegate-alerts';
+import { alertStuckHeld, instructHeldOnPurpose } from './instruct-gates';
 
 // stale-money — Program-Fix 32. Two sweeps over money that has stopped moving:
 //
@@ -85,6 +86,16 @@ export async function escalateStuckPaid(db: Db, now: Date = new Date()): Promise
     const refusal = await liveRefusalFor(db, t);
     if (refusal !== null) {
       await db.transaction((tx) => alertStuckLivegate(tx, t, refusal));
+      continue;
+    }
+    // Fix pack 5 (P9): a row a later instruct gate holds on purpose. While its
+    // instruct row is live the worker's own alert (mockfund:/fundmode:/
+    // travelrule:) owns it; with none (a mockfund row's instruct is done) one
+    // <reason>:stuck:<id> alert (shared with reconcileSweep) is the escalation
+    // (pack 3 I1 rule). No reinstruct, no recon alert, no rung, no audit row.
+    const heldOnPurpose = await instructHeldOnPurpose(db, t);
+    if (heldOnPurpose !== null) {
+      await db.transaction((tx) => alertStuckHeld(tx, t, heldOnPurpose));
       continue;
     }
     const fresh = await db.transaction(async (tx) => {

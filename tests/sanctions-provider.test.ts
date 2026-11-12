@@ -154,3 +154,122 @@ describe('MockSanctionsScreener — entries that normalise to empty keep the old
     expect((await s.screen({ name: '   ', sourceCountry: 'US' })).matched).toBe(false);
   });
 });
+
+// ── Fix pack 5 T28 (R08, P25): the opt-in 'lists' mode ──────────────────────
+import {
+  setListSourceForTests,
+  listSourceForTests,
+  servedListInfo,
+  servedOfacListInfo,
+} from '@/lib/providers/sanctions-provider';
+import { MultiListSanctionsScreener, isMultiListScreener } from '@/lib/sanctions/multi-list-screener';
+import { SANCTIONS_SOURCES } from '@/lib/sanctions/list-sets';
+import { LIST_SET_NAMES, primeListSet, restoreOfacSource } from './helpers-sanctions';
+import { createHash } from 'node:crypto';
+
+describe('getSanctionsScreener — SANCTIONS_LIST=lists (pack 5 T28)', () => {
+  const original = process.env.SANCTIONS_LIST;
+  afterEach(() => {
+    restoreOfacSource(original);
+    vi.restoreAllMocks();
+  });
+
+  async function memberSources(s: ReturnType<typeof getSanctionsScreener>): Promise<string[]> {
+    expect(isMultiListScreener(s)).toBe(true);
+    await s.screen({ name: 'Nobody Listed Here', sourceCountry: 'US' });
+    return (s as MultiListSanctionsScreener).memberInfos().map((m) => m.source);
+  }
+
+  it('destination IN -> all four lists in order; DE -> the two OFAC lists; no opts / null -> all four', async () => {
+    primeListSet({});
+    const inScreener = getSanctionsScreener(WATCHLIST, { destinationCountry: 'IN' });
+    expect(inScreener).toBeInstanceOf(MultiListSanctionsScreener);
+    expect(await memberSources(inScreener)).toEqual(['ofac-sdn', 'ofac-cons', 'un-sc', 'in-mha-uapa']);
+    expect(await memberSources(getSanctionsScreener(WATCHLIST, { destinationCountry: 'DE' }))).toEqual(['ofac-sdn', 'ofac-cons']);
+    expect(await memberSources(getSanctionsScreener(WATCHLIST))).toEqual(['ofac-sdn', 'ofac-cons', 'un-sc', 'in-mha-uapa']);
+    expect(await memberSources(getSanctionsScreener(WATCHLIST, { destinationCountry: null }))).toEqual(['ofac-sdn', 'ofac-cons', 'un-sc', 'in-mha-uapa']);
+  });
+
+  it('each source blocks with its own namespaced id; the base list is screened once, on ofac-sdn only', async () => {
+    primeListSet({});
+    const s = getSanctionsScreener(WATCHLIST, { destinationCountry: 'IN' });
+    expect(await s.screen({ name: LIST_SET_NAMES['un-sc'], sourceCountry: 'US' })).toMatchObject({ matched: true, entryId: 'unsc:1' });
+    expect(await s.screen({ name: LIST_SET_NAMES['in-mha-uapa'], sourceCountry: 'US' })).toMatchObject({ matched: true, entryId: 'inmha:1' });
+    expect(await s.screen({ name: 'John Doe', sourceCountry: 'US' })).toMatchObject({ matched: true, entryId: 'extra:0', listSource: 'lists:ofac-sdn+ofac-cons+un-sc+in-mha-uapa' });
+    // Members other than ofac-sdn carry no extras: their bound hash is sha256(list hash + '\n' + '').
+    const infos = (s as MultiListSanctionsScreener).memberInfos();
+    const sources = SANCTIONS_SOURCES.map((src) => listSourceForTests(src));
+    const listHashes = await Promise.all(sources.map(async (src) => (await src.load()).hash));
+    const bare = (h: string) => createHash('sha256').update(`${h}\n`, 'utf8').digest('hex');
+    expect(infos[0].hash).not.toBe(bare(listHashes[0]));
+    expect(infos.slice(1).map((i) => i.hash)).toEqual(listHashes.slice(1).map(bare));
+  });
+
+  it('one source failing -> screen rejects SanctionsListUnavailableError', async () => {
+    primeListSet({ missing: ['un-sc'] });
+    const s = getSanctionsScreener(WATCHLIST, { destinationCountry: 'IN' });
+    await expect(s.screen({ name: 'Mom', sourceCountry: 'US' })).rejects.toBeInstanceOf(SanctionsListUnavailableError);
+    // The same set without un-sc (destination DE) still answers.
+    await expect(getSanctionsScreener(WATCHLIST, { destinationCountry: 'DE' }).screen({ name: 'Mom', sourceCountry: 'US' })).resolves.toEqual({ matched: false });
+  });
+
+  it('uses one PostgresSanctionsListSource per source by default, each with its own source name', () => {
+    for (const src of SANCTIONS_SOURCES) setListSourceForTests(src, null);
+    const seen = new Set<unknown>();
+    for (const src of SANCTIONS_SOURCES) {
+      const s = listSourceForTests(src);
+      expect(s).toBeInstanceOf(PostgresSanctionsListSource);
+      expect((s as unknown as { source: string }).source).toBe(src);
+      seen.add(s);
+    }
+    expect(seen.size).toBe(4);
+    expect(ofacListSourceForTests()).toBe(listSourceForTests('ofac-sdn'));
+  });
+
+  it('warmSanctionsList under "lists" warms all four sources once each and never throws when one warm throws', async () => {
+    const warms = SANCTIONS_SOURCES.map((src, i) => {
+      const warm = vi.fn(async () => { if (i === 1) throw new Error('db down'); });
+      setListSourceForTests(src, { load: async () => { throw new Error('unused'); }, warm });
+      return warm;
+    });
+    process.env.SANCTIONS_LIST = 'lists';
+    await expect(warmSanctionsList()).resolves.toBeUndefined();
+    expect(warms.map((w) => w.mock.calls.length)).toEqual([1, 1, 1, 1]);
+    // ofac-sdn warms only ofac-sdn; unset and mock warm none.
+    process.env.SANCTIONS_LIST = 'ofac-sdn';
+    await warmSanctionsList();
+    expect(warms.map((w) => w.mock.calls.length)).toEqual([2, 1, 1, 1]);
+    delete process.env.SANCTIONS_LIST;
+    await warmSanctionsList();
+    process.env.SANCTIONS_LIST = 'mock';
+    await warmSanctionsList();
+    expect(warms.map((w) => w.mock.calls.length)).toEqual([2, 1, 1, 1]);
+  });
+
+  it('servedListInfo(source) returns that source\'s info; servedOfacListInfo() equals servedListInfo("ofac-sdn")', async () => {
+    const srcs = primeListSet({});
+    const un = await srcs['un-sc'].load();
+    const info = await servedListInfo('un-sc');
+    expect(info).toMatchObject({ source: 'un-sc', version: un.version, hash: un.hash, baseHash: un.hash });
+    expect(typeof info.checkedAt).toBe('string');
+    expect(await servedOfacListInfo()).toEqual(await servedListInfo('ofac-sdn'));
+    primeListSet({ missing: ['in-mha-uapa'] });
+    await expect(servedListInfo('in-mha-uapa')).rejects.toThrow();
+  });
+
+  it('opts is ignored outside "lists": unset, mock, ofac-sdn and bogus return the same class as before', () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const cases: Array<[string | undefined, unknown]> = [
+      [undefined, MockSanctionsScreener], ['mock', MockSanctionsScreener], ['ofac-sdn', ListSanctionsScreener], ['bogus', MockSanctionsScreener],
+    ];
+    for (const [value, cls] of cases) {
+      if (value === undefined) delete process.env.SANCTIONS_LIST;
+      else process.env.SANCTIONS_LIST = value;
+      for (const destinationCountry of ['IN', 'DE', null] as const) {
+        const s = getSanctionsScreener(WATCHLIST, { destinationCountry });
+        expect(s).toBeInstanceOf(cls as new (...a: never[]) => unknown);
+        expect(isMultiListScreener(s)).toBe(false);
+      }
+    }
+  });
+});

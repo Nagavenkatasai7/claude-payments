@@ -24,7 +24,7 @@ import {
 } from '@/lib/providers/stripe-funding-provider';
 import type { Transfer } from '@/lib/types';
 
-const KEY = ['sk', 'test', 'unitonly'].join('_');
+const KEY = ['rk', 'test', 'unitonly'].join('_'); // fix pack 5 T16 (P16): a restricted key
 
 function transfer(o: Partial<Transfer> = {}): Transfer {
   return {

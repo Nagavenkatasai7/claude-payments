@@ -7,15 +7,15 @@ import {
   type LiveReadinessFacts,
   type LiveReadinessLineId,
 } from '@/lib/live-certification';
-import type { LiveControls } from '@/lib/live-controls';
+import { parseLiveControls, type LiveControls } from '@/lib/live-controls';
 import type { Partner } from '@/lib/types';
 import { disclosureHash } from '@/lib/disclosure-hash';
 import { approvedDisclosureConfig, certifiedLiveControls } from './helpers-live';
 
 // Fix pack 3 (contract 8): the 12-line live readiness checklist. Pure: the
-// partner and the facts are literals here. Seven lines are built (pack 4 T6
-// added provider_block); the other five are 'not_built' (always failing), so
-// `ok` is false for EVERY partner until PR9 (pinned below).
+// partner and the facts are literals here. Eight lines are built (pack 4 T6
+// added provider_block, pack 5 T17 funding); the other four are 'not_built'
+// (always failing), so `ok` is false for EVERY partner until PR9 (pinned below).
 
 type P = Pick<Partner, 'id' | 'status' | 'kycMode' | 'requireKycBeforeSend' | 'liveControls' | 'supportConfig' | 'displayName' | 'brandName'>;
 
@@ -71,9 +71,7 @@ describe('liveReadiness: shape', () => {
       'go_live', 'sanctions_list', 'posture', 'compliance_users', 'own_whatsapp', 'contract',
       'provider_block', 'funding', 'licence_matrix', 'corridor_register', 'staff_mfa', 'dual_control',
     ]);
-    expect(NOT_BUILT_LINES).toEqual({
-      funding: 'PR5', licence_matrix: 'PR8', corridor_register: 'PR8', staff_mfa: 'PR9', dual_control: 'PR9',
-    });
+    expect(NOT_BUILT_LINES).toEqual({ licence_matrix: 'PR8', corridor_register: 'PR8', staff_mfa: 'PR9', dual_control: 'PR9' });
   });
 
   it('lines come back in LIVE_READINESS_LINE_IDS order, one each', () => {
@@ -88,10 +86,10 @@ describe('liveReadiness: shape', () => {
     }
   });
 
-  it('ok is false for EVERY partner (pack 4: five lines not built; all built lines passing still false)', () => {
+  it('ok is false for EVERY partner (pack 5: four lines not built; all built lines passing still false)', () => {
     const r = liveReadiness(passingPartner(), allPassFacts());
     const built = r.lines.filter((l) => !(l.id in NOT_BUILT_LINES));
-    expect(built).toHaveLength(7);
+    expect(built).toHaveLength(8);
     for (const l of built) expect(l).toEqual({ id: l.id, state: 'pass', ok: true });
     expect(r.ok).toBe(false);
   });
@@ -113,6 +111,24 @@ describe('liveReadiness: shape', () => {
 });
 
 describe('liveReadiness: built lines', () => {
+  // Fix pack 5 T17 (P17): the funding line passes when a valid fundingMode record exists. A
+  // malformed stored record never reaches liveReadiness (parseLiveControls drops it).
+  it('funding passes with a valid fundingMode record and fails without one (or with a malformed one); ok stays false', () => {
+    const lc = certifiedLiveControls({ posture: true, complianceUsers: USERS });
+    expect(lc.fundingMode).toBeDefined();
+    expect(line(liveReadiness(passingPartner({ liveControls: lc }), allPassFacts()), 'funding')).toEqual({ id: 'funding', state: 'pass', ok: true });
+    for (const mode of ['partner_collected', 'partner_psp'] as const) {
+      const withMode = parseLiveControls({ fundingMode: { mode, setBy: 'ops-admin', setAt: new Date().toISOString() } });
+      expect(okOf(passingPartner({ liveControls: { ...lc, fundingMode: withMode.fundingMode } }), allPassFacts(), 'funding')).toBe(true);
+    }
+    const { fundingMode: _omit, ...without } = lc;
+    void _omit;
+    expect(line(liveReadiness(passingPartner({ liveControls: without }), allPassFacts()), 'funding')).toEqual({ id: 'funding', state: 'fail', ok: false });
+    const malformed = parseLiveControls({ fundingMode: { mode: 'partner_pull', setBy: 'ops-admin', setAt: new Date().toISOString() } });
+    expect(okOf(passingPartner({ liveControls: { ...lc, fundingMode: malformed.fundingMode } }), allPassFacts(), 'funding')).toBe(false);
+    expect(liveReadiness(passingPartner({ liveControls: lc }), allPassFacts()).ok).toBe(false);
+  });
+
   it('go_live: approved + active + not default passes; not approved, suspended, or id default fails', () => {
     expect(okOf(passingPartner(), allPassFacts(), 'go_live')).toBe(true);
     expect(okOf(passingPartner(), allPassFacts({ goLiveApproved: false }), 'go_live')).toBe(false);

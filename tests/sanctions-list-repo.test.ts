@@ -272,6 +272,25 @@ describe('sanctions list repo (Postgres, migration 0023)', () => {
     expect(await repo.archiveSummary('other')).toEqual({ versions: 0, archived: 0, pending: 0, withEntries: 0 });
   });
 
+  it('pack 5 LC2: pendingArchiveAge counts the unarchived versions of ONE source and gives the oldest loaded_at', async () => {
+    const repo = createSanctionsListRepo(db);
+    expect(await repo.pendingArchiveAge('ofac-cons')).toEqual({ pending: 0, oldestLoadedAt: null });
+    for (const n of [1, 2, 3]) await repo.storeList({ ...realVariant(n), source: 'ofac-cons' });
+    await repo.storeList(realVariant(4)); // ofac-sdn: never counted for ofac-cons
+    const cons = await repo.pendingArchive('ofac-cons', 10);
+    const old = new Date(Date.now() - 5 * 86_400_000);
+    const older = new Date(Date.now() - 9 * 86_400_000);
+    await db.execute(sql`UPDATE sanctions_list_versions SET loaded_at = ${older.toISOString()} WHERE id = ${cons[0].id}`);
+    await db.execute(sql`UPDATE sanctions_list_versions SET loaded_at = ${old.toISOString()} WHERE id = ${cons[1].id}`);
+    // The oldest one archived: it no longer counts.
+    await repo.markArchived(cons[0].id, cons[0].hash, 'sanctions-archive/x', 's', new Date());
+    const age = await repo.pendingArchiveAge('ofac-cons');
+    expect(age.pending).toBe(2);
+    expect(age.oldestLoadedAt?.toISOString()).toBe(old.toISOString());
+    expect((await repo.pendingArchiveAge('ofac-sdn')).pending).toBe(1);
+    expect(await repo.pendingArchiveAge('un-sc')).toEqual({ pending: 0, oldestLoadedAt: null });
+  });
+
   it('an OLDER publication (a replayed or stale export) is refused: the list only moves forward', async () => {
     const repo = createSanctionsListRepo(db);
     await repo.storeList(variant(1));
@@ -288,6 +307,42 @@ describe('sanctions list repo (Postgres, migration 0023)', () => {
     const res = await repo.storeList({ ...variant(1), version: '2026-09-25' });
     expect(res.status).toBe('activated');
     expect(await versions(db)).toHaveLength(2);
+  });
+
+  it('pack 5 LD2: without the upload option, older content under a newer date re-activates the old row (behaviour pinned)', async () => {
+    const repo = createSanctionsListRepo(db);
+    await repo.storeList(variant(1));
+    await repo.storeList(variant(2));
+    const res = await repo.storeList({ ...variant(1), version: '2026-09-25' });
+    expect(res).toMatchObject({ status: 'activated', version: '2026-09-25', hash: variant(1).hash });
+    expect(await repo.activeVersion('ofac-sdn')).toMatchObject({ version: variant(1).version, hash: variant(1).hash });
+  });
+
+  it('pack 5 LD2: with refuseOlderContent, content equal to an OLDER stored version is stale; the active one stays', async () => {
+    const repo = createSanctionsListRepo(db);
+    await repo.storeList(variant(1));
+    await repo.storeList(variant(2));
+    const before = await versions(db);
+    const err = await repo
+      .storeList({ ...variant(1), version: '2026-09-25' }, { refuseOlderContent: true })
+      .catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(SanctionsListStaleError);
+    expect(err).toMatchObject({ active: variant(2).version, next: variant(1).version });
+    expect(await repo.activeVersion('ofac-sdn')).toMatchObject({ version: variant(2).version, hash: variant(2).hash });
+    expect(await versions(db)).toEqual(before);
+  });
+
+  it('pack 5 LD2: with refuseOlderContent, a re-activated row reports its STORED version; new and same content as today', async () => {
+    const repo = createSanctionsListRepo(db);
+    await repo.storeList({ ...variant(1), version: variant(2).version });
+    await repo.storeList(variant(2));
+    const res = await repo.storeList({ ...variant(1), version: '2026-09-25' }, { refuseOlderContent: true });
+    expect(res).toMatchObject({ status: 'activated', version: variant(2).version, hash: variant(1).hash });
+    expect(await repo.activeVersion('ofac-sdn')).toMatchObject({ version: variant(2).version, hash: variant(1).hash });
+    const same = await repo.storeList({ ...variant(1), version: '2026-09-26' }, { refuseOlderContent: true });
+    expect(same).toMatchObject({ status: 'unchanged', version: variant(2).version, hash: variant(1).hash });
+    const fresh = await repo.storeList(variant(3), { refuseOlderContent: true });
+    expect(fresh).toMatchObject({ status: 'activated', version: variant(3).version, hash: variant(3).hash });
   });
 
   it('freshDb applies 0036: the five columns exist and are nullable', async () => {
@@ -356,5 +411,48 @@ describe('sanctions list repo (Postgres, migration 0023)', () => {
     const dup = { ...LIST, entries: [...LIST.entries, { ...LIST.entries[0], names: ['Other Name'] }] };
     const res = await repo.storeList(dup);
     expect(res.entryCount).toBe(5);
+  });
+});
+
+describe('pack 5 T31: touchActiveCheckedAt (the MHA "confirm still current")', () => {
+  let db: Db;
+  beforeEach(async () => {
+    db = await freshDb();
+  });
+
+  const mha = (version: string, inactiveCopy = false): SanctionsList => {
+    const entries = [{ id: `inmha:${inactiveCopy ? 'b' : 'a'}1`, names: ['Invented Curated Org'], type: 'Entity', programs: ['UAPA-1'] }];
+    return { source: 'in-mha-uapa', version, hash: hashEntries(entries), entries };
+  };
+  const stamps = async () =>
+    ((await db.execute(sql`SELECT source, version, hash, active, checked_at, entry_count FROM sanctions_list_versions ORDER BY id`)) as unknown as {
+      rows: Array<{ source: string; version: string; hash: string; active: boolean; checked_at: string | Date; entry_count: number }>;
+    }).rows;
+
+  it('updates only the active row of that source and returns { version, hash }; another source untouched', async () => {
+    const repo = createSanctionsListRepo(db);
+    await repo.storeList(mha('2026-01-01'));
+    await repo.storeList(mha('2026-01-02', true)); // the first is now inactive
+    await repo.storeList(LIST);
+    await db.execute(sql`UPDATE sanctions_list_versions SET checked_at = now() - interval '5 days'`);
+    const before = await stamps();
+    const at = new Date();
+    const r = await repo.touchActiveCheckedAt('in-mha-uapa', at);
+    expect(r).toEqual({ version: '2026-01-02', hash: mha('2026-01-02', true).hash });
+    const after = await stamps();
+    expect(after.map((x) => ({ ...x, checked_at: undefined }))).toEqual(before.map((x) => ({ ...x, checked_at: undefined })));
+    const changed = after.filter((x, i) => new Date(x.checked_at).getTime() !== new Date(before[i].checked_at).getTime());
+    expect(changed).toHaveLength(1);
+    expect(changed[0]).toMatchObject({ source: 'in-mha-uapa', version: '2026-01-02', active: true });
+    expect(new Date(changed[0].checked_at).getTime()).toBe(at.getTime());
+    expect((await repo.activeVersion('ofac-sdn'))!.checkedAt!.getTime()).toBeLessThan(Date.now() - 4 * 86_400_000);
+  });
+
+  it('no active row -> null, nothing written', async () => {
+    const repo = createSanctionsListRepo(db);
+    await repo.storeList(LIST);
+    const before = await stamps();
+    expect(await repo.touchActiveCheckedAt('in-mha-uapa', new Date())).toBeNull();
+    expect(await stamps()).toEqual(before);
   });
 });

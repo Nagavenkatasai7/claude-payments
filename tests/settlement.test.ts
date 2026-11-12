@@ -94,6 +94,8 @@ beforeEach(async () => {
   db = await freshDb();
   store = createStore(fakeRedis(), db);
   await seedPartner(db, 'acme');
+  // Fix pack 5 T20a (P0 rule 9): the sender's travel-rule data on file, ahead of the T20b/T23 gates.
+  await seedOriginatorForTest(db, 'acme', '15551230000', { address: true, dob: true });
   failAudit = false;
   senderRace.stampAfterPreRead = false;
 });
@@ -782,6 +784,7 @@ describe('settleOrHold — sender screening hold (fix pack 2 T6)', { retry: 0 },
 // these: a sequential stamp test cannot tell a locked read from a plain one.
 import { releaseHoldAfterRescreen } from '@/lib/settlement';
 import type { ComplianceResult } from '@/lib/compliance';
+import { seedOriginatorForTest } from './helpers-live';
 
 function lockOrder(qs: Array<{ sql: string }>): { tLock: number; cLock: number; claim: number } {
   const lower = qs.map((q) => q.sql.toLowerCase());

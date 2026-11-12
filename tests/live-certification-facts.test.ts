@@ -1,7 +1,8 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { fakeRedis } from './helpers';
 import { freshDb, seedPartner } from './helpers-db';
 import { certifyPartnerForTest } from './helpers-live';
+import { primeListSet, restoreOfacSource } from './helpers-sanctions';
 import { seedOnboardingComplete } from './helpers-partner-onboarding';
 import type { Db } from '@/db/client';
 import type { Staff, StaffRole } from '@/lib/types';
@@ -22,6 +23,7 @@ vi.mock('@/lib/sanctions/list-health', async (orig) => ({
 
 import { partnerGoLive } from '@/db/schema';
 import { loadLiveReadinessFacts } from '@/db/repos/live-certification-facts';
+import { liveReadiness } from '@/lib/live-certification';
 import { getAuthStore } from '@/lib/auth-store';
 import { staffMfaKeys } from '@/lib/staff-mfa-store';
 
@@ -122,5 +124,33 @@ describe('loadLiveReadinessFacts', () => {
     const f = await loadLiveReadinessFacts(db, 'nobody', new Date());
     expect(f.goLiveApproved).toBe(false);
     expect(f.complianceStaff).toEqual([]);
+  });
+});
+
+// Fix pack 5 T30 (R08, P27): under SANCTIONS_LIST=lists the certification's
+// sanctions_list line passes only when EVERY floor list is live. Driven
+// through the real list-health (the hoisted mock delegates to the original).
+describe('the sanctions_list line under lists (fix pack 5 T30)', () => {
+  const original = process.env.SANCTIONS_LIST;
+  afterEach(() => restoreOfacSource(original));
+
+  const line = async (now: Date) => {
+    const real = await vi.importActual<typeof import('@/lib/sanctions/list-health')>('@/lib/sanctions/list-health');
+    fitness.mockImplementation(real.sanctionsListFitnessNow);
+    const facts = await loadLiveReadinessFacts(db, 'pa', now);
+    const p = { id: 'pa', status: 'active', kycMode: 'ours', requireKycBeforeSend: true, liveControls: null,
+      supportConfig: null, displayName: 'Partner A', brandName: null } as unknown as Parameters<typeof liveReadiness>[0];
+    return liveReadiness(p, facts).lines.find((l) => l.id === 'sanctions_list')!;
+  };
+
+  it('under lists the sanctions_list line passes only when every floor list is live', async () => {
+    primeListSet({});
+    expect(await line(new Date())).toMatchObject({ state: 'pass', ok: true });
+    primeListSet({ checkedAgoMs: { 'in-mha-uapa': 9 * 24 * 3_600_000 } });
+    expect(await line(new Date())).toMatchObject({ state: 'fail', ok: false });
+    primeListSet({ missing: ['ofac-cons'] });
+    expect(await line(new Date())).toMatchObject({ state: 'fail', ok: false });
+    primeListSet({ checkedAgoMs: { 'un-sc': 37 * 3_600_000 } });
+    expect(await line(new Date())).toMatchObject({ state: 'fail', ok: false });
   });
 });

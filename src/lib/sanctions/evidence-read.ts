@@ -11,6 +11,11 @@
 //                       re-screen cannot re-screen (never stored) is uncovered.
 //
 // Never decrypts and never logs: evidence holds keyed hashes, never names.
+//
+// Fix pack 5 T29 (P26): a malformed lists[] (or a malformed party `unscreened`
+// flag) fails closed on the row itself, never by skipping it: the row is kept,
+// lists dropped, listFitness forced to 'not_live' (so an older live row is
+// never judged in its place).
 
 import type { DbOrTx } from '@/db/client';
 import { createAuditRepo } from '@/db/repos/aux-repos';
@@ -20,6 +25,7 @@ import {
   SANCTIONS_AUDIT_ACTION,
   type SanctionsDecision,
   type ScreeningEvidence,
+  type ScreeningEvidenceList,
   type ScreeningEvidenceParty,
 } from './evidence';
 import { LIST_CLOCK_SKEW_MS, SANCTIONS_LIST_MAX_AGE_MS, type ListFitness } from './list-policy';
@@ -32,7 +38,8 @@ const AFTER_NOW_MS = 60_000;
 const DECISIONS: readonly SanctionsDecision[] = ['clear', 'match', 'possible_match', 'list_unavailable', 'error'];
 const FITNESSES: readonly ListFitness[] = ['live', 'stale', 'not_live'];
 
-function parseParty(v: unknown): ScreeningEvidenceParty | null {
+/** A party, or null when malformed; `bad` is set when only its `unscreened` flag is malformed. */
+function parseParty(v: unknown, flags: { bad: boolean }): ScreeningEvidenceParty | null {
   if (!v || typeof v !== 'object') return null;
   const p = v as Record<string, unknown>;
   if (p.role !== 'recipient' && p.role !== 'sender') return null;
@@ -41,12 +48,40 @@ function parseParty(v: unknown): ScreeningEvidenceParty | null {
   if (p.matchedEntryId !== undefined && typeof p.matchedEntryId !== 'string') return null;
   const party: ScreeningEvidenceParty = { role: p.role, inputHash: p.inputHash, matched: p.matched, matchScore: p.matchScore };
   if (typeof p.matchedEntryId === 'string') party.matchedEntryId = p.matchedEntryId;
+  // Fix pack 5 T29: any value other than `true` is malformed: the party reads
+  // as unscreened (never as screened clear) and the row's fitness is not_live.
+  if (p.unscreened !== undefined) {
+    if (p.unscreened !== true) flags.bad = true;
+    party.unscreened = true;
+  }
   return party;
+}
+
+/** Fix pack 5 T29 (P26): lists[] item by item (whitelisted keys); 'bad' when malformed; undefined when absent. */
+function parseLists(raw: unknown): ScreeningEvidenceList[] | 'bad' | undefined {
+  if (raw === undefined) return undefined;
+  if (!Array.isArray(raw)) return 'bad';
+  const out: ScreeningEvidenceList[] = [];
+  for (const v of raw) {
+    if (!v || typeof v !== 'object') return 'bad';
+    const l = v as Record<string, unknown>;
+    if (typeof l.source !== 'string' || typeof l.version !== 'string' || typeof l.hash !== 'string') return 'bad';
+    if (!FITNESSES.includes(l.fitness as ListFitness)) return 'bad';
+    if (l.checkedAt !== undefined && typeof l.checkedAt !== 'string') return 'bad';
+    out.push({
+      source: l.source,
+      version: l.version,
+      hash: l.hash,
+      fitness: l.fitness as ListFitness,
+      ...(typeof l.checkedAt === 'string' ? { checkedAt: l.checkedAt } : {}),
+    });
+  }
+  return out;
 }
 
 /** The evidence in an audit row's meta, or null when any field has the wrong type. */
 function parseEvidence(meta: Record<string, unknown>): ScreeningEvidence | null {
-  const { listSource, listVersion, listHash, screenedAt, decision, parties, listFitness, listCheckedAt, listBaseHash } = meta;
+  const { listSource, listVersion, listHash, screenedAt, decision, parties, listFitness, listCheckedAt, listBaseHash, lists } = meta;
   if (
     typeof listSource !== 'string' ||
     typeof listVersion !== 'string' ||
@@ -61,12 +96,17 @@ function parseEvidence(meta: Record<string, unknown>): ScreeningEvidence | null 
   if (listFitness !== undefined && !FITNESSES.includes(listFitness as ListFitness)) return null;
   if (listCheckedAt !== undefined && typeof listCheckedAt !== 'string') return null;
   if (listBaseHash !== undefined && typeof listBaseHash !== 'string') return null;
+  const flags = { bad: false };
   const parsed: ScreeningEvidenceParty[] = [];
   for (const raw of parties) {
-    const p = parseParty(raw);
+    const p = parseParty(raw, flags);
     if (!p) return null;
     parsed.push(p);
   }
+  const parsedLists = parseLists(lists);
+  // Fix pack 5 T29: a malformed lists[] or unscreened flag keeps the row and fails closed on it.
+  const fitness: ListFitness | undefined =
+    parsedLists === 'bad' || flags.bad ? 'not_live' : (listFitness as ListFitness | undefined);
   return {
     listSource,
     listVersion,
@@ -74,9 +114,10 @@ function parseEvidence(meta: Record<string, unknown>): ScreeningEvidence | null 
     screenedAt,
     decision: decision as SanctionsDecision,
     parties: parsed,
-    ...(listFitness !== undefined ? { listFitness: listFitness as ListFitness } : {}),
+    ...(fitness !== undefined ? { listFitness: fitness } : {}),
     ...(typeof listCheckedAt === 'string' ? { listCheckedAt } : {}),
     ...(typeof listBaseHash === 'string' ? { listBaseHash } : {}),
+    ...(Array.isArray(parsedLists) ? { lists: parsedLists } : {}),
   };
 }
 

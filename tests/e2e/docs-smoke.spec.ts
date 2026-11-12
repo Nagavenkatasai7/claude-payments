@@ -41,6 +41,7 @@ test('a guide renders its MDX body, the code-backed blocks and gfm tables', asyn
 
   for (const [slug, text] of [
     ['webhooks', 'x-smartremit-signature'],
+    ['webhooks', 'amount_required'],
     ['whatsapp-setup', 'transfer_delivered'],
     ['idempotency', 'b2binvoice:'],
   ] as const) {

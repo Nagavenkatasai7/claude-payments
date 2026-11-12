@@ -11,7 +11,7 @@
  *    unchanged and still green).
  * The processor is never reached: fetch is stubbed.
  */
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach, onTestFinished } from 'vitest';
 import { NextRequest } from 'next/server';
 import { sql } from 'drizzle-orm';
 import { createStore } from '@/lib/store';
@@ -99,7 +99,8 @@ vi.mock('@/lib/ip-rate-limit', () => ({ enforceIpRateLimit: async () => null }))
 
 import { POST } from '@/app/api/pay/[transferId]/route';
 
-const KEY = ['sk', 'test', 'payroute', 'only'].join('_');
+// Fix pack 5 T16 (P16): only a restricted key is ever used.
+const KEY = ['rk', 'test', 'payrouteonly'].join('_');
 
 function makeTransfer(o: Partial<Transfer> & { id: string }): Transfer {
   return {
@@ -232,5 +233,63 @@ describe('pay route — Stripe async capture (flag ON)', () => {
     expect(await res.json()).toMatchObject({ ok: true, status: 'paid' });
     expect(fetchMock.mock.calls.filter(([u]) => String(u).includes('stripe.com'))).toHaveLength(0);
     expect((await store.getTransfer('s7'))?.fundingRef).toBe('mockfund-s7');
+  });
+
+  describe('fix pack 5 T16 (P16): an unrestricted Stripe key', () => {
+    const SK = ['sk', 'test', 'payroutesecret'].join('_');
+    const alerts = async () => {
+      const r = (await db.execute(
+        sql`SELECT dedupe_key, payload FROM outbox WHERE kind = 'ops.alert' AND dedupe_key LIKE 'stripekey:%' ORDER BY id`,
+      )) as unknown as { rows: Array<{ dedupe_key: string; payload: { message: string } }> };
+      return r.rows;
+    };
+
+    it('a new row: 402 payment_failed, no processor call, no intent bound, one stripekey:<partner>:<hour> alert with no key fragment; a second pay this hour adds none', async () => {
+      // Review round 2 GF1: Date frozen so both pays fall in ONE stripekey:<hour> bucket.
+      vi.useFakeTimers({ toFake: ['Date'] });
+      onTestFinished(() => {
+        vi.useRealTimers();
+      });
+      fundingConfig.value = { providerType: 'stripe', secretKey: SK, webhookSecrets: ['w'] };
+      await store.saveTransfer(makeTransfer({ id: 'k1' }));
+      const res = await post('k1');
+      expect(res.status).toBe(402);
+      expect(await res.json()).toEqual({ ok: false, error: 'payment_failed' });
+      expect(fetchMock).not.toHaveBeenCalled();
+      const t = await store.getTransfer('k1');
+      expect(t?.fundingIntentRef).toBeUndefined();
+      expect(t?.fundingRef).toBeUndefined();
+      expect(t?.status).toBe('awaiting_payment');
+      const a = await alerts();
+      expect(a).toHaveLength(1);
+      expect(a[0].dedupe_key).toMatch(/^stripekey:acme:\d+$/);
+      expect(a[0].payload.message).toContain('partner acme');
+      expect(a[0].payload.message).not.toContain('payroutesecret');
+      expect(a[0].payload.message).not.toContain(SK);
+      const again = await post('k1');
+      expect(again.status).toBe(402);
+      expect(await alerts()).toHaveLength(1);
+    });
+
+    it('a row already bound to a Stripe intent: 402, no processor call, the stripekey alert', async () => {
+      fundingConfig.value = { providerType: 'stripe', secretKey: SK, webhookSecrets: ['w'] };
+      await store.saveTransfer(makeTransfer({ id: 'k2', fundingProvider: 'stripe', fundingIntentRef: 'pi_k2', fundingState: 'pending' }));
+      const res = await post('k2');
+      expect(res.status).toBe(402);
+      expect(fetchMock).not.toHaveBeenCalled();
+      expect((await store.getTransfer('k2'))?.status).toBe('awaiting_payment');
+      expect((await alerts()).map((r) => r.dedupe_key)).toEqual([expect.stringMatching(/^stripekey:acme:\d+$/)]);
+    });
+
+    it('an empty key stays unconfigured (402) and raises no stripekey alert; a restricted key raises none', async () => {
+      fundingConfig.value = { providerType: 'stripe', secretKey: '', webhookSecrets: ['w'] };
+      await store.saveTransfer(makeTransfer({ id: 'k3' }));
+      expect((await post('k3')).status).toBe(402);
+      fetchMock.mockResolvedValue(new Response(JSON.stringify(pi('k4'))));
+      fundingConfig.value = { providerType: 'stripe', secretKey: KEY, webhookSecrets: ['w'] };
+      await store.saveTransfer(makeTransfer({ id: 'k4' }));
+      expect((await post('k4')).status).toBe(200);
+      expect(await alerts()).toHaveLength(0);
+    });
   });
 });

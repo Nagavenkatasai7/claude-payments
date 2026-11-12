@@ -113,6 +113,7 @@ import {
   recordContractAction,
   recordCounselAction,
   revokeLiveAction,
+  setFundingModeAction,
 } from '@/app/admin-dashboard/partners/go-live-actions';
 
 const REASON = 'Every readiness line was reviewed today';
@@ -142,11 +143,13 @@ const platformAdmin = async (username = 'ops-admin'): Promise<Staff> => {
 const certifyForm = (o: Record<string, string> = {}) => form({ reason: REASON, ...o });
 const contractForm = (o: Record<string, string> = {}) => form({ ref: 'MSA-ACME-2026', signedOn: today(), ...o });
 const counselForm = (o: Record<string, string> = {}) => form({ capability: 'b2b', counselRef: 'COUNSEL-B2B-1', ...o });
+const fundingForm = (o: Record<string, string> = {}) => form({ mode: 'partner_collected', ...o });
 const ALL = [
   ['certify', certifyLiveAction, certifyForm],
   ['revoke', revokeLiveAction, certifyForm],
   ['contract', recordContractAction, contractForm],
   ['counsel', recordCounselAction, counselForm],
+  ['funding', setFundingModeAction, fundingForm],
 ] as const;
 
 /** Every built line ready on 'acme' (posture, contract, two listed users, an approved provider block) and facts that pass. */
@@ -160,6 +163,8 @@ async function readyAcme(): Promise<void> {
   );
   await updateLiveControlsKey('acme', 'contract', { ref: 'MSA-1', signedOn: today(), recordedBy: 'ops-admin', recordedAt: now }, db);
   await updateLiveControlsKey('acme', 'complianceUsers', USERS, db);
+  // Fix pack 5 T17: the funding line is built; a valid record passes it.
+  await updateLiveControlsKey('acme', 'fundingMode', { mode: 'partner_collected', setBy: 'ops-admin', setAt: now }, db);
   await approveDisclosureForTest(db, 'acme');
 }
 const passingFacts = (): LiveReadinessFacts => ({
@@ -221,7 +226,7 @@ describe('platform live actions: gates', () => {
     expect(gate.calls).toEqual([]);
   });
 
-  it("'default' or an unknown id -> 'Partner not found.', nothing written (all four)", async () => {
+  it("'default' or an unknown id -> 'Partner not found.', nothing written (all five)", async () => {
     await platformAdmin();
     readinessHook.mode = 'ok';
     const before = await snapshot();
@@ -239,6 +244,9 @@ describe('platform live actions: gates', () => {
     expect(await recordContractAction('acme', contractForm({ id: 'globex', partnerId: 'globex' }))).toEqual({ ok: true });
     expect((await lcOf('acme')).contract).toMatchObject({ ref: 'MSA-ACME-2026' });
     expect((await lcOf('globex')).contract).toBeUndefined();
+    expect(await setFundingModeAction('acme', fundingForm({ id: 'globex', partnerId: 'globex' }))).toEqual({ ok: true });
+    expect((await lcOf('acme')).fundingMode).toMatchObject({ mode: 'partner_collected', setBy: 'ops-admin' });
+    expect((await lcOf('globex')).fundingMode).toBeUndefined();
   });
 
   it('no own MFA -> refused before the step-up (spy not called), nothing written', async () => {
@@ -278,6 +286,59 @@ describe('platform live actions: step-up', () => {
     expect(await recordContractAction('acme', contractForm())).toEqual({ ok: true });
     expect(await recordCounselAction('acme', counselForm({ capability: 'usdc' }))).toEqual({ ok: true });
     expect(gate.calls).toEqual(['optin.counsel', 'optin.counsel', 'live.contract', 'optin.counsel']);
+  });
+});
+
+// Fix pack 5 T17 (P17): the funding mode, platform only, a step-up on EVERY save ('funding.save').
+describe('setFundingModeAction', () => {
+  afterEach(() => {
+    delete process.env.STRIPE_FUNDING_ENABLED;
+  });
+
+  it('asks for the code even right after a step-up (always: true)', async () => {
+    gate.bypass = false;
+    await platformAdmin();
+    expect(await recordContractAction('acme', contractForm({ [STEP_UP_FIELD]: staffMfa.code }))).toEqual({ ok: true });
+    const before = await snapshot();
+    expect(isStepUpRequired(await setFundingModeAction('acme', fundingForm()))).toBe(true);
+    expect(await snapshot()).toBe(before);
+    expect(await setFundingModeAction('acme', fundingForm({ [STEP_UP_FIELD]: staffMfa.code }))).toEqual({ ok: true });
+    expect(gate.calls).toEqual(['live.contract', 'funding.save', 'funding.save']);
+  });
+
+  it("an invalid mode -> 'Choose a funding mode.' before the step-up, nothing written", async () => {
+    await platformAdmin();
+    const before = await snapshot();
+    for (const f of [form(), fundingForm({ mode: '' }), fundingForm({ mode: 'partner_pull' }), fundingForm({ mode: 'PARTNER_PSP' })]) {
+      expect(await setFundingModeAction('acme', f)).toEqual({ ok: false, error: 'Choose a funding mode.' });
+    }
+    expect(gate.calls).toEqual([]);
+    expect(await snapshot()).toBe(before);
+    expect(pokeSpy).not.toHaveBeenCalled();
+  });
+
+  it('ok -> recorded, one audit row, one poke', async () => {
+    await platformAdmin();
+    expect(await setFundingModeAction('acme', fundingForm())).toEqual({ ok: true });
+    expect((await lcOf()).fundingMode).toMatchObject({ mode: 'partner_collected', setBy: 'ops-admin' });
+    const a = await liveAudits();
+    expect(a).toHaveLength(1);
+    expect(a[0]).toMatchObject({ action: 'partner.live.funding_mode.set', actor: 'ops-admin' });
+    expect(a[0].meta).toEqual({ mode: 'partner_collected', previous: null, actorScope: 'platform' });
+    expect(pokeSpy).toHaveBeenCalledTimes(1);
+    expect(gate.calls).toEqual(['funding.save']);
+  });
+
+  it('partner_psp without Stripe funding and a restricted key -> the psp_unavailable copy, nothing written', async () => {
+    await platformAdmin();
+    process.env.STRIPE_FUNDING_ENABLED = 'true';
+    const before = await snapshot();
+    expect(await setFundingModeAction('acme', fundingForm({ mode: 'partner_psp' }))).toEqual({
+      ok: false,
+      error: 'Partner-run card payments need Stripe funding switched on and a restricted Stripe key stored first.',
+    });
+    expect(await snapshot()).toBe(before);
+    expect(pokeSpy).not.toHaveBeenCalled();
   });
 });
 

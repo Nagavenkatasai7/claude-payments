@@ -96,6 +96,8 @@ export async function screenPayee(
     sourceCountry: 'US',
     rules,
     requireLiveList: opts.realMoney === true,
+    // Fix pack 5 (R08): the destination picks the list floor under SANCTIONS_LIST=lists.
+    destinationCountry: null,
   });
   const decision = r.evidence?.decision;
   const verdict: PayeeScreenVerdict =

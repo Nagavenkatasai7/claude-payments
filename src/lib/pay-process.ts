@@ -1,7 +1,8 @@
 import { NextResponse } from 'next/server';
 import { getDb } from '@/db/client';
 import { createTransferRepo } from '@/db/repos/transfer-repo';
-import { getFundingProvider, isPendingCapture, selectFundingProvider } from './providers/funding-provider';
+import { getFundingProvider, isPendingCapture, isRestrictedStripeKey, selectFundingProvider } from './providers/funding-provider';
+import { createOutboxRepo } from '@/db/repos/outbox-repo';
 import { getPartnerIntegrationsStore } from './partner-integrations-store';
 import { pokeWorker, pokeWorkerDelayed } from './outbox';
 import { DELIVERY_DELAY_MS } from './providers/payment-provider';
@@ -10,15 +11,18 @@ import { env } from './env';
 import { checkSettlementUrl } from './settlement-url';
 import { isLiveCertified, liveRefusalForRail, realMoneyRail, settlementTargetUrl } from './live-gate';
 import { payApprovalNotRecorded, payNotAvailable, payReloadRequired, transferFunded } from './pay-not-available';
-import { settleOrHold } from './settlement';
+import { isSandbox, settleOrHold } from './settlement';
+import { railSecrets } from './partner-integrations';
 import { isPartnerPulled } from './funding-method';
 import { createPartnerRepo } from '@/db/repos/partner-repo';
 import { DEFAULT_PARTNER_ID } from './defaults';
 import { resolvePartnerDisclosure, type ResolvedDisclosure } from './partner-config';
 import { disclosureGateRefusal, disclosureMandatory, type DisclosureGateRefusal } from './pay-disclosure-gate';
 import { alertPayEvidenceUnavailable, commitPaymentEvidence, type EvidenceCommitResult, type PaymentEvidence } from './payment-evidence';
+import { payFundingRefusal } from './funding-class';
+import type { PartnerFundingConfig } from './partner-integrations';
 import type { Store } from './store';
-import type { Partner, Transfer } from './types';
+import type { Partner, PartnerId, Transfer } from './types';
 
 // pay-process — Batch B2: the shared payment steps of the two hosted pay pages,
 // MOVED unchanged out of src/app/api/pay/[transferId]/route.ts so that route and
@@ -46,7 +50,34 @@ export async function captureFunding(transfer: Transfer): Promise<void> {
   // The legacy provider is synchronous; an async (pending) shape here would be
   // a wiring error — never record it as a charge.
   if (isPendingCapture(result)) throw new Error('unexpected async capture on the legacy funding path');
-  await createTransferRepo(getDb()).setFundingRef(transfer.id, result.fundingRef);
+  // Fix pack 5 T12 (P12): getFundingProvider() is the mock (funding-provider.ts,
+  // getFundingProvider): the class comes from this column, never the ref prefix.
+  await createTransferRepo(getDb()).setFundingRef(transfer.id, result.fundingRef, 'mock');
+}
+
+/**
+ * Fix pack 5 (P16): the partner's stored Stripe key is not a restricted key
+ * (rk_live_ / rk_test_, https://docs.stripe.com/keys), so Stripe is refused
+ * for it (fail closed). One ops alert per partner per hour
+ * (`stripekey:<partnerId>:<hour>`); the text names the partner id only, never
+ * the key or any part of it. Best effort: a failed enqueue is logged by the
+ * error name and never changes the pay answer. Called from fundTransfer's
+ * refusal, the step-7 refusal (processTransferPayment) and the route
+ * pre-verify (payMoneyGateRefusal, pay-money-gate.ts).
+ */
+export async function alertUnrestrictedStripeKey(partnerId: PartnerId): Promise<void> {
+  try {
+    await createOutboxRepo(getDb()).enqueue(
+      'ops.alert',
+      {
+        message: `⚠️ SmartRemit ops: Stripe funding for partner ${partnerId} is refused: its stored Stripe key is not a restricted key (rk_live_ / rk_test_). No sender can pay by card for this partner until a restricted key is stored.`,
+      },
+      { dedupeKey: `stripekey:${partnerId}:${Math.floor(Date.now() / 3_600_000)}` },
+    );
+    pokeWorker();
+  } catch (err) {
+    logWarn('pay.stripekey-alert', err instanceof Error ? err.name : 'error', { partnerId });
+  }
 }
 
 /**
@@ -80,6 +111,7 @@ export async function fundTransfer(transfer: Transfer): Promise<'settle' | NextR
   const selection = selectFundingProvider(transfer, { enabled: env.stripeFundingEnabled, config });
   if (selection.kind === 'refused') {
     logError('pay.funding-refused', new Error(`funding refused: ${selection.reason}`), { transferId: transfer.id });
+    if (selection.reason === 'unrestricted_key') await alertUnrestrictedStripeKey(transfer.partnerId);
     return NextResponse.json({ ok: false, error: 'payment_failed' }, { status: 402 });
   }
   if (selection.kind === 'mock') {
@@ -131,10 +163,17 @@ export function refuseUnlessAwaiting(transfer: Transfer): NextResponse | null {
  *   2. rail fail-closed (a routed rail must be webhook-driven, and — fix 22 —
  *      a webhook-driven rail, routed OR owner, must carry a settlement URL
  *      that passes checkSettlementUrl)
+ *   2b. signed rail (fix pack 5 T1, P5): a non-sandbox row on a
+ *      webhook-driven rail with no current signing secret is refused (409
+ *      not_available) before any capture or evidence write
  *   3. live certification (pack 3, contract 6): an uncertified real-money
  *      rail, or the default tenant on one, is refused before any charge
  *      (409 not_available; the row stays awaiting_payment). It reads the
  *      rail type from the integrations already in hand (no second read).
+ *   3b. funding (fix pack 5 T13a, P13 step 7): a real-money payment whose
+ *      funding would be the mock (not Stripe, not a B2B partner pull, not
+ *      already Stripe-bound) is refused (409 not_available) before R18, the
+ *      evidence commit and any capture (payFundingRefusal, funding-class.ts)
  *   4. R18 provider disclosure (fix pack 4, C9/C10; b2c rows only): when the
  *      payment is MANDATORY (the owner is live-certified, or the rail is real
  *      money), the owner's provider block must be approved (else 409
@@ -235,6 +274,20 @@ export async function processTransferPayment(
     }
   }
 
+  // Fix pack 5 T1 (gate #2b, P5 / P13 step 5): never an unsigned instruction.
+  // A NON-SANDBOX row on a webhook-driven rail with no current signing secret
+  // can never be instructed (the worker refuses it: Signing secret not
+  // configured), so it is refused BEFORE any capture or evidence write with
+  // the neutral 409. A 'test' row settles on the mock rail and is never
+  // instructed (settlement.ts, isSandbox), so it still pays. Ids only.
+  if (!isSandbox(transfer) && railWebhookDriven && railSecrets(railIntegrations.payment, 'signing', new Date()).length === 0) {
+    logWarn('pay.rail-unsigned', 'webhook-driven rail has no signing secret; payment refused before capture', {
+      transferId: transfer.id,
+      railPartnerId,
+    });
+    return payNotAvailable();
+  }
+
   // Pack 3 (gate #3, contract 6): live certification, AFTER the routed-rail and
   // URL checks (their 400s come first) and BEFORE the capture. Real money is
   // judged on the rail type read above (railIntegrations), so a transient read
@@ -244,6 +297,36 @@ export async function processTransferPayment(
   if (live) {
     logWarn('pay.live-refused', 'live payment refused before capture', { transferId: transfer.id, code: live });
     return payNotAvailable();
+  }
+
+  // Fix pack 5 (gate #7, P13): no mock funding on real money. A real-money
+  // payment whose funding would be the mock (not Stripe, not a B2B partner
+  // pull, not already bound to a Stripe intent) is refused with the neutral
+  // 409 before R18 and the evidence commit: nothing is written or captured.
+  // The funding config is read only here, on real money with the flag on; a
+  // read that throws counts as no config (refuse), logged by the error name.
+  const realMoneyPay = realMoneyRail({ environment: transfer.environment, railProviderType: railProviderType ?? null });
+  if (realMoneyPay) {
+    let fundingConfig: PartnerFundingConfig | null = null;
+    if (env.stripeFundingEnabled) {
+      try {
+        fundingConfig = await getPartnerIntegrationsStore().getFundingConfig(transfer.partnerId);
+      } catch (err) {
+        logWarn('pay.funding-config', err instanceof Error ? err.name : 'error', { transferId: transfer.id });
+      }
+    }
+    if (payFundingRefusal(transfer, { realMoney: true, stripeEnabled: env.stripeFundingEnabled, config: fundingConfig })) {
+      // Fix pack 5 T16 (P16): a stored key that is not restricted is why Stripe
+      // was refused here; raise the stripekey alert before the 409.
+      if (fundingConfig?.providerType === 'stripe' && !isRestrictedStripeKey(fundingConfig.secretKey ?? '')) {
+        await alertUnrestrictedStripeKey(transfer.partnerId);
+      }
+      logWarn('pay.funding-refused', 'mock funding refused on a real-money rail', {
+        transferId: transfer.id,
+        code: 'mock_on_real_money',
+      });
+      return payNotAvailable();
+    }
   }
 
   // Fix pack 4 (gate #4, C9/C10): R18. A b2b row makes no owner read here
@@ -270,7 +353,7 @@ export async function processTransferPayment(
     }
     mandatory = disclosureMandatory({
       ownerCertified: isLiveCertified(owner),
-      realMoney: realMoneyRail({ environment: transfer.environment, railProviderType: railProviderType ?? null }),
+      realMoney: realMoneyPay,
       transferType: 'b2c',
     });
     const refusal = disclosureGateRefusal({

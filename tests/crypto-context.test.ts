@@ -57,6 +57,17 @@ describe('crypto-context pins the exact AAD strings', () => {
       ctx.conversationMessage('acme', '0b7c2f7e-1a2b-4c3d-8e9f-001122334455', 'ab'.repeat(32), 1, 2),
       `v2|k0|conversation_messages|body_enc|acme|0b7c2f7e-1a2b-4c3d-8e9f-001122334455|${'ab'.repeat(32)}|1|2`,
     ],
+    // Fix pack 5 (P3): the sealed rail message, bound to its row id, direction (1 out, 2 in) and kind.
+    [
+      'rail message out settle',
+      ctx.railMessage('0b7c2f7e-1a2b-4c3d-8e9f-001122334455', 1, 'settle'),
+      'v2|k0|rail_messages|body_enc|0b7c2f7e-1a2b-4c3d-8e9f-001122334455|1|settle',
+    ],
+    [
+      'rail message in callback',
+      ctx.railMessage('0b7c2f7e-1a2b-4c3d-8e9f-001122334455', 2, 'callback'),
+      'v2|k0|rail_messages|body_enc|0b7c2f7e-1a2b-4c3d-8e9f-001122334455|2|callback',
+    ],
   ];
   it.each(cases)('%s', (_name, c, expected) => {
     expect(aadFor(c)).toBe(expected);

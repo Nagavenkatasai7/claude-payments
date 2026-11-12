@@ -67,6 +67,14 @@ export const PAY_APPROVAL_NOT_RECORDED_FUNDED_COPY =
 // a test pins them equal.
 export const PAY_NOT_AVAILABLE_COPY = "This transfer can't be completed right now.";
 export const PAY_ACCOUNT_HOLDER_COPY = "Enter the account holder's name as it appears at the recipient's bank.";
+// Fix pack 5 (P31, R38): the sender's travel-rule fields on a real-money pay
+// page (labels, hint) and their field errors (fieldErrors.senderAddress /
+// fieldErrors.senderDob of a 400 originator_invalid), never a payErrorMessage answer.
+export const PAY_SENDER_ADDRESS_LABEL = 'Home address';
+export const PAY_SENDER_ADDRESS_HINT = 'Street, city and postcode, on one line';
+export const PAY_SENDER_DOB_LABEL = 'Date of birth';
+export const PAY_SENDER_ADDRESS_INVALID_COPY = 'Enter your home address on one line (up to 300 characters).';
+export const PAY_SENDER_DOB_INVALID_COPY = 'Enter your date of birth as YYYY-MM-DD. You must be 18 or older.';
 
 /** The specific message for a non-2xx pay response body, or null ⇒ the generic one. */
 export function payErrorMessage(body: unknown): string | null {

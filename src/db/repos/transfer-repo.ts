@@ -143,6 +143,18 @@ const partnerApiMintedSql = () =>
   sql`(EXISTS (SELECT 1 FROM ${idempotencyKeys} WHERE ${idempotencyKeys.transferId} = ${transfers.id} AND NOT (${idempotencyKeys.partnerId} = ${DEFAULT_PARTNER_ID} AND ${idempotencyKeys.key} LIKE 'draft:%') AND ${idempotencyKeys.key} NOT LIKE 'sched:%') OR EXISTS (SELECT 1 FROM ${auditEvents} WHERE ${auditEvents.subjectId} = ${transfers.id} AND ${auditEvents.action} = 'transaction.create' AND ${auditEvents.actorType} = 'api_key'))`;
 
 /**
+ * Fix pack 5 (R38, P22): the rows the travel rule's originator data does NOT
+ * apply to: B2B rows, and Partner-API-minted rows (the partner attests its own
+ * sender). A payment-link claim ('paylink:') also reads as partnerApiMintedSql,
+ * hence the AND NOT: payment links are NOT exempt, nor are pay-page drafts
+ * (claimed 'draft:' under the default tenant) or cron mints ('sched:'), pinned
+ * by tests/originator-exempt.test.ts. Shared by originatorExempt below (one
+ * SQL; pack 4's recipient-identity exemption is a different rule and stays).
+ */
+const originatorExemptSql = () =>
+  sql`(${transfers.transferType} <> 'b2c' OR (${partnerApiMintedSql()} AND NOT ${paymentLinkSql()}))`;
+
+/**
  * Program-Fix 14 PR C: columns written only when a row is created. `screening`
  * is the mint's sanctions evidence (transfers.screening, migration 0023): list
  * identity, decision and keyed input hashes, never a name. It is deliberately
@@ -150,6 +162,22 @@ const partnerApiMintedSql = () =>
  */
 export interface InsertOnlyColumns {
   screening?: ScreeningEvidence;
+}
+
+/**
+ * Fix pack 5 T4 (P7 G1): a transfer row was read, but one of its sealed
+ * columns did not open (AES-GCM authentication / AAD failure, a malformed
+ * blob, or a key-ring problem named in the cause). Ids only in the message;
+ * the original error is the `cause`.
+ */
+export class TransferDecryptError extends Error {
+  constructor(
+    readonly transferId: string,
+    opts?: { cause?: unknown },
+  ) {
+    super(`transfer_decrypt_failed:${transferId}`, opts);
+    this.name = 'TransferDecryptError';
+  }
 }
 
 export function createTransferRepo(
@@ -237,7 +265,16 @@ export function createTransferRepo(
     ): Promise<Transfer | null> {
       const where = opts.partnerId ? and(eq(transfers.id, id), eq(transfers.partnerId, opts.partnerId)) : eq(transfers.id, id);
       const rows = await db.select().from(transfers).where(where).limit(1).for('update');
-      return rows[0] ? toDomain(rows[0], opts.decrypt ?? false) : null;
+      if (!rows[0]) return null;
+      if (!opts.decrypt) return toDomain(rows[0], false);
+      // Fix pack 5 T4 (P7 G1): ONLY the decrypting map is wrapped (never the
+      // query), so the worker can tell a sealed column that does not open from
+      // a database or pool error.
+      try {
+        return toDomain(rows[0], true);
+      } catch (err) {
+        throw new TransferDecryptError(id, { cause: err });
+      }
     },
 
     /**
@@ -512,11 +549,19 @@ export function createTransferRepo(
      * settlement begins — a crash between capture and settle leaves an
      * awaiting_payment row WITH a fundingRef, which the reconcile sweep
      * resumes (the customer was charged; the transfer must never be lost).
+     *
+     * Fix pack 5 T12 (P12): `provider` stamps `funding_provider` with
+     * COALESCE in the SAME write-once UPDATE (an already-set provider is
+     * never overwritten), so the funding class is read from that column and
+     * never from the ref prefix. Old two-argument callers keep NULL.
      */
-    async setFundingRef(id: string, ref: string): Promise<void> {
+    async setFundingRef(id: string, ref: string, provider: FundingProviderId | null = null): Promise<void> {
       await db
         .update(transfers)
-        .set({ fundingRef: ref })
+        .set({
+          fundingRef: ref,
+          ...(provider ? { fundingProvider: sql`COALESCE(${transfers.fundingProvider}, ${provider})` } : {}),
+        })
         // Program-Fix 7: never on a row bound to a PSP intent — only a
         // VERIFIED PSP event (markFundingSucceeded) may record that charge.
         .where(and(eq(transfers.id, id), isNull(transfers.fundingRef), isNull(transfers.fundingIntentRef)));
@@ -532,7 +577,8 @@ export function createTransferRepo(
     async bindFundingIntent(
       id: string,
       partnerId: PartnerId,
-      provider: FundingProviderId,
+      // Fix pack 5 T12 (P12): a mock intent cannot be bound.
+      provider: 'stripe',
       intentRef: string,
     ): Promise<Transfer | null> {
       const rows = await db
@@ -1278,6 +1324,22 @@ export function createTransferRepo(
             sql`(${transfers.transferType} <> 'b2c' OR ${partnerApiMintedSql()} OR ${paymentLinkSql()})`,
           ),
         )
+        .limit(1);
+      return rows.length > 0;
+    },
+
+    /**
+     * Fix pack 5 (P22): true when this tenant's row is exempt from the travel
+     * rule's originator data (originatorExemptSql: B2B or Partner-API-minted;
+     * never a payment link, a pay-page draft or a cron mint). False for a
+     * missing row or another tenant. Read by originatorInfoMissing
+     * (src/lib/originator-info.ts), the one predicate.
+     */
+    async originatorExempt(id: string, partnerId: PartnerId): Promise<boolean> {
+      const rows = await db
+        .select({ id: transfers.id })
+        .from(transfers)
+        .where(and(eq(transfers.id, id), eq(transfers.partnerId, partnerId), originatorExemptSql()))
         .limit(1);
       return rows.length > 0;
     },

@@ -14,9 +14,9 @@ import type { Db } from '@/db/client';
 import type { Transfer } from '@/lib/types';
 import { cancelPaidBySenderLocked } from '@/lib/sender-cancel';
 import { captureQueries } from './helpers-db';
-import { certifyPartnerForTest } from './helpers-live';
+import { certifyPartnerForTest, seedOriginatorForTest } from './helpers-live';
 import { primeOfacSource, restoreOfacSource, seedLiveEvidence } from './helpers-sanctions';
-import { LIST_UNAVAILABLE_REASON, RECIPIENT_IDENTITY_MISSING_REASON } from '@/lib/compliance-config';
+import { LIST_UNAVAILABLE_REASON, ORIGINATOR_INFO_MISSING_REASON, RECIPIENT_IDENTITY_MISSING_REASON } from '@/lib/compliance-config';
 import { SANCTIONS_FUNDS_RULE, SANCTIONS_NO_PAYOUT_SENTENCE } from '@/lib/sanctions/notices';
 
 // Fix pack 2 T3: a switch that makes the resume re-screen throw (off by default).
@@ -141,6 +141,8 @@ beforeEach(async () => {
   db = await freshDb();
   store = createStore(fakeRedis(), db);
   await seedPartner(db, 'acme');
+  // Fix pack 5 T20a (P0 rule 9): the sender's travel-rule data on file, ahead of the T20b/T23 gates.
+  await seedOriginatorForTest(db, 'acme', '15551230000', { address: true, dob: true });
   stuckSnapshot.rows = null;
   rescreenThrows.value = false;
   rescreenHook.before = null;
@@ -987,6 +989,37 @@ describe('reconcileSweep — real-money resume needs a live, fresh screen (fix p
       'HELD for compliance review (in_review), not instructed: the account holder name is missing, so it cannot be released. Reject or refund it in the dashboard.',
     );
     expect(m).not.toContain('Release or reject');
+  });
+
+  // Fix pack 5 T20b (P22): a charged http row resumed with no sender address on
+  // file is held, and the alert says it cannot be released (checked after the
+  // RECIPIENT branch).
+  it('a charged http row resumed without the sender address on file is HELD and the fundhold alert says the address or date of birth is missing', async () => {
+    await rail('http');
+    await db.execute(sql`UPDATE customers SET residential_address_enc = NULL, date_of_birth_enc = NULL WHERE partner_id = 'acme' AND phone = '15551230000'`);
+    await store.saveTransfer(victim());
+    await seedLiveEvidence(db, { id: 'rc_lv1', partnerId: 'acme', recipientName: 'Anita' });
+    const r = await reconcileSweep(db);
+    expect(r.fundingResumed).toBe(1);
+    const after = await store.getTransfer('rc_lv1');
+    expect(after?.status).toBe('in_review');
+    expect(after?.complianceReasons).toEqual([ORIGINATOR_INFO_MISSING_REASON]);
+    expect((await outboxRows()).map((x) => x.dedupe_key)).not.toContain('instruct:rc_lv1');
+    const m = await message('fundhold:rc_lv1');
+    expect(m).toContain(
+      "HELD for compliance review (in_review), not instructed: the sender's address or date of birth is missing, so it cannot be released. Reject or refund it in the dashboard.",
+    );
+    expect(m).not.toContain('Release or reject');
+  });
+
+  it('a row missing both the legal name and the sender address gets the RECIPIENT text (checked first)', async () => {
+    await rail('http');
+    await db.execute(sql`UPDATE customers SET residential_address_enc = NULL WHERE partner_id = 'acme' AND phone = '15551230000'`);
+    await store.saveTransfer(victim({ recipientLegalName: undefined }));
+    await seedLiveEvidence(db, { id: 'rc_lv1', partnerId: 'acme', recipientName: 'Anita' });
+    await reconcileSweep(db);
+    expect((await store.getTransfer('rc_lv1'))?.complianceReasons).toEqual([RECIPIENT_IDENTITY_MISSING_REASON, ORIGINATOR_INFO_MISSING_REASON]);
+    expect(await message('fundhold:rc_lv1')).toContain('the account holder name is missing');
   });
 
   it('a mock rail resumes as before: no re-screen, paid', async () => {

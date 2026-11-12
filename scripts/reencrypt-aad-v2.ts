@@ -30,11 +30,14 @@ import {
   ctx,
   type CustomerEncColumn,
   type IntegrationEncColumn,
+  type RailMessageDirection,
+  type RailMessageKind,
   type RecipientEncColumn,
   type ScheduleEncColumn,
   type TransferEncColumn,
   type WaitlistEncColumn,
 } from '@/lib/crypto-context';
+import { railBodySha256 } from '@/db/repos/rail-message-repo';
 
 /** SQL type of a key column, for typed keyset cursors / key matches (default text). */
 export type KeyColumnType = 'text' | 'bigint' | 'uuid' | 'bytea' | 'smallint';
@@ -47,6 +50,12 @@ export interface ReencryptTable {
   keyTypes?: readonly KeyColumnType[];
   columns: readonly string[];
   ctxFor(key: readonly string[], column: string): CryptoContext;
+  /**
+   * Key ring only (scripts/reencrypt-key-ring.ts): a row whose check fails is
+   * counted failed and never re-sealed. `column` is read back `::text` and
+   * passed as `value` with the opened plaintext. This script (v1 -> v2) ignores it.
+   */
+  verify?: { column: string; check(plain: string, value: string): boolean };
 }
 
 // The brief's §4 Postgres columns. The context builders are THE ones the repos
@@ -102,6 +111,8 @@ export const REENCRYPT_TABLES: readonly ReencryptTable[] = [
     columns: [
       'kyc_api_key_enc', 'kyc_webhook_secret_enc', 'payment_credentials_enc', 'payment_webhook_secret_enc',
       'wa_token_enc', 'wa_verify_token_enc', 'wa_app_secret_enc',
+      // fix pack 5 T16 (P3): Program-Fix 7's sealed funding config was missing from rotation.
+      'funding_credentials_enc',
     ],
     ctxFor: ([partnerId], column) => ctx.integration(partnerId, column as IntegrationEncColumn),
   },
@@ -123,6 +134,19 @@ export const REENCRYPT_TABLES: readonly ReencryptTable[] = [
     columns: ['body_enc'],
     ctxFor: ([id, partnerId, threadKey, channel, direction]) =>
       ctx.conversationMessage(partnerId, id, threadKey.replace(/^\\x/, '').toLowerCase(), Number(channel), Number(direction)),
+  },
+  {
+    // Fix pack 5 (P3): the sealed rail record. Born v2 (the v1 pass counts 0
+    // here); registered for the key-ring rotation. The P2 trigger allows exactly
+    // this body_enc-only compare-and-set. All key parts are NOT NULL. Before a
+    // re-seal the key ring checks the opened body against body_sha256, so a
+    // swapped body is never re-sealed under the new kid.
+    table: 'rail_messages',
+    key: ['id', 'direction', 'kind'],
+    keyTypes: ['uuid', 'smallint', 'text'],
+    columns: ['body_enc'],
+    ctxFor: ([id, dir, kind]) => ctx.railMessage(id, Number(dir) as RailMessageDirection, kind as RailMessageKind),
+    verify: { column: 'body_sha256', check: (plain, sha) => railBodySha256(plain) === sha },
   },
 ];
 

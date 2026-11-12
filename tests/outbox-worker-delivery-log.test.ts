@@ -3,9 +3,10 @@ import { sql } from 'drizzle-orm';
 import { createStore } from '@/lib/store';
 import { fakeRedis } from './helpers';
 import { freshDb, seedPartner } from './helpers-db';
-import { certifyPartnerForTest } from './helpers-live';
+import { certifyPartnerForTest, seedOriginatorForTest } from './helpers-live';
 import { createOutboxRepo } from '@/db/repos/outbox-repo';
 import { createIntegrationsRepo } from '@/db/repos/integrations-repo';
+import { createIdempotencyRepo } from '@/db/repos/aux-repos';
 import { partnerWebhookDeliveries } from '@/db/schema';
 import { drainOnce, type WorkerDeps } from '@/lib/outbox-worker';
 import { EnvKeyProvider } from '@/lib/field-crypto';
@@ -92,6 +93,8 @@ beforeEach(async () => {
   await certifyPartnerForTest(db, 'acme'); // pack 3 T6: a live row on this http rail is drained
   fetchFn.mockReset();
   await store.saveTransfer(transferFixture());
+  // Fix pack 5 T20a (P0 rule 9): the sender's travel-rule data on file, ahead of the T20b/T23 gates.
+  await seedOriginatorForTest(db, 'acme', '15551230000', { address: true, dob: true });
   await createIntegrationsRepo(db, provider).saveIntegrations('acme', rail('https://rail.example/settle', 'sgn'));
 });
 
@@ -116,6 +119,9 @@ describe('settlement.instruct → partner_webhook_deliveries', { retry: 0 }, () 
     await seedPartner(db, 'railp');
     await certifyPartnerForTest(db, 'railp'); // pack 3 T6: a live row on this http rail is drained
     await store.saveTransfer({ ...transferFixture(), settlementPartnerId: 'railp' });
+    // Fix pack 5 T23 (P22, owner Q1): a non-exempt routed real-money row waits
+    // on the travel rule; a Partner-API-minted (exempt) routed row is sent.
+    await createIdempotencyRepo(db).claim('acme', 'order-dl_t1', 'dl_t1');
     await createIntegrationsRepo(db, provider).saveIntegrations('railp', rail('https://railp.example/settle', 'rsgn'));
     fetchFn.mockResolvedValue(new Response('{}', { status: 200 }));
     await outbox.enqueue('settlement.instruct', { transferId: 'dl_t1' }, { dedupeKey: 'instruct:dl_t1' });
@@ -156,6 +162,7 @@ describe('settlement.instruct → partner_webhook_deliveries', { retry: 0 }, () 
       outbox = createOutboxRepo(db);
       await seedPartner(db, 'acme');
       await certifyPartnerForTest(db, 'acme'); // pack 3 T6: a live row on this http rail is drained
+      await seedOriginatorForTest(db, 'acme', '15551230000', { address: true, dob: true }); // pack 5 T20a
       await store.saveTransfer(transferFixture());
       await createIntegrationsRepo(db, provider).saveIntegrations('acme', rail('https://rail.example/settle', 'sgn'));
       fetchFn.mockReset();

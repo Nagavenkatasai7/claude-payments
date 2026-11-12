@@ -17,6 +17,7 @@ import { GLOBAL_DEFAULTS, LIST_UNAVAILABLE_REASON } from '@/lib/compliance-confi
 import { setRailProviderType } from './helpers-sanctions';
 import { SANCTIONS_NO_PAYOUT_SENTENCE } from '@/lib/sanctions/notices';
 import type { Transfer } from '@/lib/types';
+import { seedOriginatorForTest } from './helpers-live';
 
 let db: Awaited<ReturnType<typeof freshDb>>;
 let repo: ReturnType<typeof createTransferRepo>;
@@ -53,6 +54,8 @@ beforeEach(async () => {
   db = await freshDb();
   repo = createTransferRepo(db);
   await seedPartner(db, 'acme');
+  // Fix pack 5 T20a (P0 rule 9): the sender's travel-rule data on file, ahead of the T20b/T23 gates.
+  await seedOriginatorForTest(db, 'acme', '15551234567', { address: true, dob: true });
 });
 
 describe('settleFundedTransfer', () => {

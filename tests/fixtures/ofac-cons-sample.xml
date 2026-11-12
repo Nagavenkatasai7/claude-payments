@@ -1,0 +1,95 @@
+<?xml version="1.0" standalone="yes"?>
+<!-- Fix pack 5 T26b: 4 INVENTED entries (every name, uid, program and address
+     is made up; none is a real listed party) for OFAC's CONSOLIDATED.XML
+     (non-SDN) export. Hand-built: the live file was NOT opened from the build
+     machine. Root element and namespace are the ones OFAC published for
+     CONSOLIDATED.XML (https://ofac.treasury.gov/recent-actions/20240507_44);
+     the entry, name and alias elements follow the XSD that file shares with
+     SDN.XML (the same layout as tests/fixtures/ofac-sdn-sample.xml). -->
+<sdnList xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns="https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/XML">
+  <publshInformation>
+    <Publish_Date>10/02/2026</Publish_Date>
+    <Record_Count>4</Record_Count>
+  </publshInformation>
+  <sdnEntry>
+    <uid>7101</uid>
+    <lastName>EXAMPLE PETRO TRADING COMPANY</lastName>
+    <sdnType>Entity</sdnType>
+    <programList>
+      <program>SAMPLE-SSI</program>
+    </programList>
+    <akaList>
+      <aka>
+        <uid>8101</uid>
+        <type>a.k.a.</type>
+        <category>strong</category>
+        <lastName>EXAMPLE PETRO</lastName>
+      </aka>
+      <aka>
+        <uid>8102</uid>
+        <type>a.k.a.</type>
+        <category>weak</category>
+        <lastName>EPTC</lastName>
+      </aka>
+    </akaList>
+    <addressList>
+      <address>
+        <uid>8103</uid>
+        <city>Sample Town</city>
+        <country>Exampleland</country>
+      </address>
+    </addressList>
+  </sdnEntry>
+  <sdnEntry>
+    <uid>7102</uid>
+    <firstName/>
+    <lastName>FICTIONAL MILITARY INDUSTRIES GROUP</lastName>
+    <sdnType>Entity</sdnType>
+    <programList>
+      <program>SAMPLE-CMIC</program>
+    </programList>
+    <akaList>
+      <aka>
+        <uid>8106</uid>
+        <type>a.k.a.</type>
+        <category>strong</category>
+        <lastName/>
+        <firstName></firstName>
+      </aka>
+    </akaList>
+  </sdnEntry>
+  <sdnEntry>
+    <uid>7103</uid>
+    <firstName>Placido</firstName>
+    <lastName>INVENTATO</lastName>
+    <sdnType>Individual</sdnType>
+    <programList>
+      <program>SAMPLE-PLC</program>
+    </programList>
+    <akaList>
+      <aka>
+        <uid>8104</uid>
+        <type>a.k.a.</type>
+        <category>strong</category>
+        <lastName>INVENTATI</lastName>
+        <firstName>Placid</firstName>
+      </aka>
+    </akaList>
+    <dateOfBirthList>
+      <dateOfBirthItem>
+        <uid>8105</uid>
+        <dateOfBirth>01 Jan 1970</dateOfBirth>
+        <mainEntry>true</mainEntry>
+      </dateOfBirthItem>
+    </dateOfBirthList>
+  </sdnEntry>
+  <sdnEntry>
+    <uid>7104</uid>
+    <lastName>MOCK &amp; DUMMY CAPITAL BANK</lastName>
+    <sdnType>Entity</sdnType>
+    <programList>
+      <program>SAMPLE-MBS</program>
+      <program>SAMPLE-SSI</program>
+    </programList>
+  </sdnEntry>
+</sdnList>

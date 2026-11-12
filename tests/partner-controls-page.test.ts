@@ -123,6 +123,15 @@ describe('/partner/controls: the gate', () => {
 });
 
 describe('/partner/controls: the page', () => {
+  // Fix pack 5 T17 (P17): the funding readiness line is built; it passes with a stored record.
+  it('the funding line renders pass with a fundingMode record (certified fixture) and fail without one', async () => {
+    await certifyPartnerForTest(db, 'pa');
+    await signInAs({});
+    expect(decode(await render())).toMatch(/data-line="funding" data-state="pass"/);
+    await certifyPartnerForTest(db, 'pa', { fundingMode: null });
+    expect(decode(await render())).toMatch(/data-line="funding" data-state="fail"/);
+  });
+
   it("one h1, four switch forms, the capability table, 12 readiness lines ('Not built yet' for not built)", async () => {
     await signInAs({});
     const html = decode(await render());
@@ -135,8 +144,9 @@ describe('/partner/controls: the page', () => {
     expect(html).toContain(t('partner.controls.optin.uncertifiedNote'));
     expect(count(html, 'data-testid="partner-controls-capability-form"')).toBe(0); // uncertified: nothing to approve
     expect(count(html, 'data-line=')).toBe(12);
-    expect(count(html, `data-state="not_built"`)).toBe(5);
-    expect(count(html, t('partner.live.state.notBuilt'))).toBe(5);
+    expect(count(html, `data-state="not_built"`)).toBe(4);
+    expect(count(html, t('partner.live.state.notBuilt'))).toBe(4);
+    expect(html).toMatch(/data-line="funding" data-state="fail"/); // no fundingMode record yet
     expect(html).toContain(t('partner.live.readiness.go_live'));
     expect(html).toContain(t('partner.controls.wholeWorkspace')); // the corridor select on the two money switches
   });

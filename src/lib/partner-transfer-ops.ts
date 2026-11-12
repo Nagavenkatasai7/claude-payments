@@ -101,6 +101,11 @@ export function resendEligibility(t: Pick<Transfer, 'status' | 'environment' | '
 
 // ── Issue refund ────────────────────────────────────────────────────────────
 
+/** Fix pack 5 T15 (P15): the page mirror's view of collectedOnRealMoneyFor (funding-class.ts). */
+export interface IssueRefundOptions {
+  collectedOnRealMoney?: boolean;
+}
+
 export type IssueRefundEligibility = 'ok' | 'routed' | 'sandbox' | 'wrongStatus' | 'notCharged' | 'debitNotSettled' | 'already';
 
 /**
@@ -110,15 +115,21 @@ export type IssueRefundEligibility = 'ok' | 'routed' | 'sandbox' | 'wrongStatus'
  *    there is a cross-tenant money effect, so SmartRemit handles it. Refused in EVERY status (BL-2);
  *  - sandbox: a test transfer moved no money.
  * The core's money rules are mirrored here so the page hides the button too.
+ * Fix pack 5 T15 (P15, M3): `collectedOnRealMoney` (the caller computes
+ * `!t.fundingRef && await collectedOnRealMoneyView(db, t)`: not routed, and either the settle went
+ * to the rail after go-live (review round 1 RC2 and RF1) or the row was held before its first
+ * instruction and is not demo era (final check F8, X1: heldBeforeFirstSettle)) lets a
+ * real-money partner-collected row with no fundingRef through, as the core does.
  */
 export function issueRefundEligibility(
   t: Pick<Transfer, 'status' | 'environment' | 'fundingRef' | 'fundingState' | 'refundStatus' | 'settlementPartnerId'>,
   ownerId: PartnerId,
+  o?: IssueRefundOptions,
 ): IssueRefundEligibility {
   if (t.settlementPartnerId && t.settlementPartnerId !== ownerId) return 'routed';
   if ((t.environment ?? 'live') === 'test') return 'sandbox';
   if (t.status !== 'paid' && t.status !== 'delivered') return 'wrongStatus';
-  if (!t.fundingRef) return 'notCharged';
+  if (!t.fundingRef && !o?.collectedOnRealMoney) return 'notCharged';
   if (t.fundingState && t.fundingState !== 'succeeded') return 'debitNotSettled';
   if ((t.refundStatus ?? 'none') !== 'none') return 'already';
   return 'ok';
@@ -138,12 +149,12 @@ export interface TransferOps {
  * flag (hasPermission, which is false for every finance record); support and finance never.
  * Issue refund is admin only.
  */
-export function transferOpsFor(t: Transfer, ctx: Pick<PartnerCtx, 'role' | 'staff' | 'partnerId'>): TransferOps {
+export function transferOpsFor(t: Transfer, ctx: Pick<PartnerCtx, 'role' | 'staff' | 'partnerId'>, o?: IssueRefundOptions): TransferOps {
   const ops = PARTNER_OPS.roles.includes(ctx.role);
   return {
     cancel: ops && hasPermission(ctx.staff, 'canCancel') && decideStaffCancel(t).kind === 'void',
     assign: ops && hasPermission(ctx.staff, 'canAssign'),
     resend: ops && hasPermission(ctx.staff, 'canResend') && resendEligibility(t) === 'ok',
-    refund: PARTNER_ADMIN.roles.includes(ctx.role) && issueRefundEligibility(t, ctx.partnerId) === 'ok',
+    refund: PARTNER_ADMIN.roles.includes(ctx.role) && issueRefundEligibility(t, ctx.partnerId, o) === 'ok',
   };
 }

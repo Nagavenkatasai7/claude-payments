@@ -46,17 +46,30 @@ vi.mock('@/lib/partner-integrations-store', () => ({
     }),
   }),
 }));
+// Fix pack 5 T2: the verifier logs every refusal (rail-sig.refused).
+const logWarnSpy = vi.hoisted(() => vi.fn());
+vi.mock('@/lib/log', async (orig) => {
+  const real = await orig<typeof import('@/lib/log')>();
+  return { ...real, logWarn: (...a: unknown[]) => { logWarnSpy(...a); } };
+});
 // fix 29: the v2 replay guard reads/writes Redis — an in-memory double here.
 const railRedis = vi.hoisted(() => ({ r: null as null | import('@/lib/store').RedisLike }));
 vi.mock('@/lib/redis', () => ({ getRedis: () => railRedis.r }));
 
 import { POST, isUnreachableAccount, UNREACHABLE_REASON } from '@/app/api/partner-rail/route';
 
+/** The v2 header over the raw body with SIGNING_SECRET, straight from the documented recipe. */
+function v2Header(raw: string): string {
+  const t = Math.floor(Date.now() / 1000);
+  return `t=${t},v1=${createHmac('sha256', SIGNING_SECRET).update(`${t}.${raw}`).digest('hex')}`;
+}
+
 function postInstruction(body: unknown) {
   const raw = JSON.stringify(body);
   const req = new NextRequest('http://localhost/api/partner-rail', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'x-signature': createHmac('sha256', SIGNING_SECRET).update(raw).digest('hex') },
+    // Fix pack 5 T2: a legacy-only instruction is refused, so sign with v2.
+    headers: { 'Content-Type': 'application/json', 'x-smartremit-signature': v2Header(raw) },
     body: raw,
   });
   return POST(req);
@@ -88,6 +101,7 @@ beforeEach(async () => {
   railRedis.r = fakeRedis();
   pokes.now = 0;
   pokes.delayed = [];
+  logWarnSpy.mockClear();
 });
 
 // partner-demo R4: the callback row is due in SETTLE_DELAY_MS (12 s), but the
@@ -194,6 +208,20 @@ describe('partner-rail — rail signature v2 (fix 29)', () => {
     expect(await railCallbacks()).toHaveLength(0);
   });
 
+  // Fix pack 5 T2 (P6): legacy-only is refused on the reference rail too (log, no alert).
+  it('a legacy-only instruction (valid HMAC) → 401, no callback row, no alert row, rail-sig.refused logged with reason legacy_rejected', async () => {
+    const body = settle('v2_legacy', 'HDFC0001234 123456789012');
+    const raw = JSON.stringify(body);
+    const res = await postWith(body, { 'x-signature': createHmac('sha256', SIGNING_SECRET).update(raw).digest('hex') });
+    expect(res.status).toBe(401);
+    expect(await res.json()).toEqual({ ok: false });
+    expect(await railCallbacks()).toHaveLength(0);
+    const alerts = (await db.execute(sql`SELECT count(*)::int AS n FROM outbox WHERE kind = 'ops.alert'`)) as unknown as { rows: Array<{ n: number }> };
+    expect(alerts.rows[0].n).toBe(0);
+    const refused = logWarnSpy.mock.calls.filter((c) => c[0] === 'rail-sig.refused');
+    expect(refused.map((c) => c[2])).toEqual([{ reason: 'legacy_rejected', partnerId: 'default', route: 'partner-rail' }]);
+  });
+
   it('a stale v2 timestamp → 401', async () => {
     const body = settle('v2_t4', 'HDFC0001234 123456789012');
     const raw = JSON.stringify(body);
@@ -212,9 +240,31 @@ describe('partner-rail — rail signature v2 (fix 29)', () => {
     expect(await railCallbacks()).toHaveLength(1);
   });
 
-  it('an instruction with no or a malformed amount block is still accepted; the callback simply carries no amount', async () => {
+  // Fix pack 5 T3 (P6): a callback without an amount would 422 at our webhook
+  // and dead-letter rail.callback, so the reference rail refuses such a settle.
+  it('a settle with no or a malformed amount block → 400 { ok: false, error: amount_required }, no rail.callback row', async () => {
     const { amount: _a, ...noAmount } = settle('v2_t6', 'HDFC0001234 123456789012');
-    expect((await postWith(noAmount, { 'x-smartremit-signature': '$RAW_V2' })).status).toBe(200);
-    expect((await railCallbacks())[0].payload).toEqual({ reference: 'v2_t6', partner_id: 'default' });
+    const cases: unknown[] = [
+      noAmount,
+      { ...noAmount, reference: 'v2_t6b', amount: { destination: null } },
+      { ...noAmount, reference: 'v2_t6c', amount: 'x' },
+    ];
+    for (const b of cases) {
+      const res = await postWith(b, { 'x-smartremit-signature': '$RAW_V2' });
+      expect(res.status, JSON.stringify(b)).toBe(400);
+      expect(await res.json()).toEqual({ ok: false, error: 'amount_required' });
+    }
+    expect(await railCallbacks()).toHaveLength(0);
+    expect(pokes.delayed).toEqual([]);
+  });
+
+  it('a reverse without an amount still acks (200, no callback)', async () => {
+    const res = await postWith(
+      { reference: 'reverse-v2_t7', partner_id: 'default', action: 'reverse', payout: { rail: 'bank', destination: 'x' } },
+      { 'x-smartremit-signature': '$RAW_V2' },
+    );
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ ok: true, action: 'reverse' });
+    expect(await railCallbacks()).toHaveLength(0);
   });
 });

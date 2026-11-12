@@ -51,6 +51,7 @@ import { createPartnerIntegrationsStore } from '@/lib/partner-integrations-store
 import type { PartnerIntegrations } from '@/lib/partner-integrations';
 import { t } from '@/lib/i18n';
 import WebhooksPage from '@/app/partner/(app)/integrations/webhooks/page';
+import { seedOriginatorForTest } from './helpers-live';
 
 const perms = { canCancel: false, canResend: false, canAssign: false, canRevealPii: false };
 async function signInAs(o: Partial<Staff>): Promise<void> {
@@ -92,6 +93,9 @@ beforeEach(async () => {
   await seedPartner(db, 'pb', 'Partner B');
   await createPartnerIntegrationsStore(db).saveIntegrations('pa', rail());
   await createPartnerIntegrationsStore(db).saveIntegrations('pb', rail());
+  // Fix pack 5 T20a (P0 rule 9): the sender's travel-rule data on file, ahead of the T20b/T23 gates.
+  await seedOriginatorForTest(db, 'pa', '15551230000', { address: true, dob: true });
+  await seedOriginatorForTest(db, 'pb', '15551230000', { address: true, dob: true });
 });
 
 describe('/partner/integrations/webhooks: the delivery log (M3-15b)', () => {
@@ -112,6 +116,21 @@ describe('/partner/integrations/webhooks: the delivery log (M3-15b)', () => {
     expect(html).not.toContain('>418<');
     expect(html).not.toContain('7001');
     expect(html).not.toContain(t('partner.webhooks.log.empty'));
+  });
+
+  // Fix pack 5 T10 (P31, P33): the full 64-hex body hash in a mono break-all cell.
+  it('shows each delivery\'s body hash under Body hash, and — for a row without one', async () => {
+    const shaA = 'ab'.repeat(32);
+    const shaB = 'cd'.repeat(32);
+    await delivery('pa', 1, { bodySha256: shaA });
+    await delivery('pa', 2);
+    await delivery('pb', 3, { bodySha256: shaB });
+    await signInAs({});
+    const html = await render();
+    expect(html).toContain(t('partner.webhooks.col.bodyHash'));
+    expect(html).toContain(`<dd class="font-mono text-[13.5px] break-all text-ds-ink">${shaA}</dd>`);
+    expect(html).toContain('<dd class="font-mono text-[13.5px] break-all text-ds-ink">—</dd>');
+    expect(html).not.toContain(shaB);
   });
 
   it('pages 50 at a time: Older links a strict id cursor; the next page shows the rest and a Newest link', async () => {

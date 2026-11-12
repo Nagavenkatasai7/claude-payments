@@ -14,6 +14,7 @@ import { RateUnavailableError } from '@/lib/rate';
 import { QuoteError } from '@/lib/fx';
 import { PURPOSE_LABELS } from '@/lib/purpose-codes';
 import { resolvePayableLink } from '@/lib/payment-link-finalize';
+import { readOriginatorView } from '@/lib/originator-info';
 import { getLinkQuoteStore, lockedOrFreshLinkRate } from '@/lib/payment-link-quote';
 import { LINK_FUNDING_METHODS, linkQuote, type LinkFundingMethod } from '@/lib/payment-links';
 import { DarkSheetBrand } from '@/components/brand/dark-sheet-brand';
@@ -149,6 +150,28 @@ async function renderPage(token: string): Promise<React.ReactNode> {
     }
   }
 
+  // Fix pack 5 T22 (P19, P21): whether to ask the paying customer's home
+  // address and date of birth (real money only; booleans, never a value). The
+  // link owner is its rail (never routed); a link row is never exempt. The band
+  // is the minted row's principal on a resume, else the HIGHEST principal
+  // across the ways to pay (fail safe: a method that crosses a band asks).
+  // Never read for the dead-link and "can't be made online" sheets above.
+  const originator = await readOriginatorView(getDb(), {
+    ownerId: link.partnerId,
+    railPartnerId: link.partnerId,
+    environment: transfer?.environment,
+    transferType: 'b2c',
+    subject: {
+      partnerId: link.partnerId,
+      phone: link.customerPhone,
+      amountUsd: transfer ? transfer.amountUsd : Math.max(...options.map((o) => o.amountUsd)),
+      destinationCountry: 'IN',
+      transferType: 'b2c',
+      ...(transfer ? { transferId: transfer.id } : {}),
+      routed: false,
+    },
+  });
+
   const disclosures: Partial<Record<LinkFundingMethod, React.ReactNode>> = {};
   let disclosureVersion: string | null = null;
   for (const o of options) {
@@ -194,6 +217,7 @@ async function renderPage(token: string): Promise<React.ReactNode> {
         receipt={{ payeeName: payee.legalName, reference: link.reference, amountInr: link.amountInr }}
         approvingName={payee.legalName}
         disclosureHash={disclosureConfig.hash}
+        originator={originator}
       />
     </Sheet>
   );

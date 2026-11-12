@@ -40,6 +40,20 @@ vi.mock('@/app/pay/l/[token]/link-pay-form', async (orig) => {
     },
   };
 });
+// Fix pack 5 T22 (P19): the originator view the page reads. `view.value` null = the
+// no-field view (the spec's fake db would otherwise read as an unknown rail); the
+// calls are recorded so the subject (band principal, owner, rail) is checked.
+const view = vi.hoisted(() => ({ value: null as unknown, calls: [] as unknown[] }));
+vi.mock('@/lib/originator-info', async (orig) => {
+  const real = await orig<typeof import('@/lib/originator-info')>();
+  return {
+    ...real,
+    readOriginatorView: async (_db: unknown, i: unknown) => {
+      view.calls.push(i);
+      return view.value ?? real.NO_ORIGINATOR_FIELDS;
+    },
+  };
+});
 vi.mock('next/navigation', async (orig) => ({
   ...(await orig<typeof import('next/navigation')>()),
   useRouter: () => ({ refresh: () => {} }),
@@ -67,6 +81,8 @@ beforeEach(() => {
   limited.value = false;
   owner.value = null;
   formProps.last = null;
+  view.value = null;
+  view.calls = [];
   resolvePayableLink.mockReset();
 });
 
@@ -150,5 +166,81 @@ describe('/pay/l/[token] page', () => {
     const dead = await render();
     expect(dead).toContain('This link is no longer active');
     expect(dead).not.toContain('provider-line');
+  });
+});
+
+// Fix pack 5 T22 (P19, P21): the travel-rule fields on a real-money link.
+describe('/pay/l/[token] page — the sender\'s address and date of birth (pack 5 T22)', () => {
+  const ASK_ADDRESS = { addressRequired: true, addressOnFile: false, dobRequired: false, dobOnFile: false };
+  const count = (html: string, s: string) => html.split(s).length - 1;
+
+  it('a real-money payable link with no address on file renders name="senderAddress" once and no senderDob', async () => {
+    view.value = ASK_ADDRESS;
+    resolvePayableLink.mockResolvedValue(payable());
+    const html = await render();
+    expect(count(html, 'name="senderAddress"')).toBe(1);
+    expect(html).not.toContain('name="senderDob"');
+    expect(html).toContain('Home address');
+    expect(html).toContain('Street, city and postcode, on one line');
+    expect(formProps.last?.originator).toEqual(ASK_ADDRESS);
+    // A fresh link: owner = rail = the link partner, live, the HIGHEST principal across the methods.
+    expect(view.calls).toEqual([{
+      ownerId: 'acme', railPartnerId: 'acme', environment: undefined, transferType: 'b2c',
+      subject: { partnerId: 'acme', phone: '14155550100', amountUsd: 294.12, destinationCountry: 'IN', transferType: 'b2c', routed: false },
+    }]);
+  });
+
+  it('a resumed link minted at $3,000 asks with that principal; name="senderDob" in the DOB band', async () => {
+    view.value = { addressRequired: true, addressOnFile: false, dobRequired: true, dobOnFile: false };
+    resolvePayableLink.mockResolvedValue({
+      ...payable(),
+      payability: 'resume',
+      transfer: { id: 'tx_3k', fxRate: 84, fundingMethod: 'bank_transfer', amountUsd: 3000, feeUsd: 1.99, totalChargeUsd: 3001.99, environment: 'live' },
+    } as unknown as PayableLink);
+    const html = await render();
+    expect(count(html, 'name="senderAddress"')).toBe(1);
+    expect(count(html, 'name="senderDob"')).toBe(1);
+    expect(view.calls).toEqual([{
+      ownerId: 'acme', railPartnerId: 'acme', environment: 'live', transferType: 'b2c',
+      subject: { partnerId: 'acme', phone: '14155550100', amountUsd: 3000, destinationCountry: 'IN', transferType: 'b2c', transferId: 'tx_3k', routed: false },
+    }]);
+  });
+
+  it('the fresh-link principal is the HIGHEST across the ways to pay', async () => {
+    const p = payable();
+    (p.link as { amountInr: number }).amountInr = 254_915; // 2999.00 USD at 85: inside the cap
+    resolvePayableLink.mockResolvedValue(p);
+    await render();
+    expect((view.calls[0] as { subject: { amountUsd: number } }).subject.amountUsd).toBe(2999);
+  });
+
+  it('a demo owner (the no-field view) or an address on file: no field', async () => {
+    resolvePayableLink.mockResolvedValue(payable());
+    let html = await render();
+    expect(html).not.toContain('name="senderAddress"');
+    expect(html).not.toContain('name="senderDob"');
+    view.value = { addressRequired: true, addressOnFile: true, dobRequired: true, dobOnFile: true };
+    html = await render();
+    expect(html).not.toContain('name="senderAddress"');
+    expect(html).not.toContain('name="senderDob"');
+  });
+
+  it('the dead-link sheet never reads the view and has no field', async () => {
+    view.value = ASK_ADDRESS;
+    resolvePayableLink.mockResolvedValue(null);
+    const html = await render();
+    expect(html).toContain('This link is no longer active');
+    expect(html).not.toContain('senderAddress');
+    expect(view.calls).toEqual([]);
+  });
+
+  it('the form gets booleans only: no stored value can reach the HTML', async () => {
+    view.value = ASK_ADDRESS;
+    resolvePayableLink.mockResolvedValue(payable());
+    const html = await render();
+    const props = formProps.last?.originator as Record<string, unknown>;
+    expect(Object.values(props).every((v) => typeof v === 'boolean')).toBe(true);
+    // The address input renders empty (the customer's own input only).
+    expect(html).toMatch(/<input[^>]*name="senderAddress"[^>]*value=""/);
   });
 });

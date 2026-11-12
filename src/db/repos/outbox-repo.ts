@@ -102,6 +102,13 @@ export function retryBackoffSec(kind: string, attempts: number, minBackoffSec = 
  * ceiling (retryPolicy).
  */
 export const LEASE_MS = 5 * 60_000;
+
+/**
+ * Truth check F10 (F1): the start of the row-deadline error text (the worker's RowDeadlineError
+ * builds its message from it, and markFailed stores it in last_error). hasRunningInstruction reads
+ * it to find an instruct row abandoned at its row deadline. One literal, so the two cannot drift.
+ */
+export const ROW_DEADLINE_ERROR_PREFIX = 'outbox row deadline exceeded';
 const LEASE_SEC = LEASE_MS / 1000;
 
 /** A raw `RETURNING *` outbox row → OutboxRow (claimBatch and claimReplies share it). */
@@ -651,6 +658,28 @@ export function createOutboxRepo(db: DbOrTx) {
         .select({ id: outbox.id })
         .from(outbox)
         .where(sql`${outbox.kind} = 'settlement.instruct' AND ${outbox.status} IN ('pending','processing','failed') AND (${outbox.payload} ->> 'transferId') = ${transferId}`)
+        .limit(1);
+      return rows.length > 0;
+    },
+
+    /**
+     * Fix pack 5 final check R3 (F8-D2), truth check F10 (F1): true while a settlement.instruct row
+     * for this transfer may still record and POST: it RUNS (status 'processing', whatever its
+     * lease), or it was ABANDONED at its row deadline and is still parked (status 'failed' or
+     * 'dead', last_error starting with ROW_DEADLINE_ERROR_PREFIX, next_attempt_at in the future):
+     * withRowDeadline cannot cancel its handler, which may still be running in that invocation
+     * (drainOnce parks such a row for LEASE_MS). A row that is queued or backing off for any other
+     * reason is not counted: its next run re-reads the refund under the row lock at the gate
+     * `record` and sends nothing. Ids only.
+     */
+    async hasRunningInstruction(transferId: string): Promise<boolean> {
+      const deadlineLike = `${ROW_DEADLINE_ERROR_PREFIX}%`;
+      const rows = await db
+        .select({ id: outbox.id })
+        .from(outbox)
+        .where(
+          sql`${outbox.kind} = 'settlement.instruct' AND (${outbox.payload} ->> 'transferId') = ${transferId} AND (${outbox.status} = 'processing' OR (${outbox.status} IN ('failed','dead') AND ${outbox.lastError} LIKE ${deadlineLike} AND ${outbox.nextAttemptAt} > now()))`,
+        )
         .limit(1);
       return rows.length > 0;
     },

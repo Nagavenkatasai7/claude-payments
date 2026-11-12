@@ -13,6 +13,7 @@ import { isPartnerPulled } from './funding-method';
 import { hasSenderName } from './sender-identity';
 import { createIdempotencyRepo, createRecipientRepo } from '@/db/repos/aux-repos';
 import { logWarn } from './log';
+import { writeOriginatorInfo } from './originator-info';
 import type { DbOrTx } from '@/db/client';
 import type { Store } from './store';
 import type { CustomerStore } from './customer-store';
@@ -68,10 +69,14 @@ export type FinalizeResult =
       // 'not_available' (pack 3): a live control refused the mint
       // (MintRefusedError). Nothing was minted or consumed; the claimed id
       // stays bound-but-unminted and the route answers 409 PAY_NOT_AVAILABLE.
+      // 'originator_not_recorded' (fix pack 5, P21): the sender's address or date
+      // of birth typed on the pay page could not be written. Nothing was claimed,
+      // minted or consumed; the route raises the payevidence alert and answers
+      // 503 approval_not_recorded.
       error:
         | 'expired_or_used' | 'cap' | 'blocked' | 'kyc_required' | 'fx_unavailable'
         | 'bank_details_required' | 'busy' | 'sender_name_required' | 'sends_paused' | 'reward_ended'
-        | 'not_available';
+        | 'not_available' | 'originator_not_recorded';
       transferId?: string;
       // Task 9 (review): set only on 'fx_unavailable' when the draft's stored
       // quote aged past the ceiling — a retry can never succeed (the customer
@@ -113,7 +118,8 @@ export async function finalizeDraftPayment(
   draftId: string,
   bankDetails?: BankDetails,
   // Fix pack 4 (C18): the account-holder name typed on the pay page (b2c only).
-  opts: { recipientLegalName?: string } = {},
+  // Fix pack 5 (P21): the sender's validated address / date of birth (b2c, real money only).
+  opts: { recipientLegalName?: string; originator?: { address?: string; dateOfBirth?: string } } = {},
 ): Promise<FinalizeResult> {
   const { store, customerStore, draftStore, partnerStore, monthlyVolumeStore, dailyVolumeStore, db } = stores;
 
@@ -245,6 +251,23 @@ export async function finalizeDraftPayment(
       sendGateActive(partner), resolveEffectiveSendLimits(partner, customer),
     );
     if (!ev.withinCap) return { ok: false, error: 'cap' };
+  }
+
+  // Fix pack 5 (P21, critic C4): the sender's travel-rule data the pay route
+  // validated, written set-if-unset on the OWNER's customer row resolved above,
+  // after every pre-claim gate and BEFORE the claim, so a write failure leaves
+  // the draft and its key untouched. Skipped for an already-minted draft (its
+  // replay converges). The post-mint EDD saveCustomer below keeps the values
+  // (customer-repo keep rule, P20).
+  const originator = opts.originator;
+  if (!alreadyMinted && draft.transferType !== 'b2b' && (originator?.address || originator?.dateOfBirth)) {
+    try {
+      await writeOriginatorInfo(db, { partnerId, phone: draft.senderPhone }, originator, { source: 'pay_page', routeId: draftId });
+    } catch (err) {
+      // The error NAME and the draft id only: never a value, never a driver error object.
+      logWarn('pay.finalize_originator', err instanceof Error ? err.name : 'error', { draftId });
+      return { ok: false, error: 'originator_not_recorded' };
+    }
   }
 
   // CLAIM-FIRST: bind `draft:<draftId>` to a pre-generated id before minting.

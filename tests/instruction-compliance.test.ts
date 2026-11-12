@@ -38,6 +38,9 @@ function customer(over: Partial<Customer> = {}): Customer {
 
 const FORBIDDEN_KEYS = ['payout', 'destination', 'dateOfBirth', 'date_of_birth', 'residentialAddress',
   'residential_address', 'address', 'govIdNumber', 'gov_id_number', 'email', 'dob'];
+// Fix pack 5 T23 (P10, P22): with a travel-rule requirement the originator may
+// carry `address` and `date_of_birth`; every other sensitive key stays out.
+const FORBIDDEN_KEYS_TRAVEL_RULE = FORBIDDEN_KEYS.filter((k) => k !== 'address' && k !== 'date_of_birth');
 
 function allKeys(v: unknown, out: string[] = []): string[] {
   if (Array.isArray(v)) v.forEach((x) => allKeys(x, out));
@@ -48,13 +51,13 @@ function allKeys(v: unknown, out: string[] = []): string[] {
 }
 
 describe('buildComplianceBlock (pure, Program-Fix 31)', { retry: 0 }, () => {
-  it('a cleared, verified individual: version 1, originator identity (id_last4 only), beneficiary, purpose, kyc T1, screening', () => {
+  it('a cleared, verified individual: version 2, originator identity (id_last4 only), beneficiary, purpose, kyc T1, screening', () => {
     const block = buildComplianceBlock(
       transfer({ recipientLegalName: 'Anita Legal', relationship: 'parent', purpose: 'family_support' }),
       customer(), NOW, { kycGateActive: true },
     );
     expect(block).toEqual({
-      version: 1,
+      version: 2,
       originator: {
         entity_type: 'individual', name: 'Test Sender Person', country: 'US', phone: '15550000001',
         id_type: 'passport', id_last4: '7766',
@@ -64,6 +67,8 @@ describe('buildComplianceBlock (pure, Program-Fix 31)', { retry: 0 }, () => {
       purpose_code: null,
       kyc: { status: 'verified', tier: 'T1', verified_at: daysAgo(20) },
       screening: { status: 'cleared', reasons: [], screened_at: daysAgo(1) },
+      // Fix pack 5 T12 (P14): bank_transfer, no ref, environment absent.
+      funding: { mode: 'partner_collected', provider: 'partner', reference: null, status: 'partner_confirmed', amount: 205, currency: 'USD' },
       edd_required: false,
     });
   });
@@ -76,6 +81,73 @@ describe('buildComplianceBlock (pure, Program-Fix 31)', { retry: 0 }, () => {
     for (const v of ['1980-01-02', 'Secret Lane', 'X99887766', 'emailblob', '123456789012', 'HDFC0001234']) {
       expect(raw).not.toContain(v);
     }
+  });
+
+  it('without travelRule, and with travelRule null: never DOB / address (fix pack 5 T23 keeps it)', () => {
+    for (const opts of [{ kycGateActive: true }, { kycGateActive: true, travelRule: null }]) {
+      const block = buildComplianceBlock(transfer(), customer(), NOW, opts);
+      const keys = allKeys(block);
+      for (const k of FORBIDDEN_KEYS) expect(keys).not.toContain(k);
+      const raw = JSON.stringify(block);
+      for (const v of ['1980-01-02', 'Secret Lane']) expect(raw).not.toContain(v);
+    }
+  });
+
+  describe('travel rule (fix pack 5 T23, P10/P22)', () => {
+    const ADDRESS_ONLY = { band: 'address' as const, address: true as const, dateOfBirth: false };
+    const WITH_DOB = { band: 'address_dob' as const, address: true as const, dateOfBirth: true };
+
+    it("travelRule { address only }: originator.address is the customer's address, no date_of_birth", () => {
+      const block = buildComplianceBlock(transfer(), customer(), NOW, { kycGateActive: true, travelRule: ADDRESS_ONLY });
+      expect(block.originator).toEqual({
+        entity_type: 'individual', name: 'Test Sender Person', country: 'US', phone: '15550000001',
+        id_type: 'passport', id_last4: '7766', address: '1 Secret Lane, Springfield',
+      });
+      expect(JSON.stringify(block)).not.toContain('1980-01-02');
+    });
+
+    it("travelRule with dateOfBirth: both keys, date of birth 'YYYY-MM-DD'", () => {
+      const o = buildComplianceBlock(transfer(), customer(), NOW, { kycGateActive: true, travelRule: WITH_DOB }).originator!;
+      expect(o.address).toBe('1 Secret Lane, Springfield');
+      expect(o.date_of_birth).toBe('1980-01-02');
+      expect(o.date_of_birth).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+    });
+
+    it('routed + travelRule: originator null, no address anywhere', () => {
+      const block = buildComplianceBlock(transfer({ settlementPartnerId: 'railp' }), customer(), NOW, { kycGateActive: true, travelRule: WITH_DOB });
+      expect(block.originator).toBeNull();
+      const raw = JSON.stringify(block);
+      for (const v of ['Secret Lane', '1980-01-02']) expect(raw).not.toContain(v);
+    });
+
+    it('required but the customer has none: the key is absent (G16 refuses the send)', () => {
+      const o = buildComplianceBlock(
+        transfer(), customer({ residentialAddress: undefined, dateOfBirth: undefined }), NOW, { kycGateActive: true, travelRule: WITH_DOB },
+      ).originator!;
+      expect('address' in o).toBe(false);
+      expect('date_of_birth' in o).toBe(false);
+      const none = buildComplianceBlock(transfer(), null, NOW, { travelRule: WITH_DOB }).originator!;
+      expect('address' in none).toBe(false);
+    });
+
+    it('a business sender: no customer address or DOB even with a requirement', () => {
+      const o = buildComplianceBlock(
+        transfer({ senderEntityType: 'business', senderBusinessName: 'Biz Co' } as Partial<Transfer>), customer(), NOW, { travelRule: WITH_DOB },
+      ).originator!;
+      expect('address' in o).toBe(false);
+      expect('date_of_birth' in o).toBe(false);
+    });
+
+    it("the keys 'dob', 'residential_address', 'residentialAddress', 'dateOfBirth', 'govIdNumber', 'email' are never present in any case", () => {
+      for (const travelRule of [ADDRESS_ONLY, WITH_DOB]) {
+        for (const t of [transfer(), transfer({ settlementPartnerId: 'railp' })]) {
+          const block = buildComplianceBlock(t, customer(), NOW, { kycGateActive: true, travelRule });
+          const keys = allKeys(block);
+          for (const k of FORBIDDEN_KEYS_TRAVEL_RULE) expect(keys).not.toContain(k);
+          expect(JSON.stringify(block)).not.toContain('X99887766');
+        }
+      }
+    });
   });
 
   it('display name is used for the beneficiary only when no legal name was captured', () => {
@@ -135,24 +207,49 @@ describe('buildComplianceBlock (pure, Program-Fix 31)', { retry: 0 }, () => {
     expect('routed' in buildComplianceBlock(transfer(), customer(), NOW, { kycGateActive: true })).toBe(false);
   });
 
-  it('omitOriginator (the worker fail-open path): originator null, the rest still built from the transfer', () => {
-    const block = buildComplianceBlock(transfer({ eddRequired: true, purpose: 'gift' }), null, NOW, { omitOriginator: true });
-    expect(block.originator).toBeNull();
-    expect(block.purpose).toBe('gift');
-    expect(block.edd_required).toBe(true);
-    expect('routed' in block).toBe(false);
+  it('there is no fail-open option: an unknown option key changes nothing', () => {
+    // fix pack 5 T5 (P10): the removed fail-open option is gone; a stale caller's key is
+    // ignored (spelled by concatenation so the "no fail-open option left" grep stays empty).
+    const opts = { kycGateActive: true, ['omit' + 'Originator']: true } as unknown as Parameters<typeof buildComplianceBlock>[3];
+    const block = buildComplianceBlock(transfer({ eddRequired: true, purpose: 'gift' }), customer(), NOW, opts);
+    expect(block.originator).toEqual({
+      entity_type: 'individual', name: 'Test Sender Person', country: 'US', phone: '15550000001',
+      id_type: 'passport', id_last4: '7766',
+    });
+    expect(block).toEqual(buildComplianceBlock(transfer({ eddRequired: true, purpose: 'gift' }), customer(), NOW, { kycGateActive: true }));
   });
 
   it('screening: flagged reasons pass through; fix 14 evidence adds list source/version/decision + its screenedAt', () => {
     const t = transfer({ complianceStatus: 'flagged', complianceReasons: ['Large transfer amount.'] });
     const block = buildComplianceBlock(t, customer(), NOW, {
       kycGateActive: true,
-      screening: { listSource: 'ofac-sdn', listVersion: '2026-09-01', decision: 'clear', screenedAt: daysAgo(2) },
+      screening: {
+        listSource: 'ofac-sdn', listVersion: '2026-09-01', decision: 'clear', screenedAt: daysAgo(2),
+        namesScreened: { sender: 1, recipient: 1 },
+      },
     });
     expect(block.screening).toEqual({
       status: 'flagged', reasons: ['Large transfer amount.'], screened_at: daysAgo(2),
       list_source: 'ofac-sdn', list_version: '2026-09-01', decision: 'clear',
+      names_screened: { sender: 1, recipient: 1 },
     });
+  });
+
+  it('screening.lists copies the ref items in order (fix pack 5 T29, SANCTIONS_LIST=lists only)', () => {
+    const lists = [
+      { source: 'ofac-sdn', version: '2026-09-01', fitness: 'live' as const },
+      { source: 'un-sc', version: '2026-09-02', fitness: 'stale' as const },
+      { source: 'in-mha-uapa', version: 'unavailable', fitness: 'not_live' as const },
+    ];
+    const block = buildComplianceBlock(transfer(), customer(), NOW, {
+      kycGateActive: true,
+      screening: {
+        listSource: 'lists:ofac-sdn+un-sc+in-mha-uapa', listVersion: 'unavailable', decision: 'match', screenedAt: daysAgo(1),
+        namesScreened: { sender: 1, recipient: 1 }, lists,
+      },
+    });
+    expect((block.screening as { lists?: unknown }).lists).toEqual(lists);
+    expect((block.screening as { lists?: unknown[] }).lists![0]).not.toBe(lists[0]);
   });
 
   it('screening: no evidence ⇒ list fields are OMITTED (never a guessed list name)', () => {

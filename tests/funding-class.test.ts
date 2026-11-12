@@ -1,0 +1,222 @@
+import { describe, it, expect, vi, beforeEach } from 'vitest';
+import {
+  cardRefundUnavailableFor,
+  cardRefundUnavailableView,
+  fundingClassOf,
+  fundingModeMatches,
+  heldBeforeFirstSettle,
+  isRoutedRow,
+  refundWithoutCharge,
+} from '@/lib/funding-class';
+import { sql } from 'drizzle-orm';
+import type { Db, DbOrTx } from '@/db/client';
+import { freshDb, seedPartner } from './helpers-db';
+import { certifyPartnerForTest, seedSettleRecordForTest } from './helpers-live';
+import type { FundingModeRecord } from '@/lib/live-controls';
+import type { Transfer } from '@/lib/types';
+
+// Review round 2 GE1: the rail-type read seam (no other test here reads the store).
+const rail = vi.hoisted(() => ({ type: null as string | null | undefined, calls: [] as string[] }));
+vi.mock('@/lib/live-gate', async (orig) => ({
+  ...(await orig<typeof import('@/lib/live-gate')>()),
+  readRailProviderType: async (_db: unknown, partnerId: string) => {
+    rail.calls.push(partnerId);
+    return rail.type;
+  },
+}));
+
+// Fix pack 5 T12 (P12): how the sender's money was collected, read from
+// transfers.funding_provider (and the intent / ref columns), never from the
+// 'mockfund-' prefix of a reference. Pure.
+
+const DAY = 24 * 60 * 60 * 1000;
+const daysAgo = (d: number) => new Date(Date.now() - d * DAY).toISOString();
+
+function transfer(over: Partial<Transfer> = {}): Transfer {
+  return {
+    id: 'fc_t1', phone: '15550000011', amountUsd: 200, feeUsd: 5, totalChargeUsd: 205,
+    fxRate: 83, amountInr: 16600, recipientName: 'Ani', recipientPhone: '919800000011',
+    payoutMethod: 'bank', payoutDestination: '123456789012|HDFC0001234', fundingMethod: 'bank_transfer',
+    status: 'paid', complianceStatus: 'cleared', complianceReasons: [],
+    createdAt: daysAgo(1), paidAt: daysAgo(1), partnerId: 'acme',
+    sourceCountry: 'US', sourceCurrency: 'USD', destinationCountry: 'IN', destinationCurrency: 'INR',
+    amountSource: 200, feeSource: 5, totalChargeSource: 205,
+    ...over,
+  } as Transfer;
+}
+
+describe('fundingClassOf (fix pack 5 T12, P12)', { retry: 0 }, () => {
+  it('sandbox first: a test row is sandbox whatever its provider or ref', () => {
+    expect(fundingClassOf(transfer({ environment: 'test' }))).toBe('sandbox');
+    expect(fundingClassOf(transfer({ environment: 'test', fundingProvider: 'stripe', fundingIntentRef: 'pi_1' }))).toBe('sandbox');
+    expect(fundingClassOf(transfer({ environment: 'test', fundingProvider: 'mock', fundingRef: 'mockfund-x' }))).toBe('sandbox');
+    expect(fundingClassOf(transfer({ environment: 'test', fundingMethod: 'ach_pull', transferType: 'b2b' }))).toBe('sandbox');
+  });
+
+  it('partner-pulled before any provider: ach_pull and bank_pull are partner_pull', () => {
+    expect(fundingClassOf(transfer({ fundingMethod: 'ach_pull', transferType: 'b2b' }))).toBe('partner_pull');
+    expect(fundingClassOf(transfer({ fundingMethod: 'bank_pull', transferType: 'b2b' }))).toBe('partner_pull');
+    expect(fundingClassOf(transfer({ fundingMethod: 'bank_pull', fundingRef: 'mockfund-y', environment: 'live' }))).toBe('partner_pull');
+    expect(fundingClassOf(transfer({ fundingMethod: 'ach_pull', fundingProvider: 'stripe' }))).toBe('partner_pull');
+  });
+
+  it('stripe: provider stripe, or an intent bound with the provider absent', () => {
+    expect(fundingClassOf(transfer({ fundingProvider: 'stripe' }))).toBe('stripe');
+    expect(fundingClassOf(transfer({ fundingProvider: 'stripe', fundingIntentRef: 'pi_1', fundingState: 'pending' }))).toBe('stripe');
+    expect(fundingClassOf(transfer({ fundingIntentRef: 'pi_2' }))).toBe('stripe');
+    expect(fundingClassOf(transfer({ fundingProvider: 'mock', fundingIntentRef: 'pi_3' }))).toBe('stripe');
+  });
+
+  it('mock: provider mock, or provider absent with a fundingRef (an older build charged it)', () => {
+    expect(fundingClassOf(transfer({ fundingProvider: 'mock', fundingRef: 'mockfund-fc_t1' }))).toBe('mock');
+    expect(fundingClassOf(transfer({ fundingProvider: 'mock' }))).toBe('mock');
+    expect(fundingClassOf(transfer({ fundingRef: 'mockfund-fc_t1' }))).toBe('mock');
+    expect(fundingClassOf(transfer({ fundingRef: 'mockfund-fc_t1', environment: 'live' }))).toBe('mock');
+  });
+
+  it('never the prefix: stripe with a mockfund- ref is stripe; no provider with a pi_ ref is mock', () => {
+    expect(fundingClassOf(transfer({ fundingProvider: 'stripe', fundingRef: 'mockfund-x' }))).toBe('stripe');
+    expect(fundingClassOf(transfer({ fundingRef: 'pi_123' }))).toBe('mock');
+  });
+
+  it('partner_collected: no provider, no ref, no intent (a Partner API confirm)', () => {
+    expect(fundingClassOf(transfer())).toBe('partner_collected');
+    expect(fundingClassOf(transfer({ environment: 'live', fundingMethod: 'debit_card' }))).toBe('partner_collected');
+  });
+});
+
+// Fix pack 5 T14 (P17 match rule, G14b): the OWNER's recorded funding mode.
+describe('fundingModeMatches (T14)', () => {
+  const rec = (mode: FundingModeRecord['mode']): FundingModeRecord => ({ mode, setBy: 'ops', setAt: daysAgo(1) });
+  it('partner_pull matches any record and none', () => {
+    expect(fundingModeMatches('partner_pull', undefined)).toBe(true);
+    expect(fundingModeMatches('partner_pull', rec('partner_collected'))).toBe(true);
+    expect(fundingModeMatches('partner_pull', rec('partner_psp'))).toBe(true);
+  });
+  it('stripe needs partner_psp', () => {
+    expect(fundingModeMatches('stripe', rec('partner_psp'))).toBe(true);
+    expect(fundingModeMatches('stripe', rec('partner_collected'))).toBe(false);
+  });
+  it('partner_collected needs partner_collected', () => {
+    expect(fundingModeMatches('partner_collected', rec('partner_collected'))).toBe(true);
+    expect(fundingModeMatches('partner_collected', rec('partner_psp'))).toBe(false);
+  });
+  it('a missing record mismatches every non-pull class', () => {
+    for (const c of ['stripe', 'partner_collected', 'mock', 'sandbox'] as const) expect(fundingModeMatches(c, undefined)).toBe(false);
+  });
+});
+
+// Review round 1 RF1: on a ROUTED row the owner collected the money but the
+// settlement partner's rail would get the reverse, so the class is refused there
+// until the owner decides who returns the money.
+describe('refundWithoutCharge (T15, review round 1 RF1)', { retry: 0 }, () => {
+  const pc = (over: Partial<Transfer> = {}) =>
+    ({ environment: 'live', fundingMethod: 'bank_transfer', partnerId: 'acme', ...over }) as Transfer;
+  it('true only for a real-money partner-collected row that is not routed', () => {
+    expect(refundWithoutCharge(pc(), true)).toBe(true);
+    expect(refundWithoutCharge(pc(), false)).toBe(false);
+    expect(refundWithoutCharge(pc({ fundingRef: 'mockfund-x' }), true)).toBe(false);
+  });
+  it('a routed row (settlementPartnerId set and not the owner) is refused; settlementPartnerId = the owner is not routed', () => {
+    expect(refundWithoutCharge(pc({ settlementPartnerId: 'railp' }), true)).toBe(false);
+    expect(refundWithoutCharge(pc({ settlementPartnerId: 'acme' }), true)).toBe(true);
+    expect(isRoutedRow(pc({ settlementPartnerId: 'railp' }))).toBe(true);
+    expect(isRoutedRow(pc({ settlementPartnerId: 'acme' }))).toBe(false);
+    expect(isRoutedRow(pc())).toBe(false);
+  });
+});
+
+describe('cardRefundUnavailableFor / cardRefundUnavailableView (review round 2 GE1)', () => {
+  const db = {} as DbOrTx;
+  const row = (o: Partial<Transfer> = {}) =>
+    ({ id: 'cr1', environment: 'live', fundingMethod: 'debit_card', fundingProvider: 'stripe', fundingRef: 'pi_1', partnerId: 'acme', settlementPartnerId: undefined, ...o }) as Transfer;
+  beforeEach(() => {
+    rail.type = null;
+    rail.calls = [];
+  });
+
+  it('a stripe-class row on an http rail -> true; on a simulator or absent rail -> false', async () => {
+    rail.type = 'http';
+    expect(await cardRefundUnavailableFor(db, row())).toBe(true);
+    expect(await cardRefundUnavailableFor(db, row({ fundingProvider: undefined, fundingRef: undefined, fundingIntentRef: 'pi_2' }))).toBe(true);
+    rail.type = 'simulator';
+    expect(await cardRefundUnavailableFor(db, row())).toBe(false);
+    rail.type = null;
+    expect(await cardRefundUnavailableFor(db, row())).toBe(false);
+  });
+
+  it('the rail read is the settlement partner\'s, and only for a stripe-class row', async () => {
+    rail.type = 'http';
+    await cardRefundUnavailableFor(db, row({ settlementPartnerId: 'railp' }));
+    expect(rail.calls).toEqual(['railp']);
+    for (const o of [{ fundingProvider: 'mock' as const, fundingRef: 'mockfund-x' }, { environment: 'test' as const }, { fundingProvider: undefined, fundingRef: undefined }]) {
+      expect(await cardRefundUnavailableFor(db, row(o))).toBe(false);
+    }
+    expect(rail.calls).toEqual(['railp']);
+  });
+
+  it('a failed rail read throws in the core and hides the button in the view', async () => {
+    rail.type = undefined;
+    await expect(cardRefundUnavailableFor(db, row())).rejects.toThrow('rail_read_failed');
+    expect(await cardRefundUnavailableView(db, row())).toBe(true);
+  });
+});
+
+// Final check F8 (X1, U1): a real-money partner-collected row that a gate held
+// BEFORE its first instruction has no settle record, yet the partner holds the
+// sender's money. heldBeforeFirstSettle tells it from a demo-era row: no settle
+// record at all, and NOT (paidAt and the rail's go-live are both known and
+// paidAt is older). A row with a settle record is never held. A failed read throws.
+describe('heldBeforeFirstSettle (final check F8, X1 U1)', { retry: 0 }, () => {
+  let db: Db;
+  const ID = 'hb_1';
+  const row = (o: Partial<Transfer> = {}) =>
+    ({ id: ID, partnerId: 'acme', settlementPartnerId: undefined, paidAt: new Date(Date.now() - 1_000).toISOString(), ...o }) as Transfer;
+  beforeEach(async () => {
+    db = await freshDb();
+    await seedPartner(db, 'acme');
+  });
+
+  it('no settle record, paidAt after the go-live -> true', async () => {
+    await certifyPartnerForTest(db, 'acme'); // go-live a minute ago
+    expect(await heldBeforeFirstSettle(db, row())).toBe(true);
+  });
+  it('no settle record, paidAt before the go-live (demo era) -> false', async () => {
+    await certifyPartnerForTest(db, 'acme');
+    expect(await heldBeforeFirstSettle(db, row({ paidAt: new Date(Date.now() - 3_600_000).toISOString() }))).toBe(false);
+  });
+  it('no settle record, no paidAt -> true (the careful side)', async () => {
+    await certifyPartnerForTest(db, 'acme');
+    expect(await heldBeforeFirstSettle(db, row({ paidAt: undefined }))).toBe(true);
+  });
+  it('no settle record, no go-live on record -> true (the careful side)', async () => {
+    expect(await heldBeforeFirstSettle(db, row({ paidAt: new Date(Date.now() - 3_600_000).toISOString() }))).toBe(true);
+  });
+  it('a settle record (live or demo era) -> false', async () => {
+    await certifyPartnerForTest(db, 'acme');
+    await seedSettleRecordForTest(db, { transferId: ID, partnerId: 'acme' });
+    expect(await heldBeforeFirstSettle(db, row())).toBe(false);
+    await freshDb();
+    await seedPartner(db, 'acme');
+    await certifyPartnerForTest(db, 'acme');
+    await seedSettleRecordForTest(db, { transferId: ID, partnerId: 'acme', agoMs: 2 * 3_600_000 });
+    expect(await heldBeforeFirstSettle(db, row())).toBe(false);
+  });
+  it("the rail partner's record counts (a routed row), another rail's does not", async () => {
+    await seedPartner(db, 'railp');
+    await certifyPartnerForTest(db, 'railp');
+    await seedSettleRecordForTest(db, { transferId: ID, partnerId: 'acme', railPartnerId: 'acme' });
+    expect(await heldBeforeFirstSettle(db, row({ settlementPartnerId: 'railp' }))).toBe(true);
+    await seedSettleRecordForTest(db, { transferId: ID, partnerId: 'acme', railPartnerId: 'railp' });
+    expect(await heldBeforeFirstSettle(db, row({ settlementPartnerId: 'railp' }))).toBe(false);
+  });
+  it('a failed read throws (never true, never false)', async () => {
+    await certifyPartnerForTest(db, 'acme');
+    await db.execute(sql`ALTER TABLE rail_messages RENAME TO rail_messages_gone`);
+    try {
+      await expect(heldBeforeFirstSettle(db, row())).rejects.toThrow();
+    } finally {
+      await db.execute(sql`ALTER TABLE rail_messages_gone RENAME TO rail_messages`);
+    }
+  });
+});

@@ -56,6 +56,13 @@ vi.mock('@/lib/limiter-alert', () => ({ raiseLimiterDownAlert }));
 // Fix pack 4 (T11): `editable.value` lets a case make the row payout-editable;
 // like the repo's payoutEditable it is never true for a b2b row.
 const editable = vi.hoisted(() => ({ value: false }));
+// Fix pack 5 T32 (sweep): the fake db cannot answer the originator view (the transfer-repo mock
+// has no originatorExempt, so the real view fell into its read-error branch with a TypeError).
+// These cases are not about the travel rule: the page gets NO_ORIGINATOR_FIELDS.
+vi.mock('@/lib/originator-info', async (orig) => {
+  const real = await orig<typeof import('@/lib/originator-info')>();
+  return { ...real, readOriginatorView: async () => real.NO_ORIGINATOR_FIELDS };
+});
 vi.mock('@/db/repos/transfer-repo', () => ({
   createTransferRepo: () => ({
     isPayoutEditable: async () => editable.value && current.transferType !== 'b2b',

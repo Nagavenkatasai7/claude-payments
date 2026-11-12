@@ -1033,11 +1033,41 @@ export const partnerWebhookDeliveries = pgTable(
     httpStatus: integer('http_status'),
     latencyMs: integer('latency_ms'),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    bodySha256: text('body_sha256'), // fix pack 5 (0039): hex sha256 of the exact instruction bytes; NULL on older rows and pings
   },
   (t) => [
     check('partner_webhook_deliveries_kind', sql`${t.kind} IN ('settlement.instruct','ping')`),
     check('partner_webhook_deliveries_outcome', sql`${t.outcome} IN ('ok','http_error','network','refused')`),
     index('partner_webhook_deliveries_partner_created').on(t.partnerId, t.createdAt.desc()),
+  ],
+);
+
+// ── Fix pack 5 (0039, R40): the rail record ──────────────────────────────────
+// APPEND-ONLY in the database (trigger rail_messages_append_only: no DELETE;
+// UPDATE only a body_enc-only re-seal). partner_id = the transfer OWNER (NULL
+// for a verified callback whose transfer cannot be resolved); rail_partner_id =
+// the rail; transfer_id has no FK. id is generated in the app (the AAD binds
+// it). Never logged.
+export const railMessages = pgTable(
+  'rail_messages',
+  {
+    id: uuid('id').primaryKey(),
+    partnerId: text('partner_id').references(() => partners.id),
+    railPartnerId: text('rail_partner_id').references(() => partners.id),
+    transferId: text('transfer_id'),
+    direction: smallint('direction').notNull(), // 1 out, 2 in
+    kind: text('kind').notNull(), // 'settle' | 'reverse' | 'callback'
+    bodyEnc: text('body_enc').notNull(), // ENCRYPTED (exact bytes sent or received, ctx.railMessage, T8)
+    bodySha256: text('body_sha256').notNull(), // lowercase hex sha256 of the exact UTF-8 bytes
+    signatureHeader: text('signature_header'), // the x-smartremit-signature value sent/received
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check('rail_messages_direction', sql`${t.direction} IN (1, 2)`),
+    check('rail_messages_kind', sql`${t.kind} IN ('settle','reverse','callback')`),
+    check('rail_messages_sha', sql`${t.bodySha256} ~ '^[0-9a-f]{64}$'`),
+    index('rail_messages_transfer').on(t.transferId, t.createdAt),
+    index('rail_messages_partner_created').on(t.partnerId, t.createdAt.desc()),
   ],
 );
 

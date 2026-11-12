@@ -3,13 +3,13 @@ import { createHmac } from 'node:crypto';
 import { createStore } from '@/lib/store';
 import { fakeRedis } from './helpers';
 import { captureQueries, freshDb, seedPartner, seedSender } from './helpers-db';
-import { certifyPartnerForTest } from './helpers-live';
+import { certifyPartnerForTest, seedOriginatorForTest } from './helpers-live';
 import { sql } from 'drizzle-orm';
 import { createOutboxRepo, MAX_ATTEMPTS, LEASE_MS, INSTRUCT_MAX_ATTEMPTS } from '@/db/repos/outbox-repo';
 import { createIntegrationsRepo } from '@/db/repos/integrations-repo';
 import { createTransferRepo } from '@/db/repos/transfer-repo';
 import { createPartnerRepo } from '@/db/repos/partner-repo';
-import { createAuditRepo } from '@/db/repos/aux-repos';
+import { createAuditRepo, createIdempotencyRepo } from '@/db/repos/aux-repos';
 import { CARD_MARKER, conversationMessageId, createConversationLogRepo } from '@/db/repos/conversation-log-repo';
 import { drainOnce, OPS_ALERT_TEXT_PREFIX, RAILFAIL_ALERT_MIN_ATTEMPT, ROW_DEADLINE_MS, type WorkerDeps } from '@/lib/outbox-worker';
 import { FALLBACK_REPLY } from '@/lib/agent-fallback';
@@ -52,9 +52,11 @@ vi.mock('@/db/repos/integrations-repo', async (orig) => {
 });
 
 // Program-Fix 31 PR B: a pass-through customer repo whose getCustomer can be
-// made to throw, proving the compliance block fails OPEN (the instruction
-// still goes out, originator null) and never dead-letters settlement.instruct.
-const customerRepoFault = vi.hoisted(() => ({ throwOnGet: false }));
+// made to throw. Fix pack 5 T5 (P10): the block now fails CLOSED: a
+// non-transient throw dead-letters the instruct at once, a driver-shaped
+// (transient) one is a charged retry; nothing is POSTed without the block.
+// Review round 1 (RA2): `error` makes getCustomer throw that exact error.
+const customerRepoFault = vi.hoisted(() => ({ throwOnGet: false, transient: false, error: null as Error | null }));
 vi.mock('@/db/repos/customer-repo', async (orig) => {
   const real = await orig<typeof import('@/db/repos/customer-repo')>();
   return {
@@ -64,6 +66,8 @@ vi.mock('@/db/repos/customer-repo', async (orig) => {
       return {
         ...repo,
         getCustomer: async (...a: Parameters<typeof repo.getCustomer>) => {
+          if (customerRepoFault.error) throw customerRepoFault.error;
+          if (customerRepoFault.transient) throw Object.assign(new Error('connection reset'), { code: '08006', severity: 'ERROR' });
           if (customerRepoFault.throwOnGet) throw new Error('decrypt failed for 15551230000');
           return repo.getCustomer(...a);
         },
@@ -125,6 +129,10 @@ beforeEach(async () => {
 });
 
 describe('drainOnce — settlement.instruct (the real-rail outbound leg)', { retry: 0 }, () => {
+  // Fix pack 5 T20a (P0 rule 9): the sender's travel-rule data on file, ahead of the T20b/T23 gates.
+  beforeEach(async () => {
+    await seedOriginatorForTest(db, 'acme', '15551230000', { address: true, dob: true });
+  });
   // Fix pack 2 T10: only an 'http' rail POSTs to its stored URL (a simulator
   // goes to the hosted rail), so the external-URL fixtures here are http rails.
   beforeEach(async () => {
@@ -401,6 +409,8 @@ describe('drainOnce — settlement.instruct compliance block (Program-Fix 31)', 
   const SENDER_NAME = 'Test Sender Person';
   beforeEach(async () => {
     customerRepoFault.throwOnGet = false;
+    customerRepoFault.transient = false;
+    customerRepoFault.error = null;
     await store.saveTransfer({ ...transferFixture(), recipientLegalName: 'Anita Legal', purpose: 'family_support' });
     const { createCustomerRepo } = await import('@/db/repos/customer-repo');
     // Seeded under the OWNER ('acme') with the default key provider — the
@@ -424,9 +434,11 @@ describe('drainOnce — settlement.instruct compliance block (Program-Fix 31)', 
   });
   afterEach(() => {
     customerRepoFault.throwOnGet = false;
+    customerRepoFault.transient = false;
+    customerRepoFault.error = null;
   });
 
-  it('the POSTed body = every legacy key unchanged + compliance v1 with the OWNER-keyed originator; x-signature verifies over the final body', async () => {
+  it('the POSTed body = every legacy key unchanged + compliance v2 with the OWNER-keyed originator; x-signature verifies over the final body', async () => {
     fetchFn.mockResolvedValue({ ok: true, json: async () => ({ providerRef: 'rail-c1' }) });
     await outbox.enqueue('settlement.instruct', { transferId: 'wk_t1' }, { dedupeKey: 'instruct:wk_t1' });
     expect((await drainOnce(deps(), 'w1')).processed).toBe(1);
@@ -439,15 +451,19 @@ describe('drainOnce — settlement.instruct compliance block (Program-Fix 31)', 
     const { compliance, ...legacy } = body;
     expect(legacy).toEqual(JSON.parse(JSON.stringify({ ...buildSettlementInstruction(decrypted!), partner_id: 'acme' })));
     expect(Object.keys(body).at(-1)).toBe('compliance');
-    expect(compliance.version).toBe(1);
+    expect(compliance.version).toBe(2);
+    // Fix pack 5 T23 (P10, P22): acme's http rail is real money and the row is
+    // under $1,000 to IN, so the travel rule sends the address (no DOB).
     expect(compliance.originator).toEqual({
       entity_type: 'individual', name: SENDER_NAME, country: 'US', phone: '15551230000',
-      id_type: 'passport', id_last4: '7766',
+      id_type: 'passport', id_last4: '7766', address: '1 Secret Lane',
     });
     expect(compliance.beneficiary).toMatchObject({ name: 'Anita Legal' });
     expect(compliance.kyc).toMatchObject({ status: 'verified', tier: 'T1' });
     expect(compliance.purpose_code).toBeNull();
-    for (const v of ['1980-01-02', 'Secret Lane', 'X99887766']) expect(raw).not.toContain(v);
+    for (const v of ['1980-01-02', 'X99887766']) expect(raw).not.toContain(v);
+    // 'Secret Lane' appears only as compliance.originator.address.
+    expect(raw.split('Secret Lane').length - 1).toBe(1);
     expect((init.headers as Record<string, string>)['x-signature']).toBe(createHmac('sha256', 'sgn').update(raw).digest('hex'));
     expect((await store.getTransfer('wk_t1'))!.paymentProviderRef).toBe('rail-c1');
   });
@@ -471,6 +487,7 @@ describe('drainOnce — settlement.instruct compliance block (Program-Fix 31)', 
     expect(screening).toMatchObject({
       status: 'cleared', list_source: 'mock-watchlist', list_version: 'v-test', decision: 'clear',
       screened_at: '2026-06-09T00:00:00.000Z',
+      names_screened: { sender: 0, recipient: 1 },
     });
     expect(raw).not.toContain('f'.repeat(64));
     expect(raw).not.toContain('h'.repeat(64));
@@ -484,25 +501,36 @@ describe('drainOnce — settlement.instruct compliance block (Program-Fix 31)', 
     expect(Object.keys(body.compliance.screening).sort()).toEqual(['reasons', 'screened_at', 'status']);
   });
 
-  it('FAIL-OPEN: getCustomer throws ⇒ the instruction is STILL POSTed (originator null), the row is done, a warn names the transfer id only', async () => {
+  const instructRow = async () =>
+    ((await db.execute(sql`SELECT id, status, attempts, last_error FROM outbox WHERE dedupe_key = 'instruct:wk_t1'`)) as unknown as {
+      rows: Array<{ id: number; status: string; attempts: number; last_error: string | null }>;
+    }).rows[0];
+  const opsAlerts = async () =>
+    ((await db.execute(sql`SELECT dedupe_key, payload FROM outbox WHERE kind = 'ops.alert' ORDER BY id`)) as unknown as {
+      rows: Array<{ dedupe_key: string; payload: { message?: string } }>;
+    }).rows;
+
+  it('FAIL CLOSED: getCustomer throws a non-transient error => NOTHING is POSTed, the row is dead at once with one dead:<id> alert that says terminal (compliance_block); the warn names the transfer id only, never the phone or the error text', async () => {
     customerRepoFault.throwOnGet = true;
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     try {
       fetchFn.mockResolvedValue({ ok: true, json: async () => ({ providerRef: 'rail-c4' }) });
       await outbox.enqueue('settlement.instruct', { transferId: 'wk_t1' }, { dedupeKey: 'instruct:wk_t1' });
       const r = await drainOnce(deps(), 'w1');
-      expect(r.processed).toBe(1);
-      expect(r.failed).toBe(0);
-      expect(fetchFn).toHaveBeenCalledTimes(1);
-      const raw = String((fetchFn.mock.calls[0] as [string, RequestInit])[1].body);
-      const body = JSON.parse(raw) as { reference: string; compliance: Record<string, unknown> };
-      expect(body.reference).toBe('wk_t1');
-      expect(body.compliance.version).toBe(1);
-      expect(body.compliance.originator).toBeNull();
-      expect(raw).not.toContain(SENDER_NAME);
-      const rows = (await db.execute(sql`SELECT status FROM outbox WHERE dedupe_key = 'instruct:wk_t1'`)) as unknown as { rows: Array<{ status: string }> };
-      expect(rows.rows[0].status).toBe('done');
-      const lines = warn.mock.calls.map((c) => String(c[0])).filter((l) => l.includes('instruct.compliance_block'));
+      expect(r).toMatchObject({ processed: 0, dead: 1 });
+      expect(fetchFn).not.toHaveBeenCalled();
+      // DEVIATIONS T4: markFailed keeps the attempts actually spent (1), status dead.
+      const row = await instructRow();
+      expect(row).toMatchObject({ status: 'dead', attempts: 1, last_error: 'instruct_permanent:compliance_block:wk_t1' });
+      const alerts = await opsAlerts();
+      expect(alerts.map((a) => a.dedupe_key)).toEqual([`dead:${row.id}`]);
+      const text = JSON.stringify(alerts[0].payload);
+      expect(text).toContain('terminal');
+      expect(text).toContain('compliance_block');
+      expect(text).not.toContain('15551230000');
+      expect(text).not.toContain('decrypt failed');
+      expect((await store.getTransfer('wk_t1'))!.paymentProviderRef).toBeFalsy();
+      const lines = warn.mock.calls.map((c) => c.map(String).join(' ')).filter((l) => l.includes('instruct.compliance_block'));
       expect(lines).toHaveLength(1);
       expect(lines[0]).toContain('wk_t1');
       expect(lines[0]).not.toContain('15551230000');
@@ -512,10 +540,78 @@ describe('drainOnce — settlement.instruct compliance block (Program-Fix 31)', 
     }
   });
 
+  it('a transient customer read error => no POST, charged retry (failed, attempts 1), no dead alert', async () => {
+    customerRepoFault.transient = true;
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      fetchFn.mockResolvedValue({ ok: true, json: async () => ({ providerRef: 'rail-c6' }) });
+      await outbox.enqueue('settlement.instruct', { transferId: 'wk_t1' }, { dedupeKey: 'instruct:wk_t1' });
+      const r = await drainOnce(deps(), 'w1');
+      expect(r).toMatchObject({ failed: 1, dead: 0 });
+      expect(fetchFn).not.toHaveBeenCalled();
+      expect(await instructRow()).toMatchObject({ status: 'failed', attempts: 1, last_error: 'compliance_block_unavailable:wk_t1' });
+      expect((await opsAlerts()).some((a) => a.dedupe_key.startsWith('dead:'))).toBe(false);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  // Review round 1 (RA2, owner Q8): a key-ring misconfiguration heals when the
+  // env is fixed, so at G15 it is TRANSIENT (charged retry), never dead.
+  for (const [label, mk] of [
+    ['the error itself', () => new Error('field-crypto: unknown key id')],
+    ['a wrapper whose cause carries it', () => new Error('customer read failed', { cause: new Error('field-crypto: unknown key id') })],
+  ] as Array<[string, () => Error]>) {
+    it(`a key-configuration error at G15 (${label}) => no POST, charged retry (failed, attempts 1), not dead, no dead alert`, async () => {
+      customerRepoFault.error = mk();
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      try {
+        fetchFn.mockResolvedValue({ ok: true, json: async () => ({ providerRef: 'rail-c7' }) });
+        await outbox.enqueue('settlement.instruct', { transferId: 'wk_t1' }, { dedupeKey: 'instruct:wk_t1' });
+        const r = await drainOnce(deps(), 'w1');
+        expect(r).toMatchObject({ failed: 1, dead: 0 });
+        expect(fetchFn).not.toHaveBeenCalled();
+        expect(await instructRow()).toMatchObject({ status: 'failed', attempts: 1, last_error: 'compliance_block_unavailable:wk_t1' });
+        expect((await opsAlerts()).some((a) => a.dedupe_key.startsWith('dead:'))).toBe(false);
+        expect((await store.getTransfer('wk_t1'))!.paymentProviderRef).toBeFalsy();
+      } finally {
+        warn.mockRestore();
+      }
+    });
+  }
+
+  it('ROUTED (non-exempt, real money): deferred by the travel rule (owner Q1, fix pack 5 T23), no POST, one travelrule:<id> with no sender data', async () => {
+    await seedPartner(db, 'railp');
+    await certifyPartnerForTest(db, 'railp');
+    await store.saveTransfer({ ...transferFixture(), settlementPartnerId: 'railp' });
+    await createIntegrationsRepo(db, provider).saveIntegrations('railp', {
+      kyc: {},
+      payment: {
+        providerType: 'http',
+        credentials: { settlementUrl: 'https://railp.example/settle', signingSecret: 'railp_sgn' },
+        webhookSecret: 'railp_whk',
+      },
+      whatsapp: {},
+    });
+    await outbox.enqueue('settlement.instruct', { transferId: 'wk_t1' }, { dedupeKey: 'instruct:wk_t1' });
+    const r = await drainOnce(deps(), 'w1');
+    expect(r).toMatchObject({ failed: 0, dead: 0 });
+    expect(fetchFn).not.toHaveBeenCalled();
+    const a = (await opsAlerts()).filter((x) => x.dedupe_key.startsWith('travelrule:'));
+    expect(a.map((x) => x.dedupe_key)).toEqual(['travelrule:wk_t1']);
+    const st = (await db.execute(sql`SELECT status, attempts FROM outbox WHERE dedupe_key = 'instruct:wk_t1'`)) as unknown as {
+      rows: Array<{ status: string; attempts: number }>;
+    };
+    expect(st.rows[0]).toEqual({ status: 'pending', attempts: 0 });
+  });
+
   it('ROUTED: the rail partner gets originator null + routed true, the kyc status still read under the OWNER, and no sender name or phone anywhere in the body', async () => {
     await seedPartner(db, 'railp');
     await certifyPartnerForTest(db, 'railp'); // pack 3 T6: a live row on this http rail is drained
     await store.saveTransfer({ ...transferFixture(), settlementPartnerId: 'railp' });
+    // Fix pack 5 T23 (P22, owner Q1): a non-exempt routed real-money row waits
+    // (case above); a Partner-API-minted (exempt) routed row is still sent.
+    await createIdempotencyRepo(db).claim('acme', 'order-wk_t1', 'wk_t1');
     await createIntegrationsRepo(db, provider).saveIntegrations('railp', {
       kyc: {},
       payment: {
@@ -548,6 +644,10 @@ describe('drainOnce — settlement.instruct (ROUTED via settlementPartnerId)', (
     await seedPartner(db, 'railp');
     await certifyPartnerForTest(db, 'railp'); // pack 3 T6: a live row on this http rail is drained
     await store.saveTransfer({ ...transferFixture(), settlementPartnerId: 'railp' });
+    // Fix pack 5 T23 (P22, owner Q1): a non-exempt routed real-money row waits
+    // on the travel rule; these routing cases use a Partner-API-minted
+    // (exempt) row, which is still sent.
+    await createIdempotencyRepo(db).claim('acme', 'order-wk_t1', 'wk_t1');
     const repo = createIntegrationsRepo(db, provider);
     await repo.saveIntegrations('acme', {
       kyc: {},
@@ -1289,6 +1389,10 @@ describe('drainOnce — funding.refund (the money-back leg)', () => {
 // Program-Fix 8: no re-instruct after a rail failure, and the partner-pulled
 // reverse from a rail-failed row.
 describe('drainOnce — after a rail failure (fix 8)', () => {
+  // Fix pack 5 T20a (P0 rule 9): the sender's travel-rule data on file, ahead of the T20b/T23 gates.
+  beforeEach(async () => {
+    await seedOriginatorForTest(db, 'acme', '15551230000', { address: true, dob: true });
+  });
   beforeEach(async () => {
     await createIntegrationsRepo(db, provider).saveIntegrations('acme', {
       kyc: {},
@@ -1405,6 +1509,10 @@ describe('drainOnce — funding.refund on a B2B ach_pull (NON-CUSTODIAL partner 
 });
 
 describe('drainOnce — settlement URL fails CLOSED (Program-Fix 22, acceptance tests 7 and 9)', () => {
+  // Fix pack 5 T20a (P0 rule 9): the sender's travel-rule data on file, ahead of the T20b/T23 gates.
+  beforeEach(async () => {
+    await seedOriginatorForTest(db, 'acme', '15551230000', { address: true, dob: true });
+  });
   const lastError = async (kind: string) =>
     ((await db.execute(sql`SELECT status, attempts, last_error FROM outbox WHERE kind = ${kind}`)) as unknown as {
       rows: Array<{ status: string; attempts: number; last_error: string | null }>;
@@ -1692,6 +1800,10 @@ describe('drainOnce — lease reclaim (a worker killed mid-row)', () => {
 });
 
 describe('drainOnce — outbound deadlines (rail-09 / obs-03)', () => {
+  // Fix pack 5 T20a (P0 rule 9): the sender's travel-rule data on file, ahead of the T20b/T23 gates.
+  beforeEach(async () => {
+    await seedOriginatorForTest(db, 'acme', '15551230000', { address: true, dob: true });
+  });
   const timeoutError = () =>
     Object.assign(new Error('The operation was aborted due to timeout'), { name: 'TimeoutError' });
 
@@ -2875,6 +2987,8 @@ describe('drainOnce — sandbox transfers never reach a rail or a real phone (Pr
 
   it('a LIVE transfer on the same rail is still instructed (unchanged)', async () => {
     await store.saveTransfer(transferFixture());
+    // Fix pack 5 T23 (P0 rule 9): the sender's travel-rule data on file (acme's http rail is real money).
+    await seedOriginatorForTest(db, 'acme', '15551230000', { address: true, dob: true });
     fetchFn.mockResolvedValue({ ok: true, json: async () => ({ providerRef: 'rail-9' }) });
     await outbox.enqueue('settlement.instruct', { transferId: 'wk_t1' }, { dedupeKey: 'instruct:wk_t1' });
     await drainOnce(deps(), 'w1');
@@ -3148,6 +3262,10 @@ describe('outbox repo — markDone dropPayloadKey (Partner-Demo R3b prune)', { r
 // to the hosted reference rail (never a stored URL), and a paid row on an http
 // rail is not instructed when its newest sanctions screen was not on a live list.
 describe('drainOnce — instruct chokepoint (pack 2 T10)', { retry: 0 }, () => {
+  // Fix pack 5 T20a (P0 rule 9): the sender's travel-rule data on file, ahead of the T20b/T23 gates.
+  beforeEach(async () => {
+    await seedOriginatorForTest(db, 'acme', '15551230000', { address: true, dob: true });
+  });
   const STORED = 'https://rail.partner.example/settle';
   const hosted = () => `${env.appBaseUrl}/api/partner-rail`;
   type Row = { dedupe_key: string; status: string; last_error: string | null; payload: unknown };

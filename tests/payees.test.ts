@@ -1,5 +1,6 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, afterEach } from 'vitest';
 import { nextPayeeStatus, parsePayeeInput, screenPayee } from '@/lib/payees';
+import { primeListSet, restoreOfacSource } from './helpers-sanctions';
 
 // Batch B2: a payee is a company in India the partner works with. Bank details
 // (account holder, IFSC, account number) are checked here, sealed by the repo,
@@ -91,5 +92,21 @@ describe('nextPayeeStatus', () => {
   it('suspend: approved → suspended', () => {
     expect(nextPayeeStatus('approved', 'suspend')).toBe('suspended');
     expect(nextPayeeStatus('pending', 'suspend')).toBeNull();
+  });
+});
+
+// Fix pack 5 T29 (R08): a payee has no destination, so under SANCTIONS_LIST=lists
+// it is screened against every list (floorLists(null)); with every list live a
+// real-money payee clears.
+describe('screenPayee under SANCTIONS_LIST=lists (fix pack 5 T29)', () => {
+  const original = process.env.SANCTIONS_LIST;
+  afterEach(() => restoreOfacSource(original));
+  it('no destination -> all four lists; every list live -> clear on real money', async () => {
+    primeListSet({});
+    const r = await screenPayee({ legalName: good.legalName, accountHolder: good.accountHolder }, undefined, { realMoney: true });
+    expect(r.evidence?.lists).toHaveLength(4);
+    expect(r.evidence?.listFitness).toBe('live');
+    expect(r.verdict).toBe('clear');
+    expect(r.listUnavailable).toBe(false);
   });
 });

@@ -4,7 +4,7 @@ import { createStore } from '@/lib/store';
 import {
   cancelTransfer, cancelOwnedTransfer, assignTransfer, resendPaymentLink, releaseTransfer, rejectTransfer,
   issueRefund, approveRefund, dismissRefund, retryRefund, reverseB2bSettlement, canReleaseHeld,
-  SENDER_SCREENING_RELEASE_REFUSAL, RECIPIENT_IDENTITY_RELEASE_REFUSAL,
+  SENDER_SCREENING_RELEASE_REFUSAL, RECIPIENT_IDENTITY_RELEASE_REFUSAL, ORIGINATOR_INFO_RELEASE_REFUSAL,
 } from '@/lib/dashboard-ops';
 import { POSSIBLE_MATCH_REASON, LIST_UNAVAILABLE_REASON, SENDER_IDENTITY_MISSING_REASON } from '@/lib/compliance';
 import { AML_HOLD_REASON } from '@/lib/aml-hold';
@@ -13,15 +13,16 @@ import { AML_HOLD_REASON } from '@/lib/aml-hold';
 // with a non-blank reason (defence in depth behind releaseTransferAction).
 const REL = { actor: 'plat', reason: 'checked source of funds' };
 import { fakeRedis } from './helpers';
-import { freshDb } from './helpers-db';
+import { freshDb, seedPartner } from './helpers-db';
 import type { Db } from '@/db/client';
 import { beginHold } from '@/lib/settlement';
 import { createIntegrationsRepo } from '@/db/repos/integrations-repo';
 import { createTransferRepo } from '@/db/repos/transfer-repo';
 import type { Transfer } from '@/lib/types';
-import { RECIPIENT_IDENTITY_MISSING_REASON, SENDER_SCREENING_REASON } from '@/lib/compliance-config';
+import { ORIGINATOR_INFO_MISSING_REASON, RECIPIENT_IDENTITY_MISSING_REASON, SENDER_SCREENING_REASON } from '@/lib/compliance-config';
 import { createCustomerRepo } from '@/db/repos/customer-repo';
 import { primeOfacSource, restoreOfacSource, seedLiveEvidence } from './helpers-sanctions';
+import { certifyPartnerForTest, seedOriginatorForTest, seedRealMoneyRail, seedSettleRecordForTest } from './helpers-live';
 
 // Program-Fix 28: the audit repo is the real one, with a switch that forces its
 // insert to fail (a failed audit insert must roll the money move back). Off by
@@ -75,6 +76,11 @@ beforeEach(async () => {
 async function auditRows(): Promise<Array<{ partner_id: string | null; actor: string; actor_type: string; action: string; subject_id: string | null; meta: Record<string, unknown> }>> {
   const r = await db.execute(sql`SELECT partner_id, actor, actor_type, action, subject_id, meta FROM audit_events ORDER BY id`);
   return (r as unknown as { rows: Array<{ partner_id: string | null; actor: string; actor_type: string; action: string; subject_id: string | null; meta: Record<string, unknown> }> }).rows;
+}
+
+async function refundPayloads(): Promise<unknown[]> {
+  const r = await db.execute(sql`SELECT payload FROM outbox WHERE kind = 'funding.refund' ORDER BY id`);
+  return (r as unknown as { rows: Array<{ payload: unknown }> }).rows.map((x) => x.payload);
 }
 
 async function outboxRows(): Promise<Array<{ kind: string; dedupe_key: string | null }>> {
@@ -648,6 +654,199 @@ describe('issueRefund (admin-proactive, no prior request)', () => {
   });
 });
 
+// Fix pack 5 T15 (P15, M3): Issue refund is the one exit for a held real-money
+// partner-collected row (the partner holds the money, so there is no
+// fundingRef); its refund is the signed reverse. Every other guard unchanged.
+describe('issueRefund: real-money partner-collected rows (pack 5 T15)', () => {
+  it('a real-money partner-collected paid row with no fundingRef: refund pending, one funding.refund row', async () => {
+    const store = createStore(fakeRedis(), db);
+    await seedRealMoneyRail(db, 'default');
+    // Review round 1 RC2: its settle went to this rail after go-live.
+    await certifyPartnerForTest(db, 'default');
+    await store.saveTransfer(makeTransfer({ id: 'pc1', status: 'paid', fundingMethod: 'bank_transfer' }));
+    await seedSettleRecordForTest(db, { transferId: 'pc1', partnerId: 'default' });
+    await issueRefund(db, 'pc1');
+    expect((await store.getTransfer('pc1'))?.refundStatus).toBe('pending');
+    expect(await outboxRows()).toEqual([{ kind: 'funding.refund', dedupe_key: 'refund:pc1' }]);
+    // Review round 1 RC3: the issue-time real-money decision rides the payload.
+    expect(await refundPayloads()).toEqual([{ transferId: 'pc1', collectedOnRealMoney: true }]);
+  });
+
+  it('review round 1 RC2 (final check F8: a demo-era row): no settle record for a row paid before the go-live, or one older than the go-live, is refused "never charged"', async () => {
+    const store = createStore(fakeRedis(), db);
+    await seedRealMoneyRail(db, 'default');
+    // no certification on record: no go-live, refused even with a fresh settle record
+    await store.saveTransfer(makeTransfer({ id: 'pc8', status: 'paid', fundingMethod: 'bank_transfer' }));
+    await seedSettleRecordForTest(db, { transferId: 'pc8', partnerId: 'default' });
+    await expect(issueRefund(db, 'pc8')).rejects.toThrow(/never charged/i);
+    await certifyPartnerForTest(db, 'default');
+    // Paid two hours ago, before the go-live a minute ago: the demo era.
+    await store.saveTransfer(makeTransfer({ id: 'pc7', status: 'paid', fundingMethod: 'bank_transfer', paidAt: new Date(Date.now() - 2 * 3_600_000).toISOString() }));
+    await expect(issueRefund(db, 'pc7')).rejects.toThrow(/never charged/i);
+    await seedSettleRecordForTest(db, { transferId: 'pc7', partnerId: 'default', agoMs: 2 * 3_600_000 });
+    await expect(issueRefund(db, 'pc7')).rejects.toThrow(/never charged/i);
+    expect(await outboxRows()).toHaveLength(0);
+  });
+
+  it('final check F8 (X1, U1): a row paid after the go-live (or with no paidAt) and held before its first instruction (no settle record) is admitted, with collectedOnRealMoney', async () => {
+    const store = createStore(fakeRedis(), db);
+    await seedRealMoneyRail(db, 'default');
+    await certifyPartnerForTest(db, 'default');
+    await store.saveTransfer(makeTransfer({ id: 'pc6', status: 'paid', fundingMethod: 'bank_transfer', paidAt: new Date(Date.now() - 5_000).toISOString() }));
+    await issueRefund(db, 'pc6');
+    await store.saveTransfer(makeTransfer({ id: 'pc5', status: 'paid', fundingMethod: 'bank_transfer' }));
+    await issueRefund(db, 'pc5');
+    expect(await refundPayloads()).toEqual([
+      { transferId: 'pc6', collectedOnRealMoney: true },
+      { transferId: 'pc5', collectedOnRealMoney: true },
+    ]);
+  });
+
+  it('review round 1 RC2: the go-live is the EARLIEST certification on record (a partner.live.certify audit row before a re-certification)', async () => {
+    const store = createStore(fakeRedis(), db);
+    await seedRealMoneyRail(db, 'default');
+    await certifyPartnerForTest(db, 'default'); // current certification: a minute ago
+    await db.execute(sql`INSERT INTO audit_events (partner_id, actor, actor_type, action, subject_id, at)
+      VALUES ('default', 'ops-admin', 'staff', 'partner.live.certify', 'default', now() - interval '3 hours')`);
+    await store.saveTransfer(makeTransfer({ id: 'pc9', status: 'paid', fundingMethod: 'bank_transfer' }));
+    await seedSettleRecordForTest(db, { transferId: 'pc9', partnerId: 'default', agoMs: 2 * 3_600_000 });
+    await issueRefund(db, 'pc9');
+    expect(await refundPayloads()).toEqual([{ transferId: 'pc9', collectedOnRealMoney: true }]);
+  });
+
+  it('review round 1 RF1: a ROUTED partner-collected row is refused on the platform path too, even with a settle record after go-live', async () => {
+    const store = createStore(fakeRedis(), db);
+    await seedPartner(db, 'railx');
+    await seedRealMoneyRail(db, 'railx');
+    await certifyPartnerForTest(db, 'railx');
+    await store.saveTransfer(makeTransfer({ id: 'pc10', status: 'paid', fundingMethod: 'bank_transfer', settlementPartnerId: 'railx' }));
+    await seedSettleRecordForTest(db, { transferId: 'pc10', partnerId: 'default', railPartnerId: 'railx' });
+    await expect(issueRefund(db, 'pc10')).rejects.toThrow(/never charged/i);
+    expect(await outboxRows()).toHaveLength(0);
+  });
+
+  it('review round 1 RC3: approveRefund and retryRefund carry collectedOnRealMoney only for such a row; a charged row keeps { transferId }', async () => {
+    const store = createStore(fakeRedis(), db);
+    await seedRealMoneyRail(db, 'default');
+    await certifyPartnerForTest(db, 'default');
+    await store.saveTransfer(makeTransfer({ id: 'pc11', status: 'delivered', fundingMethod: 'bank_transfer', refundStatus: 'requested' }));
+    await seedSettleRecordForTest(db, { transferId: 'pc11', partnerId: 'default' });
+    await store.saveTransfer(makeTransfer({ id: 'pc12', status: 'delivered', fundingMethod: 'bank_transfer', refundStatus: 'failed' }));
+    await seedSettleRecordForTest(db, { transferId: 'pc12', partnerId: 'default' });
+    await store.saveTransfer(makeTransfer({ id: 'pc13', status: 'cancelled', fundingRef: 'mockfund-pc13', refundStatus: 'requested' }));
+    await approveRefund(db, 'pc11');
+    await retryRefund(db, 'pc12');
+    await approveRefund(db, 'pc13');
+    expect(await refundPayloads()).toEqual([
+      { transferId: 'pc11', collectedOnRealMoney: true },
+      { transferId: 'pc12', collectedOnRealMoney: true },
+      { transferId: 'pc13' },
+    ]);
+  });
+
+  it('the same row on a simulator rail is still refused "never charged"', async () => {
+    const store = createStore(fakeRedis(), db);
+    await createIntegrationsRepo(db).saveIntegrations('default', {
+      kyc: {}, whatsapp: {},
+      payment: { providerType: 'simulator', credentials: { signingSecret: 's' }, webhookSecret: 'w' },
+    });
+    await store.saveTransfer(makeTransfer({ id: 'pc2', status: 'paid', fundingMethod: 'bank_transfer' }));
+    await expect(issueRefund(db, 'pc2')).rejects.toThrow(/never charged/i);
+    expect((await store.getTransfer('pc2'))?.refundStatus ?? 'none').toBe('none');
+    expect(await outboxRows()).toHaveLength(0);
+  });
+
+  it('a real-money row of any other class with no fundingRef is still refused', async () => {
+    const store = createStore(fakeRedis(), db);
+    await seedRealMoneyRail(db, 'default');
+    // stripe-bound (an intent, no capture ref yet)
+    await store.saveTransfer(makeTransfer({ id: 'pc3', status: 'paid', fundingMethod: 'bank_transfer' }));
+    await db.execute(sql`UPDATE transfers SET funding_provider = 'stripe', funding_intent_ref = 'pi_pc3' WHERE id = 'pc3'`);
+    await expect(issueRefund(db, 'pc3')).rejects.toThrow(/never charged/i);
+    // partner-pulled (the B2B reverse has its own seam)
+    await store.saveTransfer(makeTransfer({ id: 'pc4', status: 'paid', fundingMethod: 'ach_pull', transferType: 'b2b' }));
+    await expect(issueRefund(db, 'pc4')).rejects.toThrow(/never charged/i);
+    // a mock-provider row whose ref is missing
+    await store.saveTransfer(makeTransfer({ id: 'pc5', status: 'paid', fundingMethod: 'bank_transfer' }));
+    await db.execute(sql`UPDATE transfers SET funding_provider = 'mock' WHERE id = 'pc5'`);
+    await expect(issueRefund(db, 'pc5')).rejects.toThrow(/never charged/i);
+    // a sandbox row
+    await store.saveTransfer(makeTransfer({ id: 'pc6', status: 'paid', fundingMethod: 'bank_transfer' }));
+    await db.execute(sql`UPDATE transfers SET environment = 'test' WHERE id = 'pc6'`);
+    await expect(issueRefund(db, 'pc6')).rejects.toThrow(/never charged/i);
+    expect(await outboxRows()).toHaveLength(0);
+  });
+
+  it('the other guards still run first for such a row (status, refund in progress)', async () => {
+    const store = createStore(fakeRedis(), db);
+    await seedRealMoneyRail(db, 'default');
+    await store.saveTransfer(makeTransfer({ id: 'pc7', status: 'awaiting_payment', fundingMethod: 'bank_transfer' }));
+    await expect(issueRefund(db, 'pc7')).rejects.toThrow(/only paid or delivered/i);
+    // Review round 1 RC2: a row that passes the admission (its settle went to this rail after go-live).
+    await certifyPartnerForTest(db, 'default');
+    await store.saveTransfer(makeTransfer({ id: 'pc8', status: 'paid', fundingMethod: 'bank_transfer', refundStatus: 'requested' }));
+    await seedSettleRecordForTest(db, { transferId: 'pc8', partnerId: 'default' });
+    await expect(issueRefund(db, 'pc8')).rejects.toThrow(/already in progress or complete/i);
+    expect(await outboxRows()).toHaveLength(0);
+  });
+});
+
+// Review round 2 GE1: on a real-money rail a card payment taken through the
+// partner's Stripe key (class 'stripe') cannot be refunded from SmartRemit yet
+// (the Stripe provider's refund always throws, so the refund would stay
+// 'pending' for good). issueRefund, approveRefund and retryRefund refuse it and
+// leave refund_status as it was. Off real money: unchanged.
+describe('refunds of a real-money Stripe-class row (review round 2 GE1)', () => {
+  async function stripeRow(id: string, over: Partial<Transfer> = {}): Promise<void> {
+    const store = createStore(fakeRedis(), db);
+    await store.saveTransfer(makeTransfer({ id, status: 'paid', fundingMethod: 'debit_card', fundingRef: `pi_${id}`, ...over }));
+    await db.execute(sql`UPDATE transfers SET funding_provider = 'stripe', funding_state = 'succeeded' WHERE id = ${id}`);
+  }
+  const refundStatusOf = async (id: string) => (await createStore(fakeRedis(), db).getTransfer(id))?.refundStatus ?? 'none';
+
+  it('issueRefund refuses it with the Stripe-dashboard reason, refund_status stays none, nothing enqueued', async () => {
+    await seedRealMoneyRail(db, 'default');
+    await stripeRow('gs1');
+    await expect(issueRefund(db, 'gs1')).rejects.toThrow(/^Cannot refund: .*Stripe dashboard.*cannot refund a card payment yet/);
+    expect(await refundStatusOf('gs1')).toBe('none');
+    expect(await outboxRows()).toHaveLength(0);
+  });
+
+  it('approveRefund and retryRefund refuse it too and leave requested / failed as they were', async () => {
+    await seedRealMoneyRail(db, 'default');
+    await stripeRow('gs2', { refundStatus: 'requested' });
+    await stripeRow('gs3', { refundStatus: 'failed' });
+    await expect(approveRefund(db, 'gs2')).rejects.toThrow(/^Cannot approve: .*Stripe dashboard/);
+    await expect(retryRefund(db, 'gs3')).rejects.toThrow(/^Cannot retry: .*Stripe dashboard/);
+    expect(await refundStatusOf('gs2')).toBe('requested');
+    expect(await refundStatusOf('gs3')).toBe('failed');
+    expect(await outboxRows()).toHaveLength(0);
+  });
+
+  it('the same rows on a simulator rail behave as before', async () => {
+    await createIntegrationsRepo(db).saveIntegrations('default', {
+      kyc: {}, whatsapp: {},
+      payment: { providerType: 'simulator', credentials: { signingSecret: 's' }, webhookSecret: 'w' },
+    });
+    await stripeRow('gs4');
+    await stripeRow('gs5', { refundStatus: 'requested' });
+    await stripeRow('gs6', { refundStatus: 'failed' });
+    await issueRefund(db, 'gs4');
+    await approveRefund(db, 'gs5');
+    await retryRefund(db, 'gs6');
+    for (const id of ['gs4', 'gs5', 'gs6']) expect(await refundStatusOf(id)).toBe('pending');
+    expect(await refundPayloads()).toEqual([{ transferId: 'gs4' }, { transferId: 'gs5' }, { transferId: 'gs6' }]);
+  });
+
+  it('a mock-funded charged row on a real-money rail is not affected (Issue refund as before)', async () => {
+    await seedRealMoneyRail(db, 'default');
+    const store = createStore(fakeRedis(), db);
+    await store.saveTransfer(makeTransfer({ id: 'gs7', status: 'paid', fundingRef: 'mockfund-gs7' }));
+    await issueRefund(db, 'gs7');
+    expect(await refundStatusOf('gs7')).toBe('pending');
+  });
+});
+
 describe('issueRefund with a tenant scope (lost-features p1 A7: the /partner Issue refund, BL-2)', () => {
   const AUD = { actor: 'pa-admin', reason: 'customer disputed the charge', actorScope: 'partner' as const };
   const seedPa = () => db.execute(sql`INSERT INTO partners (id, name) VALUES ('pa', 'Partner A') ON CONFLICT DO NOTHING`);
@@ -950,6 +1149,51 @@ describe('release / reject on a transfer HELD by beginHold (release is a SETTLEM
       expect((await auditRows()).map((r) => r.action)).toEqual(['sanctions.screen', 'sanctions.screen']);
     });
   });
+
+  // Fix pack 5 T20b (P22): a real-money consumer row whose sender's address
+  // (or date of birth, by band) is not on file is never released.
+  describe('an ORIGINATOR_INFO_MISSING hold with no address on file (pack 5 T20b, P22)', () => {
+    const originalList = process.env.SANCTIONS_LIST;
+    afterEach(() => restoreOfacSource(originalList));
+    async function originatorHeld(id: string): Promise<ReturnType<typeof createStore>> {
+      await db.execute(sql`INSERT INTO partners (id, name) VALUES ('rp', 'Rail Partner') ON CONFLICT DO NOTHING`);
+      await seedRealMoneyRail(db, 'rp');
+      const store = createStore(fakeRedis(), db);
+      await store.saveTransfer({
+        ...makeTransfer({
+          id, partnerId: 'rp', environment: 'live', status: 'in_review', complianceStatus: 'flagged',
+          complianceReasons: [ORIGINATOR_INFO_MISSING_REASON], fundingRef: `mockfund-${id}`,
+          paidAt: new Date(Date.now() - 3_600_000).toISOString(),
+        }),
+        recipientLegalName: 'Test Recipient Legal',
+      });
+      return store;
+    }
+
+    it('a real-money release with no address on file is refused with ORIGINATOR_INFO_RELEASE_REFUSAL (platform and partner staff); nothing written', async () => {
+      const store = await originatorHeld('rel_noaddr');
+      await seedLiveEvidence(db, (await store.getTransfer('rel_noaddr'))!);
+      const auditBefore = (await auditRows()).length;
+      await expect(releaseTransfer(store, db, 'rel_noaddr', REL)).rejects.toThrow(ORIGINATOR_INFO_RELEASE_REFUSAL);
+      expect(ORIGINATOR_INFO_RELEASE_REFUSAL).toBe(
+        "This transfer cannot be released: the sender's address or date of birth is missing. Reject or refund it.",
+      );
+      await expect(releaseTransfer(store, db, 'rel_noaddr', REL, { partnerId: 'rp' })).rejects.toThrow(ORIGINATOR_INFO_RELEASE_REFUSAL);
+      expect((await store.getTransfer('rel_noaddr'))?.status).toBe('in_review');
+      expect(await outboxRows()).toEqual([]);
+      expect(await auditRows()).toHaveLength(auditBefore);
+    });
+
+    it('stale screen (the re-screen path): a live clear re-screen still refuses; only its evidence row is written', async () => {
+      primeOfacSource({ checkedAgoMs: 3_600_000 });
+      const store = await originatorHeld('rel_noaddr2');
+      await seedLiveEvidence(db, (await store.getTransfer('rel_noaddr2'))!, { screenedAgoMs: 40 * 3_600_000, at: new Date(Date.now() - 40 * 3_600_000) });
+      await expect(releaseTransfer(store, db, 'rel_noaddr2', REL)).rejects.toThrow(ORIGINATOR_INFO_RELEASE_REFUSAL);
+      expect((await store.getTransfer('rel_noaddr2'))?.complianceReasons).toEqual([ORIGINATOR_INFO_MISSING_REASON]);
+      expect(await outboxRows()).toEqual([]);
+      expect((await auditRows()).map((r) => r.action)).toEqual(['sanctions.screen', 'sanctions.screen']);
+    });
+  });
 });
 
 describe('canReleaseHeld — who may release a compliance hold (owner decision 2026-09-16)', () => {
@@ -1084,6 +1328,8 @@ describe('sender screening hold — platform release refusal (fix pack 2 T6)', (
     });
     await db.execute(sql`INSERT INTO customers (phone, partner_id, first_seen_at, sender_country, kyc_status, pep_hit, screening_flagged_at)
       VALUES (${PHONE}, 'rp', now() - interval '10 days', 'US', 'verified', true, now() - interval '1 hour')`);
+    // Fix pack 5 T20a (P0 rule 9): the sender's travel-rule data on file, ahead of the T20b release check.
+    await seedOriginatorForTest(db, 'rp', PHONE, { address: true, dob: true });
     const store = createStore(fakeRedis(), db);
     await store.saveTransfer(makeTransfer({
       id: 'rel_sender', partnerId: 'rp', environment, status: 'in_review', complianceStatus: 'flagged',

@@ -136,6 +136,31 @@ describe('issueRefundEligibility (BL-2: a transfer another partner pays out is r
   });
 });
 
+describe('issueRefundEligibility: a real-money partner-collected row (pack 5 T15, P15)', () => {
+  const pc = (o: Partial<Transfer> = {}) => tr({ fundingMethod: 'bank_transfer', ...o });
+  it("'ok' for a paid partner-collected row with no fundingRef when collectedOnRealMoney", () => {
+    expect(issueRefundEligibility(pc(), 'pa', { collectedOnRealMoney: true })).toBe('ok');
+    expect(issueRefundEligibility(pc({ status: 'delivered' }), 'pa', { collectedOnRealMoney: true })).toBe('ok');
+  });
+  it("without the option it stays 'notCharged'", () => {
+    expect(issueRefundEligibility(pc(), 'pa')).toBe('notCharged');
+    expect(issueRefundEligibility(pc(), 'pa', {})).toBe('notCharged');
+    expect(issueRefundEligibility(pc(), 'pa', { collectedOnRealMoney: false })).toBe('notCharged');
+  });
+  it("'routed' and 'sandbox' still win first; status and 'already' still apply", () => {
+    expect(issueRefundEligibility(pc({ settlementPartnerId: 'pz' }), 'pa', { collectedOnRealMoney: true })).toBe('routed');
+    expect(issueRefundEligibility(pc({ environment: 'test' }), 'pa', { collectedOnRealMoney: true })).toBe('sandbox');
+    expect(issueRefundEligibility(pc({ status: 'awaiting_payment' }), 'pa', { collectedOnRealMoney: true })).toBe('wrongStatus');
+    expect(issueRefundEligibility(pc({ refundStatus: 'pending' }), 'pa', { collectedOnRealMoney: true })).toBe('already');
+  });
+  it('transferOpsFor passes the option on (admin only)', () => {
+    const ctx = { role: 'admin' as const, staff: staff('admin'), partnerId: 'pa' };
+    expect(transferOpsFor(pc(), ctx).refund).toBe(false);
+    expect(transferOpsFor(pc(), ctx, { collectedOnRealMoney: true }).refund).toBe(true);
+    expect(transferOpsFor(pc(), { role: 'agent', staff: staff('agent'), partnerId: 'pa' }, { collectedOnRealMoney: true }).refund).toBe(false);
+  });
+});
+
 describe('transferOpsFor (UX only; each action re-checks)', () => {
   const awaiting = tr({ status: 'awaiting_payment' });
   it('admin: every op the transfer allows', () => {

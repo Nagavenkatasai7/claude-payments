@@ -2,7 +2,10 @@ import { createHmac } from 'node:crypto';
 import type { Store } from '../store';
 import { isMaskedDestination, usdcAddressFromDestination } from '../payout-format';
 import { isPartnerPulled } from '../funding-method';
+import { fundingClassOf } from '../funding-class';
 import type { Customer, Transfer, TransferStatus } from '../types';
+import type { TravelRuleRequirement } from '../travel-rule';
+import type { ListFitness } from '../sanctions/list-policy';
 import { deriveTier } from '../tier-rules';
 import type { PartnerPaymentConfig } from '../partner-integrations';
 import type {
@@ -192,12 +195,61 @@ export function buildSettlementInstruction(transfer: Transfer) {
   };
 }
 
+/** Fix pack 5 T12 (P14): how the sender's money was collected, as the rail sees it. */
+export type ComplianceFunding = {
+  mode: 'partner_collected' | 'partner_psp' | 'partner_pull' | 'demo';
+  provider: 'partner' | 'stripe' | 'mock';
+  reference: string | null;
+  status: string;
+  amount: number;
+  currency: string;
+};
+
+/**
+ * Fix pack 5 T12 (P14): the `compliance.funding` block, pure, from the row
+ * only (fundingClassOf, never the 'mockfund-' prefix). The amount is the total
+ * charge and stays on a routed row (a rail reconciles the funding leg with it).
+ * No phone, name, account digits, token or client secret.
+ */
+export function fundingBlockFor(t: Transfer): ComplianceFunding {
+  const amount = t.totalChargeSource ?? t.totalChargeUsd;
+  const currency = t.sourceCurrency ?? 'USD';
+  switch (fundingClassOf(t)) {
+    case 'sandbox':
+    case 'mock':
+      return { mode: 'demo', provider: 'mock', reference: null, status: 'captured', amount, currency };
+    case 'stripe':
+      return {
+        mode: 'partner_psp',
+        provider: 'stripe',
+        // The PSP id is the owner's account data; a routed rail never gets it,
+        // like client_reference above.
+        reference: t.settlementPartnerId ? null : (t.fundingRef ?? t.fundingIntentRef ?? null),
+        status: t.fundingState ?? 'pending',
+        amount,
+        currency,
+      };
+    case 'partner_pull':
+      return { mode: 'partner_pull', provider: 'partner', reference: null, status: 'partner_pull', amount, currency };
+    case 'partner_collected':
+      return { mode: 'partner_collected', provider: 'partner', reference: null, status: 'partner_confirmed', amount, currency };
+  }
+}
+
 /** A name-free reference to the Program-Fix 14 sanctions evidence for this transfer. */
 export interface ComplianceScreeningRef {
   listSource: string;
   listVersion: string;
   decision: string;
   screenedAt: string;
+  /** Fix pack 5 T5 (P10): counts of the newest screen's parties by role; never names or hashes. */
+  namesScreened: { sender: number; recipient: number };
+  /**
+   * Fix pack 5 T29 (P10, P26): each list of a SANCTIONS_LIST=lists set as
+   * { source, version, fitness }; present only when the evidence carries
+   * lists[] (lists mode). The hashes stay in the evidence.
+   */
+  lists?: Array<{ source: string; version: string; fitness: ListFitness }>;
 }
 
 export interface ComplianceBlockOptions {
@@ -205,8 +257,13 @@ export interface ComplianceBlockOptions {
   kycGateActive?: boolean;
   /** Fix 14 evidence when found; absent ⇒ the list fields are omitted, never guessed. */
   screening?: ComplianceScreeningRef | null;
-  /** Worker fail-open path: the originator could not be loaded ⇒ originator null. */
-  omitOriginator?: boolean;
+  /**
+   * Fix pack 5 T23 (P10, P22): the travel-rule requirement of a real-money b2c
+   * row (travelRuleFor), else null/absent. Set: an individual originator
+   * carries `address` (and `date_of_birth` when it asks) when the owner
+   * customer holds it.
+   */
+  travelRule?: TravelRuleRequirement | null;
 }
 
 /**
@@ -216,13 +273,22 @@ export interface ComplianceBlockOptions {
  * it signs the final serialised body.
  *
  * Data minimisation (owner decisions C1–C3, docs §3):
- *   • the originator carries name, country, phone, id_type and id_last4 only —
- *     never the full ID number, date of birth, residential address or email.
- *     C1 (address at ≥ $3,000) is owner-pending, so no address is sent at all;
+ *   • the originator carries name, country, phone, id_type and id_last4 —
+ *     never the full ID number or email; address and date of birth only when
+ *     the travel rule requires them on a real-money row (fix pack 5, P22:
+ *     `opts.travelRule`, individual senders only); a routed row still sends
+ *     originator null (C3) and the worker holds it;
  *   • purpose_code is null until counsel/the partner bank supplies codes (C2);
  *   • a ROUTED row (settlementPartnerId set) goes to another tenant's rail, so
  *     the sender identity is omitted: originator null, routed true (C3);
- *   • the screening list fields come only from fix 14 evidence, never guessed.
+ *   • the screening list fields come only from fix 14 evidence, never guessed;
+ *   • funding (fix pack 5 T12, P14): mode, provider class, opaque PSP
+ *     reference, status, total charge and currency; never card or bank
+ *     digits, a token, a client secret or a name (fundingBlockFor).
+ * Version 2 since fix pack 5 (one bump for the pack's new fields);
+ * `names_screened` are counts by role of the parties the newest screen
+ * covered, never names or hashes. There is no fail-open option: a block that
+ * cannot be loaded stops the instruction (loadComplianceBlock, P10).
  * Pure: no DB, no clock (`now` is passed in).
  */
 export function buildComplianceBlock(
@@ -235,7 +301,7 @@ export function buildComplianceBlock(
   const senderIsBusiness = transfer.senderEntityType === 'business';
   const recipientIsBusiness = transfer.recipientEntityType === 'business';
   const originator =
-    routed || opts.omitOriginator
+    routed
       ? null
       : {
           entity_type: senderIsBusiness ? ('business' as const) : ('individual' as const),
@@ -245,10 +311,17 @@ export function buildComplianceBlock(
           // A business originator is the entity: no individual's ID is sent.
           id_type: senderIsBusiness ? null : (customer?.idDocType ?? customer?.govIdType ?? null),
           id_last4: senderIsBusiness ? null : (customer?.idLast4 ?? null),
+          // Fix pack 5 T23 (P10, P22): travel-rule fields, an individual only.
+          ...(!senderIsBusiness && opts.travelRule && customer?.residentialAddress
+            ? { address: customer.residentialAddress }
+            : {}),
+          ...(!senderIsBusiness && opts.travelRule?.dateOfBirth && customer?.dateOfBirth
+            ? { date_of_birth: customer.dateOfBirth }
+            : {}),
         };
   const evidence = opts.screening;
   return {
-    version: 1 as const,
+    version: 2 as const,
     ...(routed ? { routed: true as const } : {}),
     originator,
     beneficiary: {
@@ -274,9 +347,19 @@ export function buildComplianceBlock(
       reasons: [...(transfer.complianceReasons ?? [])],
       screened_at: evidence?.screenedAt ?? transfer.createdAt,
       ...(evidence
-        ? { list_source: evidence.listSource, list_version: evidence.listVersion, decision: evidence.decision }
+        ? {
+            list_source: evidence.listSource,
+            list_version: evidence.listVersion,
+            decision: evidence.decision,
+            names_screened: { sender: evidence.namesScreened.sender, recipient: evidence.namesScreened.recipient },
+            // Fix pack 5 T29: lists mode only.
+            ...(evidence.lists
+              ? { lists: evidence.lists.map(({ source, version, fitness }) => ({ source, version, fitness })) }
+              : {}),
+          }
         : {}),
     },
+    funding: fundingBlockFor(transfer),
     edd_required: transfer.eddRequired ?? false,
   };
 }
@@ -304,8 +387,16 @@ export function buildReverseInstruction(transfer: Transfer) {
     // Cross-border bank_pull reverses a local-bank debit ('bank_debit'); the
     // US-domestic ach_pull reverse stays byte-identical ('ach_debit'). Either way
     // the partner returns the buyer's debit in the source currency it pulled.
+    // Fix pack 5 (P15): a partner-collected consumer row (the partner holds the
+    // sender's money) reverses with method 'partner_collected'; pulled rows
+    // byte-identical. The amount stays the principal (amountSource ?? amountUsd).
     funding: {
-      method: transfer.fundingMethod === 'bank_pull' ? ('bank_debit' as const) : ('ach_debit' as const),
+      method:
+        transfer.fundingMethod === 'bank_pull'
+          ? ('bank_debit' as const)
+          : isPartnerPulled(transfer.fundingMethod)
+            ? ('ach_debit' as const)
+            : ('partner_collected' as const),
       token: transfer.achTokenRef ?? null,
     },
     amount: {
@@ -321,7 +412,7 @@ export function buildReverseInstruction(transfer: Transfer) {
   };
 }
 
-export type CallbackAmountCheck = 'match' | 'absent' | 'mismatch';
+export type CallbackAmountCheck = 'match' | 'missing' | 'mismatch';
 
 const DECIMAL = /^\d+(\.\d+)?$/;
 
@@ -339,11 +430,12 @@ function parseAmount(v: unknown): number | null {
  * Program-Fix 29 (money-09): compare a `paid_out` callback's `amount` block to
  * the LOCKED instruction amount (buildSettlementInstruction's
  * amount.destination / destination_currency, the currency defaulting to INR
- * exactly as there), in minor units. No `amount` key at all ⇒ 'absent' (older
- * integrations); a partial, unparseable or different block ⇒ 'mismatch'.
+ * exactly as there), in minor units. No `amount` key at all ⇒ 'missing'
+ * (refused since fix pack 5: 422 amount_required); a partial, unparseable or
+ * different block ⇒ 'mismatch'.
  */
 export function checkCallbackAmount(transfer: Transfer, body: unknown): CallbackAmountCheck {
-  if (!body || typeof body !== 'object' || !('amount' in body)) return 'absent';
+  if (!body || typeof body !== 'object' || !('amount' in body)) return 'missing';
   const a = (body as Record<string, unknown>).amount;
   if (!a || typeof a !== 'object' || Array.isArray(a)) return 'mismatch';
   const block = a as Record<string, unknown>;

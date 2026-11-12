@@ -115,9 +115,11 @@ describe('scripts/reencrypt-aad-v2 (fix 46A)', { retry: 0 }, () => {
         'conversation_messages.body_enc', // Partner-Demo R3b (born v2; registered for key-ring rotation)
         'customers.date_of_birth_enc', 'customers.email_enc', 'customers.full_name_enc',
         'customers.gov_id_number_enc', 'customers.mfa_totp_enc', 'customers.residential_address_enc',
+        'partner_integrations.funding_credentials_enc', // fix pack 5 T16 (P3): Program-Fix 7's sealed funding config
         'partner_integrations.kyc_api_key_enc', 'partner_integrations.kyc_webhook_secret_enc',
         'partner_integrations.payment_credentials_enc', 'partner_integrations.payment_webhook_secret_enc',
         'partner_integrations.wa_app_secret_enc', 'partner_integrations.wa_token_enc', 'partner_integrations.wa_verify_token_enc',
+        'rail_messages.body_enc', // fix pack 5 (born v2; registered for key-ring rotation)
         'recipients.legal_name_enc', // fix pack 4 (born v2; registered for key-ring rotation)
         'recipients.payout_destination_enc',
         'schedules.payout_destination_enc', 'schedules.purpose_detail_enc', // Batch B follow-up A2 (born v2)
@@ -190,6 +192,21 @@ describe('scripts/reencrypt-aad-v2 (fix 46A)', { retry: 0 }, () => {
     // Sealed for its own column: the payout context does not open it, the legal-name one does.
     expect(() => decryptField(row.legal_name_enc!, provider, ctx.recipient('acme', '15551230000', '919876543210'))).toThrow();
     expect(await recipientsRepo.getRecipientLegalName('acme', '15551230000', '919876543210')).toBe('Anita Sharma');
+  });
+
+  it('fix pack 5 T16 (P3): a v1 partner_integrations.funding_credentials_enc value is resealed v2 under its column context and opens through getFundingConfig', async () => {
+    await seedPartner(db, 'acme');
+    const key = ['rk', 'test', 'reencryptonly'].join('_');
+    const repo = createIntegrationsRepo(db, provider);
+    await repo.setFundingConfig('acme', { providerType: 'stripe', secretKey: key, webhookSecrets: ['whsec_x'] });
+    const json = JSON.stringify({ secretKey: key, webhookSecrets: ['whsec_x'] });
+    await db.execute(sql`UPDATE partner_integrations SET funding_credentials_enc = ${encryptField(json, provider)} WHERE partner_id = 'acme'`);
+    const report = await reencryptAadV2(db, { apply: true, provider, table: 'partner_integrations' });
+    expect(report.find((r) => r.column === 'funding_credentials_enc')).toMatchObject({ v1: 1, resealed: 1, failed: 0 });
+    const [row] = await raw(`SELECT funding_credentials_enc FROM partner_integrations`);
+    expect(row.funding_credentials_enc?.startsWith('v2.k0.')).toBe(true);
+    expect(() => decryptField(row.funding_credentials_enc!, provider, ctx.integration('acme', 'payment_credentials_enc'))).toThrow();
+    expect(await repo.getFundingConfig('acme')).toEqual({ providerType: 'stripe', secretKey: key, webhookSecrets: ['whsec_x'] });
   });
 
   it('--table limits the run to one table', async () => {

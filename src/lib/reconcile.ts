@@ -9,9 +9,10 @@ import { createTicketRepo } from '@/db/repos/ticket-repo';
 import { FIRST_RESPONSE_DUE_HOURS, slaDigestKey } from '@/lib/ticket-sla';
 import { logWarn } from '@/lib/log';
 import { readFlag } from '@/lib/flags';
-import { LIST_UNAVAILABLE_REASON, RECIPIENT_IDENTITY_MISSING_REASON } from '@/lib/compliance-config';
+import { LIST_UNAVAILABLE_REASON, ORIGINATOR_INFO_MISSING_REASON, RECIPIENT_IDENTITY_MISSING_REASON } from '@/lib/compliance-config';
 import { liveRefusalFor, realMoneyFor, realMoneyRail } from '@/lib/live-gate';
 import { alertStuckLivegate } from '@/lib/livegate-alerts';
+import { alertStuckHeld, instructHeldOnPurpose } from '@/lib/instruct-gates';
 import { rescreenOnFile } from '@/lib/pay-rescreen';
 import { healPaidRowScreen, paidRowNeedsHeal, sweepListUnavailableHolds } from '@/lib/list-hold-rescreen';
 import { listScreenEvidence, liveFresh } from '@/lib/sanctions/evidence-read';
@@ -186,6 +187,16 @@ export async function reconcileSweep(db: Db, now: Date = new Date(), opts: Recon
     const refusal = await liveRefusalFor(db, t);
     if (refusal !== null) {
       await alertStuckLivegate(db, t, refusal);
+      continue;
+    }
+    // Fix pack 5 (P9): a row a later instruct gate holds on purpose. While its
+    // instruct row is live the worker's own alert (mockfund:/fundmode:/
+    // travelrule:) owns it; with none (a mockfund row's instruct is done) one
+    // <reason>:stuck:<id> alert is the escalation (pack 3 I1 rule). No
+    // reinstruct, no recon alert, no rung, no audit row.
+    const heldOnPurpose = await instructHeldOnPurpose(db, t);
+    if (heldOnPurpose !== null) {
+      await alertStuckHeld(db, t, heldOnPurpose);
       continue;
     }
     // Best-rate routing: the rail that owes the callback is the SETTLEMENT
@@ -376,7 +387,8 @@ export async function reconcileSweep(db: Db, now: Date = new Date(), opts: Recon
         // Fix pack 2 T3: the LEDGER row's reasons (re-read after the hold)
         // decide the copy: a hold waiting on the list is not a staff release.
         // Fix pack 4 (C19, critic M6): a row with no account-holder name cannot
-        // be released at all (checked first).
+        // be released at all (checked first). Fix pack 5 (P22): nor can a row
+        // whose sender's travel-rule data is missing (checked second).
         const held = await transfers.getTransfer(t.id);
         await outbox.enqueue(
           'ops.alert',
@@ -385,9 +397,11 @@ export async function reconcileSweep(db: Db, now: Date = new Date(), opts: Recon
               prefix +
               (held?.complianceReasons?.includes(RECIPIENT_IDENTITY_MISSING_REASON)
                 ? 'HELD for compliance review (in_review), not instructed: the account holder name is missing, so it cannot be released. Reject or refund it in the dashboard.'
-                : waitsForList(held)
-                  ? 'HELD for compliance review (in_review), not instructed: ' + LIST_WAIT_COPY
-                  : 'flagged by compliance, so it was HELD for compliance review (in_review), not instructed. Release or reject it in the dashboard.'),
+                : held?.complianceReasons?.includes(ORIGINATOR_INFO_MISSING_REASON)
+                  ? "HELD for compliance review (in_review), not instructed: the sender's address or date of birth is missing, so it cannot be released. Reject or refund it in the dashboard."
+                  : waitsForList(held)
+                    ? 'HELD for compliance review (in_review), not instructed: ' + LIST_WAIT_COPY
+                    : 'flagged by compliance, so it was HELD for compliance review (in_review), not instructed. Release or reject it in the dashboard.'),
           },
           { dedupeKey: `fundhold:${t.id}` },
         );

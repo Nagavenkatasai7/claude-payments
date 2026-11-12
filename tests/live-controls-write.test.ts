@@ -1,13 +1,18 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { sql } from 'drizzle-orm';
 import { captureQueries, freshDb, seedPartner } from './helpers-db';
 import type { Db } from '@/db/client';
-import { createPartnerRepo } from '@/db/repos/partner-repo';
+import { createPartnerRepo, updateLiveControlsKey } from '@/db/repos/partner-repo';
+import { createIntegrationsRepo } from '@/db/repos/integrations-repo';
+import { sealOptional } from '@/db/repos/mappers';
+import { defaultProvider } from '@/lib/field-crypto';
+import { ctx } from '@/lib/crypto-context';
 import {
   notifyLiveChange,
   writeCertification,
   writeComplianceUser,
   writeContract,
+  writeFundingMode,
   writeOptIn,
   writePosture,
   type LiveActor,
@@ -613,5 +618,101 @@ describe('notifyLiveChange', () => {
     await db.execute(sql`DELETE FROM outbox`);
     await db.transaction((tx) => notifyLiveChange(tx, 'acme', { username: 'ops-ana', scope: 'platform' }, NOTICE, null));
     expect((await outboxRows()).map((r) => r.kind)).toEqual(['ops.alert']);
+  });
+});
+
+// Fix pack 5 T17 (P17, P29): the fundingMode writer. Platform only; partner_psp needs Stripe
+// funding switched on (STRIPE_FUNDING_ENABLED, the env seam of tests/pay-route-stripe-funding)
+// and a RESTRICTED Stripe key in the partner's stored funding config.
+describe('writeFundingMode', () => {
+  const RK = ['rk', 'test', 'fundingmodekey'].join('_');
+  const SK = ['sk', 'test', 'fundingmodekey'].join('_');
+  const fundingMode = (mode: unknown, id = 'acme') => db.transaction((tx) => writeFundingMode(tx, id, PLATFORM, { mode }));
+  /** Seals an sk_ config the way the repo does (setFundingConfig refuses an sk_ key since T16). */
+  async function storeUnrestricted(id = 'acme'): Promise<void> {
+    const enc = sealOptional(JSON.stringify({ secretKey: SK, webhookSecrets: [] }), defaultProvider(), ctx.integration(id, 'funding_credentials_enc'))!;
+    await db.execute(sql`INSERT INTO partner_integrations (partner_id, funding_provider_type, funding_credentials_enc) VALUES (${id}, 'stripe', ${enc})
+      ON CONFLICT (partner_id) DO UPDATE SET funding_provider_type = 'stripe', funding_credentials_enc = ${enc}`);
+  }
+  afterEach(() => {
+    delete process.env.STRIPE_FUNDING_ENABLED;
+  });
+
+  it("partner_collected: stores { mode, setBy, setAt }; audit meta { mode, previous: null, actorScope }; one livectl alert; one email 'by SmartRemit'", async () => {
+    const before = Date.now();
+    expect(await fundingMode('partner_collected')).toEqual({ ok: true });
+    const r = (await column()).fundingMode as Record<string, unknown>;
+    expect(Object.keys(r).sort()).toEqual(['mode', 'setAt', 'setBy']);
+    expect(r).toMatchObject({ mode: 'partner_collected', setBy: 'ops-admin' });
+    expect(Date.parse(String(r.setAt))).toBeGreaterThanOrEqual(before - 1000);
+    expect(new Date(String(r.setAt)).toISOString()).toBe(r.setAt);
+
+    const a = await audits();
+    expect(a).toHaveLength(1);
+    expect(a[0]).toMatchObject({ partner_id: 'acme', actor: 'ops-admin', actor_type: 'staff', action: 'partner.live.funding_mode.set', subject_id: 'acme' });
+    expect(a[0].meta).toEqual({ mode: 'partner_collected', previous: null, actorScope: 'platform' });
+
+    const o = await outboxRows();
+    expect(o.map((x) => x.kind)).toEqual(['ops.alert', 'email.send']);
+    expect(o[0].dedupe_key).toMatch(new RegExp(`^livectl:fundingMode:acme:${UUID}$`));
+    expect(o[0].payload).toEqual({ message: 'SmartRemit ops: partner.live.funding_mode.set on partner acme by platform staff.' });
+    expect(String(o[1].payload.text)).toMatch(/^Your funding mode was changed by SmartRemit/);
+    expect(o[1].payload.text).toBe('Your funding mode was changed by SmartRemit (set to partner_collected). Details are in your SmartRemit workspace.');
+  });
+
+  it("a second write records previous: 'partner_collected' (the stored mode only); a malformed stored record reads as null", async () => {
+    process.env.STRIPE_FUNDING_ENABLED = 'true';
+    await createIntegrationsRepo(db).setFundingConfig('acme', { providerType: 'stripe', secretKey: RK, webhookSecrets: [] });
+    expect(await fundingMode('partner_collected')).toEqual({ ok: true });
+    expect(await fundingMode('partner_psp')).toEqual({ ok: true });
+    await updateLiveControlsKey('acme', 'fundingMode', { mode: 'bogus', setBy: 'x', setAt: new Date().toISOString() }, db);
+    expect(await fundingMode('partner_collected')).toEqual({ ok: true });
+    expect((await audits()).map((r) => r.meta)).toEqual([
+      { mode: 'partner_collected', previous: null, actorScope: 'platform' },
+      { mode: 'partner_psp', previous: 'partner_collected', actorScope: 'platform' },
+      { mode: 'partner_collected', previous: null, actorScope: 'platform' },
+    ]);
+  });
+
+  it('partner_psp with the flag off -> psp_unavailable, nothing written (even with a restricted key stored)', async () => {
+    await createIntegrationsRepo(db).setFundingConfig('acme', { providerType: 'stripe', secretKey: RK, webhookSecrets: [] });
+    const before = await column();
+    expect(await fundingMode('partner_psp')).toEqual({ ok: false, code: 'psp_unavailable' });
+    await expectNothingWritten(before);
+  });
+
+  it('partner_psp with the flag on and no funding config -> psp_unavailable, nothing written', async () => {
+    process.env.STRIPE_FUNDING_ENABLED = 'true';
+    const before = await column();
+    expect(await fundingMode('partner_psp')).toEqual({ ok: false, code: 'psp_unavailable' });
+    await expectNothingWritten(before);
+  });
+
+  it('partner_psp with the flag on and an sk_ key stored -> psp_unavailable, nothing written', async () => {
+    process.env.STRIPE_FUNDING_ENABLED = 'true';
+    await storeUnrestricted();
+    expect((await createIntegrationsRepo(db).getFundingConfig('acme'))?.secretKey).toBe(SK); // the seal is readable
+    const before = await column();
+    expect(await fundingMode('partner_psp')).toEqual({ ok: false, code: 'psp_unavailable' });
+    await expectNothingWritten(before);
+  });
+
+  it('partner_psp with the flag on and an rk_test_ key stored -> ok', async () => {
+    process.env.STRIPE_FUNDING_ENABLED = 'true';
+    await createIntegrationsRepo(db).setFundingConfig('acme', { providerType: 'stripe', secretKey: RK, webhookSecrets: [] });
+    expect(await fundingMode('partner_psp')).toEqual({ ok: true });
+    expect((await column()).fundingMode).toMatchObject({ mode: 'partner_psp', setBy: 'ops-admin' });
+    for (const r of [...(await outboxRows()).map((x) => x.payload), ...(await audits()).map((x) => x.meta)]) expect(JSON.stringify(r)).not.toContain('rk_');
+  });
+
+  it("an unknown mode, a missing partner or 'default' -> bad_input / not_found, nothing written", async () => {
+    const before = await column();
+    for (const m of ['', 'partner_pull', 'PARTNER_COLLECTED', null, undefined, 1, { mode: 'partner_collected' }]) {
+      expect(await fundingMode(m)).toEqual({ ok: false, code: 'bad_input' });
+    }
+    expect(await fundingMode('partner_collected', 'nobody')).toEqual({ ok: false, code: 'not_found' });
+    expect(await fundingMode('partner_collected', 'default')).toEqual({ ok: false, code: 'not_found' });
+    await expectNothingWritten(before);
+    expect((await column('default')).fundingMode).toBeUndefined();
   });
 });

@@ -3,6 +3,7 @@ import { okVerify, realMoneyPayBody, testEvidence } from './helpers-pay-evidence
 import { DISCLOSURE_DRAFT_VERSION } from '@/lib/legal/disclosure-drafts';
 import { parsePayBody } from '@/lib/pay-body';
 import { isDisclosureAckVersion } from '@/lib/remittance-disclosure';
+import { validateSenderAddress, validateSenderDob } from '@/lib/travel-rule';
 import type { PaymentEvidence } from '@/lib/payment-evidence';
 
 // Fix pack 4 T8 (C24): the pay-evidence fixtures every later pay test uses.
@@ -20,14 +21,25 @@ describe('helpers-pay-evidence (C24)', () => {
   });
 
   it('realMoneyPayBody() posts DISCLOSURE_DRAFT_VERSION and a dh1 hash', () => {
-    expect(realMoneyPayBody()).toEqual({ otp: '654321', disclosureVersion: DISCLOSURE_DRAFT_VERSION, accountHolder: 'Anita Legal' });
+    // Fix pack 5 T21a (P32): plus the sender's invented address and a DOB 40 years before now.
+    const dob40 = new Date(Date.now() - 40 * 365.25 * 86_400_000).toISOString().slice(0, 10);
+    const base = { otp: '654321', disclosureVersion: DISCLOSURE_DRAFT_VERSION, accountHolder: 'Anita Legal' };
+    expect(realMoneyPayBody()).toEqual({ ...base, senderAddress: '1 Fixture Road, Testtown 00000', senderDob: dob40 });
+    expect(realMoneyPayBody({ originator: false })).toEqual(base);
     const hash = `dh1:${'a'.repeat(64)}`;
-    const body = realMoneyPayBody({ disclosureHash: hash, otp: '111111', accountHolder: 'Ravi Kumar' });
-    expect(body).toEqual({ otp: '111111', disclosureVersion: DISCLOSURE_DRAFT_VERSION, accountHolder: 'Ravi Kumar', disclosureHash: hash });
+    const body = realMoneyPayBody({ disclosureHash: hash, otp: '111111', accountHolder: 'Ravi Kumar', senderAddress: '9 Other Way', senderDob: '1980-01-02' });
+    expect(body).toEqual({
+      otp: '111111', disclosureVersion: DISCLOSURE_DRAFT_VERSION, accountHolder: 'Ravi Kumar',
+      senderAddress: '9 Other Way', senderDob: '1980-01-02', disclosureHash: hash,
+    });
+    expect(validateSenderAddress(realMoneyPayBody().senderAddress ?? '').ok).toBe(true);
+    expect(validateSenderDob(realMoneyPayBody().senderDob ?? '', new Date()).ok).toBe(true);
     const parsed = parsePayBody(body, 'transfer');
     expect(parsed.disclosureVersion).toBe(DISCLOSURE_DRAFT_VERSION);
     expect(parsed.disclosureHash).toBe(hash);
     expect(parsed.accountHolder).toBe('Ravi Kumar');
+    expect(parsed.senderAddress).toBe('9 Other Way');
+    expect(parsed.senderDob).toBe('1980-01-02');
   });
 
   it('testEvidence() parses as a PaymentEvidence with ack and snapshot input', () => {

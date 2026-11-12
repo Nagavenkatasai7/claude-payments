@@ -38,11 +38,14 @@ import { rescreenBeforePay } from '@/lib/pay-rescreen';
 import { railPartnerOf, realMoneyFor } from '@/lib/live-gate';
 import { resolveCorridorRules } from '@/lib/compliance-config';
 import { SENDS_PAUSED_MESSAGE } from '@/lib/flags';
-import { payAccountHolderInvalid, payApprovalNotRecorded, payNotAvailable, payReloadRequired, transferFunded } from '@/lib/pay-not-available';
+import { payAccountHolderInvalid, payApprovalNotRecorded, payNotAvailable, payOriginatorInvalid, payReloadRequired, transferFunded } from '@/lib/pay-not-available';
+import { originatorViewFor, writeOriginatorInfo } from '@/lib/originator-info';
+import { validateSenderAddress, validateSenderDob } from '@/lib/travel-rule';
 import { parsePayBody, validateAccountHolder } from '@/lib/pay-body';
 import { fillRecipientBookLegalName, payLegalNameOnFile, writeRecipientLegalName } from '@/lib/recipient-legal-name';
 import { readPayGateContext, SAFE_PAY_GATE_CONTEXT, type PayGateContext } from '@/lib/pay-gate-context';
 import { disclosureGateAtRequest, disclosureGateRefusal } from '@/lib/pay-disclosure-gate';
+import { payMoneyGateRefusal } from '@/lib/pay-money-gate';
 import { buildPaymentAuthEvidence } from '@/lib/payment-auth-evidence';
 import { providerLineFor } from '@/lib/legal/provider-line';
 import { alertPayEvidenceUnavailable, type PaymentEvidence } from '@/lib/payment-evidence';
@@ -336,13 +339,38 @@ export async function POST(
     // Fix pack 4 (C12): the pre-verify R18 gate context for the payment's OWNER
     // (the draft's tenant, else the transfer's). The rail is the routed partner,
     // else the owner; a draft has no environment yet (it mints live).
+    const railPartnerFor = (ownerId: PartnerId): PartnerId =>
+      otpDraft ? (otpDraft.settlementPartnerId ?? ownerId) : railPartnerOf(otpTransfer!);
     const gateContextFor = (ownerId: PartnerId): Promise<PayGateContext> =>
       readPayGateContext(getDb(), {
         ownerId,
-        railPartnerId: otpDraft ? (otpDraft.settlementPartnerId ?? ownerId) : railPartnerOf(otpTransfer!),
+        railPartnerId: railPartnerFor(ownerId),
         environment: otpDraft ? undefined : otpTransfer!.environment,
         transferType: (otpDraft ? otpDraft.transferType : otpTransfer!.transferType) ?? 'b2c',
       });
+    // Fix pack 5 T13b (P13 route pre-verify, M5): pay-process steps 5 (no
+    // unsigned rail) and 7 (no mock funding on real money) answered BEFORE a
+    // code is issued or checked, so their 409 never spends the code and nothing
+    // (evidence, legal name, originator data, a mint) is written first. Only a
+    // known real-money rail makes a read; pay-process stays the backstop. A
+    // draft is judged on its own fields (no row, no funding provider yet).
+    const moneyGateRefused = async (ctx: PayGateContext, ownerId: PartnerId): Promise<boolean> => {
+      const subject = otpDraft
+        ? {
+            transferType: otpDraft.transferType ?? 'b2c',
+            fundingMethod: otpDraft.fundingMethod,
+            partnerId: ownerId,
+            settlementPartnerId: otpDraft.settlementPartnerId,
+            environment: undefined,
+            fundingProvider: undefined,
+            fundingIntentRef: undefined,
+          }
+        : otpTransfer!;
+      const code = await payMoneyGateRefusal(getDb(), { ctx, railPartnerId: railPartnerFor(ownerId), subject });
+      if (!code) return false;
+      logWarn('pay.preverify-refused', 'money gate', otpDraft ? { draftId: transferId, code } : { transferId: payId, code });
+      return true;
+    };
 
     // (1) "request_otp": issue + deliver a code (free-form, or an auth template). No charge.
     if (body.action === 'request_otp') {
@@ -380,6 +408,7 @@ export async function POST(
       if (disclosureGateAtRequest({ mandatory: requestCtx.mandatory, disclosure: requestCtx.disclosure })) {
         return payNotAvailable();
       }
+      if (await moneyGateRefused(requestCtx, otpPartnerId)) return payNotAvailable();
       // Program-Fix 49A: the partner's name on the free-form text, on the partner's
       // OWN number only (the shared number keeps its wording). Best-effort: a read
       // error keeps the neutral default wording.
@@ -479,6 +508,10 @@ export async function POST(
     const payFunded = otpTransfer ? transferFunded(otpTransfer) : false;
     if (gateRefusal === 'reload_required') return payReloadRequired(payFunded);
     if (gateRefusal === 'not_available') return payNotAvailable();
+    // Fix pack 5 T13b (P13): the money gate, after R18 and before the
+    // account-holder rule (and T21a's originator rule) and the code check. An
+    // unresolved owner has the SAFE context: no read, pay-process decides.
+    if (payOwnerId && (await moneyGateRefused(payCtx, payOwnerId))) return payNotAvailable();
 
     // Does this request post bank details (the page's Step 1 or "Edit bank details")?
     // Pure body parsing; the fields are validated further down, before any write.
@@ -530,6 +563,58 @@ export async function POST(
         }
       }
     }
+
+    // Fix pack 5 T21a (P21, R38): the sender's home address and date of birth,
+    // b2c on real money only, after the account-holder rule and still BEFORE the
+    // code is checked. No read at all unless realMoneyForField (never true for
+    // the default owner) and the owner is resolved. A routed or exempt row, or a
+    // field already on file, is not asked: a typed value is then ignored (never
+    // validated or written). A field asked with its key absent (an old tab) ->
+    // 409 reload, checked for both fields before any 400; a posted value that is
+    // not a string or fails the travel-rule check -> 400 on that field. The
+    // values are written after the code passed (existing branch) or by the
+    // finalizer before its claim (draft branch).
+    const originator: { address?: string; dateOfBirth?: string } = {};
+    if ((otpTransfer?.transferType ?? otpDraft?.transferType ?? 'b2c') !== 'b2b' && payCtx.realMoneyForField && payOwnerId) {
+      const view = await originatorViewFor(
+        getDb(),
+        true,
+        otpTransfer
+          ? {
+              partnerId: otpTransfer.partnerId,
+              phone: otpTransfer.phone,
+              amountUsd: otpTransfer.amountUsd,
+              destinationCountry: otpTransfer.destinationCountry,
+              transferType: otpTransfer.transferType ?? 'b2c',
+              transferId: otpTransfer.id,
+              routed: !!otpTransfer.settlementPartnerId,
+            }
+          : {
+              partnerId: payOwnerId,
+              phone: otpDraft!.senderPhone,
+              amountUsd: otpDraft!.amountUsd,
+              destinationCountry: otpDraft!.destinationCountry ?? DEFAULT_DESTINATION_COUNTRY,
+              transferType: otpDraft!.transferType ?? 'b2c',
+              routed: !!otpDraft!.settlementPartnerId,
+            },
+      );
+      const askAddress = view.addressRequired && !view.addressOnFile;
+      const askDob = view.dobRequired && !view.dobOnFile;
+      if ((askAddress && !body.present.senderAddress) || (askDob && !body.present.senderDob)) {
+        return payReloadRequired(payFunded);
+      }
+      if (askAddress) {
+        const valid = body.senderAddress === null ? null : validateSenderAddress(body.senderAddress);
+        if (!valid?.ok) return payOriginatorInvalid('senderAddress');
+        originator.address = valid.value;
+      }
+      if (askDob) {
+        const valid = body.senderDob === null ? null : validateSenderDob(body.senderDob, new Date());
+        if (!valid?.ok) return payOriginatorInvalid('senderDob');
+        originator.dateOfBirth = valid.value;
+      }
+    }
+    const hasOriginator = originator.address !== undefined || originator.dateOfBirth !== undefined;
 
     // Fix pack 4 (C18 step 6): after a 2xx b2c payment with a typed name, fill the
     // saved recipient's EMPTY book entry (best-effort; never changes the answer).
@@ -737,6 +822,27 @@ export async function POST(
           if (wrote) legalRow = await store.getTransferDecrypted(payId);
           else logWarn('pay.legal_name_not_written', 'guard refused', { transferId: transfer.id });
         }
+        // Fix pack 5 T21a (P21): the sender's travel-rule data validated before
+        // the code, written set-if-unset on the OWNER's customer row with its
+        // customer.travel_rule_set audit row, BEFORE the re-screen and any charge.
+        // A guard miss (fewer fields written) goes on: the settle hold (P22)
+        // catches a real-money row. A THROW answers 503 here (never the outer
+        // catch, which would log the raw error object).
+        if (hasOriginator) {
+          try {
+            await writeOriginatorInfo(
+              getDb(),
+              { partnerId: transfer.partnerId, phone: transfer.phone },
+              originator,
+              { source: 'pay_page', transferId: transfer.id },
+            );
+          } catch (err) {
+            logWarn('pay.originator_write', err instanceof Error ? err.name : 'error', { transferId: transfer.id });
+            await alertPayEvidenceUnavailable(getDb(), 'transfer'); // never throws
+            pokeWorker(); // the ops.alert row is ready now
+            return payApprovalNotRecorded(payFunded);
+          }
+        }
         const rowName = (legalRow?.recipientLegalName ?? '').trim();
         // Decision D5: a typed name that differs from a name screened before leaves that old
         // name uncovered on real money, so the row goes to a person (POSSIBLE_MATCH, in_review;
@@ -835,9 +941,23 @@ export async function POST(
       stores,
       transferId,
       bankDetails,
-      typedLegalName ? { recipientLegalName: typedLegalName } : undefined,
+      typedLegalName || hasOriginator
+        ? {
+            ...(typedLegalName ? { recipientLegalName: typedLegalName } : {}),
+            ...(hasOriginator ? { originator } : {}),
+          }
+        : undefined,
     );
     if (!result.ok) {
+      if (result.error === 'originator_not_recorded') {
+        // Fix pack 5 T21a (P21): the finalizer could not write the sender's
+        // travel-rule data (it logged the error name). Nothing was claimed,
+        // minted or charged; the code is spent, so the same deduped alert as
+        // the evidence arms. A draft is never funded.
+        await alertPayEvidenceUnavailable(getDb(), 'transfer'); // never throws
+        pokeWorker();
+        return payApprovalNotRecorded();
+      }
       if (result.error === 'kyc_required') {
         return NextResponse.json(
           { ok: false, error: 'Please verify your identity before sending.', kyc_required: true },

@@ -14,7 +14,7 @@ import { createStore } from '@/lib/store';
 import { createCustomerStore } from '@/lib/customer-store';
 import { fakeRedis } from './helpers';
 import { freshDb, seedPartner } from './helpers-db';
-import { approveDisclosureForTest, certifyPartnerForTest } from './helpers-live';
+import { approveDisclosureForTest, certifyPartnerForTest, seedOriginatorForTest } from './helpers-live';
 import { realMoneyPayBody } from './helpers-pay-evidence';
 import { primeOfacSource, restoreOfacSource, setRailProviderType } from './helpers-sanctions';
 import type { Transfer } from '@/lib/types';
@@ -23,6 +23,9 @@ import type { PartnerIntegrations } from '@/lib/partner-integrations';
 import { resolvePartnerDisclosure } from '@/lib/partner-config';
 import { createPartnerRepo } from '@/db/repos/partner-repo';
 
+// Fix pack 5 T13a: this file tests the settlement URL and live certification gates, not the funding rule; stands in for a Stripe-funded row
+// (the mock-funding refusal is pinned in tests/pay-funding-refusal.test.ts).
+vi.mock('@/lib/funding-class', async (orig) => ({ ...(await orig<typeof import('@/lib/funding-class')>()), payFundingRefusal: () => false }));
 vi.mock('next/server', async (orig) => {
   const real = await orig<typeof import('next/server')>();
   return { ...real, after: () => {} };
@@ -175,6 +178,9 @@ async function acmeOnHttp(o: { certify?: boolean } = {}): Promise<void> {
     senderPhone: '15551234567', firstSeenAt: nowIso, kycStatus: 'verified', fullName: 'Test Sender',
     senderCountry: 'US', partnerId: 'acme', optInAt: nowIso, createdAt: nowIso, updatedAt: nowIso,
   });
+  // Fix pack 5 T20b (P0 rule 9): the sender's travel-rule data on file, so the settle-time
+  // ORIGINATOR_INFO_MISSING hold (P22) stays out of the rail URL and live-gate cases.
+  await seedOriginatorForTest(db, 'acme', '15551234567', { address: true, dob: true });
 }
 
 const BAD_URLS = ['http://10.0.0.5/settle', 'https://169.254.169.254/latest', 'https://localhost/x', 'https://rail.acme.com:8443/x', '   '];
@@ -391,5 +397,75 @@ describe('pay time — live certification (pack 3)', { retry: 0 }, () => {
     expect(res.status).toBe(400);
     expect(await res.json()).toEqual({ ok: false, error: 'Payment failed' });
     expect(capture).not.toHaveBeenCalled();
+  });
+});
+
+// Fix pack 5 T1 (P5, P13 step 5, gate #2b): a NON-SANDBOX row on a webhook-driven rail with no
+// current signing secret can never be instructed (the worker refuses it), so it is refused at pay
+// with the neutral 409 BEFORE any capture or evidence write. Step 4 (the URL check, 400) runs
+// first; mock rails and sandbox ('test') rows are untouched.
+describe('pay time — unsigned rail (pack 5 T1)', { retry: 0 }, () => {
+  const NOT_AVAILABLE = { ok: false, error: expect.any(String), reason: 'not_available' };
+
+  it('a simulator OWNER rail with no signing secret -> 409 not available, capture never called, no evidence written, status awaiting_payment, no outbox row, one pay.rail-unsigned log with ids only', async () => {
+    rails.byPartner.default = { providerType: 'simulator', credentials: {} };
+    const unsigned = warnLines('pay.rail-unsigned');
+    await store.saveTransfer(makeTransfer({ id: 'us1' }));
+    const res = await post('us1');
+    expect(res.status).toBe(409);
+    expect(await res.json()).toEqual(NOT_AVAILABLE);
+    expect(capture).not.toHaveBeenCalled();
+    expect(await evidenceCount()).toBe(0);
+    expect((await store.getTransfer('us1'))?.status).toBe('awaiting_payment');
+    expect(await outboxCount()).toBe(0);
+    const lines = unsigned();
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toContain('us1');
+    expect(lines[0]).toContain('default');
+    expect(lines[0]).not.toContain('15551234567');
+  });
+
+  it('a routed http rail with a passing URL and no signing secret -> 409 before capture', async () => {
+    rails.byPartner.railp = { providerType: 'http', credentials: { settlementUrl: 'https://rail.acme-test.com/settle' } };
+    const unsigned = warnLines('pay.rail-unsigned');
+    const t = makeTransfer({ id: 'us2', settlementPartnerId: 'railp' });
+    await store.saveTransfer(t);
+    const res = await processTransferPayment(store, t);
+    expect(res.status).toBe(409);
+    expect(await res.json()).toEqual(NOT_AVAILABLE);
+    expect(unsigned()).toHaveLength(1);
+    expect(capture).not.toHaveBeenCalled();
+    expect((await store.getTransfer('us2'))?.status).toBe('awaiting_payment');
+    expect(await outboxCount()).toBe(0);
+  });
+
+  it('a bad URL still answers 400 first (step 4 before step 5)', async () => {
+    rails.byPartner.default = { providerType: 'http', credentials: { settlementUrl: 'http://10.0.0.5/settle' } };
+    const unsigned = warnLines('pay.rail-unsigned');
+    const t = makeTransfer({ id: 'us3' });
+    await store.saveTransfer(t);
+    const res = await processTransferPayment(store, t);
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual({ ok: false, error: 'Payment failed' });
+    expect(unsigned()).toEqual([]);
+    expect(capture).not.toHaveBeenCalled();
+  });
+
+  it('a mock rail with no secret is untouched (200 paid)', async () => {
+    rails.byPartner.default = { providerType: 'mock', credentials: {} };
+    await store.saveTransfer(makeTransfer({ id: 'us4' }));
+    expect((await post('us4')).status).toBe(200);
+    expect(capture).toHaveBeenCalledTimes(1);
+    expect((await store.getTransfer('us4'))?.status).toBe('paid');
+  });
+
+  it("a test-environment ('test') payment on an unsigned simulator rail still pays", async () => {
+    // P5: a sandbox row settles on the mock rail and is never instructed (settlement.ts isSandbox).
+    rails.byPartner.default = { providerType: 'simulator', credentials: {} };
+    const t = makeTransfer({ id: 'us5', environment: 'test' });
+    await store.saveTransfer(t);
+    const res = await processTransferPayment(store, t);
+    expect(res.status).toBe(200);
+    expect(capture).toHaveBeenCalledTimes(1);
   });
 });

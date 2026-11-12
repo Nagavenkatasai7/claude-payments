@@ -17,6 +17,8 @@ import { logWarn } from '@/lib/log';
 //     deadline would turn a delivered instruction into a retryable one and re-POST it;
 //   • it writes through the worker's db, outside any transaction, after the POST has settled.
 // Like the 15a test ping (partner-settlement-endpoint.ts sendTestPing), no URL or body is stored.
+// Fix pack 5 T9 (P1, P4): the row holds the body's HASH (body_sha256, the same value as the sealed
+// rail_messages row of that POST), never a body.
 
 /** The most a delivery record may add to a settlement.instruct row (see the worker's ROW_DEADLINE_MS). */
 export const DELIVERY_LOG_TIMEOUT_MS = 2_000;
@@ -30,6 +32,12 @@ export interface InstructDeliveryMeta {
   outboxId: number;
   /** The outbox row's attempt number (claimBatch charges it before the handler runs). */
   attempt: number;
+  /**
+   * Fix pack 5 T9: the sha256 of the bytes POSTed, from the rail record (rail_messages). A Replay
+   * resets attempts, so this column, not a join on the attempt, ties the row to its body. Absent or
+   * null: stored as NULL.
+   */
+  bodySha256?: string | null;
 }
 
 export interface InstructDelivery extends InstructDeliveryMeta {
@@ -63,6 +71,7 @@ export async function recordInstructDelivery(db: DbOrTx, d: InstructDelivery, ti
         outcome: d.outcome,
         httpStatus: statusOf(d.httpStatus),
         latencyMs: latencyOf(d.latencyMs),
+        bodySha256: d.bodySha256 ?? null,
       }),
     );
     write.catch(() => {}); // a write that loses the race below must not surface as an unhandled rejection
@@ -107,6 +116,24 @@ export async function withInstructDeliveryLog(
   return { res, logged };
 }
 
+/**
+ * Truth check F10 (F2): was a settlement instruction for this transfer ever POSTed to this rail
+ * partner, by any build? Older builds keep no rail record (rail_messages) but write one row here
+ * per instruct POST (kind 'settlement.instruct', subject_id = the transfer id, partner_id = the
+ * rail partner), whatever its outcome: a POST that timed out may still have reached the rail.
+ * Read-only, ids only (no body, URL or customer field), scoped to the rail partner. A failed read
+ * THROWS (never true, never false).
+ */
+export async function hasInstructDelivery(db: DbOrTx, railPartnerId: string, transferId: string): Promise<boolean> {
+  const d = partnerWebhookDeliveries;
+  const rows = await db
+    .select({ id: d.id })
+    .from(d)
+    .where(and(eq(d.partnerId, railPartnerId), eq(d.kind, 'settlement.instruct'), eq(d.subjectId, transferId)))
+    .limit(1);
+  return rows.length > 0;
+}
+
 // ── The /partner delivery log reader ─────────────────────────────────────────────────────────────
 
 /** Rows per page of the partner delivery log. */
@@ -121,6 +148,8 @@ export interface DeliveryView {
   httpStatus: number | null;
   latencyMs: number | null;
   attempt: number;
+  /** fix pack 5: sha256 of the exact bytes POSTed; null on rows an older build wrote. */
+  bodySha256: string | null;
   createdAt: Date;
 }
 
@@ -147,7 +176,7 @@ export function parsePositiveId(v: unknown): number | null {
 export async function listDeliveries(db: DbOrTx, partnerId: string, opts: { before?: number | null }): Promise<{ rows: DeliveryView[]; nextBefore: number | null }> {
   const d = partnerWebhookDeliveries;
   const rows = await db
-    .select({ id: d.id, kind: d.kind, subjectId: d.subjectId, outcome: d.outcome, httpStatus: d.httpStatus, latencyMs: d.latencyMs, attempt: d.attempt, createdAt: d.createdAt })
+    .select({ id: d.id, kind: d.kind, subjectId: d.subjectId, outcome: d.outcome, httpStatus: d.httpStatus, latencyMs: d.latencyMs, attempt: d.attempt, bodySha256: d.bodySha256, createdAt: d.createdAt })
     .from(d)
     .where(and(eq(d.partnerId, partnerId), eq(d.kind, 'settlement.instruct'), opts.before ? lt(d.id, opts.before) : undefined))
     .orderBy(desc(d.id))

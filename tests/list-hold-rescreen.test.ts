@@ -24,7 +24,7 @@ import {
   SENDER_IDENTITY_MISSING_REASON,
   SENDER_SCREENING_REASON,
 } from '@/lib/compliance-config';
-import { primeOfacSource, restoreOfacSource, seedLiveEvidence, setRailProviderType } from './helpers-sanctions';
+import { primeListSet, primeOfacSource, restoreOfacSource, seedLiveEvidence, setRailProviderType } from './helpers-sanctions';
 
 // The worker poke, observed (the real one schedules via next/server after()).
 const poke = vi.hoisted(() => ({ calls: 0 }));
@@ -62,7 +62,8 @@ vi.mock('@/lib/pay-rescreen', async (orig) => {
   };
 });
 
-import { sweepListUnavailableHolds } from '@/lib/list-hold-rescreen';
+import { healPaidRowScreen, sweepListUnavailableHolds } from '@/lib/list-hold-rescreen';
+import { seedOriginatorForTest } from './helpers-live';
 
 const H = 3_600_000;
 const SENDER_PHONE = '15551230000';
@@ -136,6 +137,8 @@ beforeEach(async () => {
   customerStore = createCustomerStore(db, store);
   await seedPartner(db, 'acme');
   await seedSender('acme', SENDER);
+  // Fix pack 5 T20a (P0 rule 9): the sender's travel-rule data on file, ahead of the T20b/T23 gates.
+  await seedOriginatorForTest(db, 'acme', SENDER_PHONE, { address: true, dob: true });
   poke.calls = 0;
   fitnessReads.n = 0;
   names.throwFor = new Set();
@@ -218,6 +221,9 @@ describe('sweepListUnavailableHolds (fix pack 2 T4)', { retry: 0 }, () => {
     await setRailProviderType(db, 'acme', 'http');
     await db.execute(sql`DELETE FROM customers WHERE partner_id = 'acme'`);
     await seedSender('acme', undefined);
+    // Fix pack 5 T20b (P0 rule 9): the DELETE above removed the travel-rule data; this row has no
+    // Partner-API claim, so put it back (this case is about the sender NAME only).
+    await seedOriginatorForTest(db, 'acme', SENDER_PHONE, { address: true, dob: true });
     await heldRow({ id: 'lh_api' }, { senderName: 'Body Sender Name' });
     expect(await sweepListUnavailableHolds(db, new Date())).toEqual({ released: 0, stillHeld: 1, blocked: 0 });
     const after = await store.getTransfer('lh_api');
@@ -617,5 +623,55 @@ describe('sweepListUnavailableHolds (fix pack 2 T4)', { retry: 0 }, () => {
     const qs = stop();
     expect(qs).toHaveLength(1);
     expect(fitnessReads.n).toBe(0);
+  });
+});
+
+// Fix pack 5 T30 (R08, P27): under SANCTIONS_LIST=lists the sweep and the paid
+// heal judge the WHOLE floor set. A stale MHA list makes every real-money row
+// wait, India-bound or not (accepted over-hold, index.md Known limits).
+describe('the list-hold sweep and the paid heal under lists (fix pack 5 T30)', { retry: 0 }, () => {
+  it('under lists with a stale MHA list the sweep runs demo-only for every row (IN and non-IN) and the paid heal skips', async () => {
+    await setRailProviderType(db, 'acme', 'http');
+    await heldRow({ id: 'lh_in' });
+    await heldRow({ id: 'lh_mx', destinationCountry: 'MX', destinationCurrency: 'MXN' } as Partial<Transfer> & { id: string });
+    primeListSet({ checkedAgoMs: { 'in-mha-uapa': 9 * 24 * H } });
+    const au = await auditRows();
+    const ob = await outbox();
+    expect(await sweepListUnavailableHolds(db, new Date())).toEqual({ released: 0, stillHeld: 0, blocked: 0 });
+    expect(fitnessReads.n).toBe(1);
+    for (const id of ['lh_in', 'lh_mx']) {
+      const after = await store.getTransfer(id);
+      expect(after?.status).toBe('in_review');
+      expect(after?.complianceReasons).toEqual([LIST_UNAVAILABLE_REASON]);
+    }
+    expect(await auditRows()).toEqual(au);
+    expect(await outbox()).toEqual(ob);
+
+    // The paid heal: the set is not live, so it does not screen.
+    const paid = base({ id: 'lh_paid', status: 'paid', paidAt: new Date().toISOString() });
+    await store.saveTransfer(paid);
+    expect(await healPaidRowScreen(db, paid, new Date(), { prechecked: true })).toBe('skipped');
+    expect(fitnessReads.n).toBe(2);
+    expect(await auditRows()).toEqual(au);
+    // (A release under lists needs the set fitness inside screenTransfer: T29, below.)
+  });
+
+  // Fix pack 5 T29 (L1 amendment): with the set fitness in screenTransfer, a
+  // real-money hold is RELEASED under lists once every floor list is live, and
+  // screenHeldOnFile screens the row's own destination floor.
+  it('fix pack 5 T29: under lists with every list live the sweep releases an IN and a DE hold; the re-screens cover 4 and 2 lists', async () => {
+    await setRailProviderType(db, 'acme', 'http');
+    await heldRow({ id: 'lh_in29' });
+    await heldRow({ id: 'lh_de29', destinationCountry: 'DE', destinationCurrency: 'EUR' } as Partial<Transfer> & { id: string });
+    primeListSet({});
+    expect(await sweepListUnavailableHolds(db, new Date())).toEqual({ released: 2, stillHeld: 0, blocked: 0 });
+    for (const [id, n] of [['lh_in29', 4], ['lh_de29', 2]] as const) {
+      expect((await store.getTransfer(id))?.status).toBe('paid');
+      const screens = (await auditRows(id)).filter((a) => a.action === 'sanctions.screen');
+      expect(screens).toHaveLength(2);
+      expect(screens[1].meta).toMatchObject({ decision: 'clear', listFitness: 'live' });
+      expect((screens[1].meta.lists as unknown[]).length).toBe(n);
+    }
+    expect((await keys()).filter((x) => x?.startsWith('instruct:')).sort()).toEqual(['instruct:lh_de29', 'instruct:lh_in29']);
   });
 });

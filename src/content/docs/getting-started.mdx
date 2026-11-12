@@ -73,6 +73,7 @@ The response carries the fee, the total charge, the exchange rate and the amount
 ## Creating a transaction
 
 - `beneficiary.name` and `sender.name` are 1 to 80 characters, with no brackets (`[ ] { } < >`) and no control or line-break characters.
+- `sender.address` (one line, up to 300 characters) and `sender.date_of_birth` (YYYY-MM-DD, 18 or older) are optional. With a live key they are stored once for this sender (a later value never replaces a stored one) and sent to your own rail on a real-money transfer when the travel rule asks for them. With a test key they are checked and ignored. An invalid value is refused with `400`.
 - `beneficiary.payout_method` is `bank`, `upi` or `usdc` (default `bank`). An inline `payout_destination` is at most 64 printable characters. A masked display value, such as `****1234` or `account on file`, is refused with `422`.
 - `destination_country` is optional and defaults to `IN`. An unsupported value is refused with `400`; it is never changed to India.
 - Each of these is refused before the `Idempotency-Key` is bound, so a corrected retry with the same key succeeds.

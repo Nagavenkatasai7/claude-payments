@@ -1,0 +1,163 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Fix pack 5 T27: a HAND-BUILT sample of the UN Security Council Consolidated
+     List (legacy XML), built to the structure verified on 2026-11-11 against
+     https://scsanctions.un.org/sc-sanctions.xsd and the official files
+     https://scsanctions.un.org/xml/en/haiti and the by-reference download
+     (see src/lib/sanctions/un-sc-loader.ts). Every name, reference number,
+     date and value below is INVENTED; nothing here is taken from the list. -->
+<CONSOLIDATED_LIST xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="https://scsanctions.un.org/sc-sanctions.xsd" dateGenerated="2026-10-04T00:00:03.543Z">
+  <INDIVIDUALS>
+    <INDIVIDUAL>
+      <DATAID>9900001</DATAID>
+      <VERSIONNUM>1</VERSIONNUM>
+      <FIRST_NAME>ZEPHYRIN</FIRST_NAME>
+      <SECOND_NAME>MOCKOVANI</SECOND_NAME>
+      <THIRD_NAME/>
+      <FOURTH_NAME>na</FOURTH_NAME>
+      <UN_LIST_TYPE>Sampleland</UN_LIST_TYPE>
+      <REFERENCE_NUMBER>XXi.001</REFERENCE_NUMBER>
+      <LISTED_ON>2020-01-02</LISTED_ON>
+      <COMMENTS1>Invented record for tests.</COMMENTS1>
+      <HAS_INTERPOL_LINK>false</HAS_INTERPOL_LINK>
+      <INTERPOL_LINK/>
+      <DESIGNATION>
+        <VALUE>Invented designation</VALUE>
+      </DESIGNATION>
+      <NATIONALITY>
+        <VALUE>Sampleland</VALUE>
+      </NATIONALITY>
+      <LIST_TYPE>
+        <VALUE>UN List</VALUE>
+      </LIST_TYPE>
+      <LAST_DAY_UPDATED>
+        <VALUE>2021-03-04</VALUE>
+      </LAST_DAY_UPDATED>
+      <INDIVIDUAL_ALIAS>
+        <QUALITY>Good</QUALITY>
+        <ALIAS_NAME>Zeph MOCKOVANI</ALIAS_NAME>
+      </INDIVIDUAL_ALIAS>
+      <INDIVIDUAL_ALIAS>
+        <QUALITY>Low</QUALITY>
+        <ALIAS_NAME>Zephy</ALIAS_NAME>
+      </INDIVIDUAL_ALIAS>
+      <INDIVIDUAL_ALIAS>
+        <QUALITY/>
+        <ALIAS_NAME/>
+      </INDIVIDUAL_ALIAS>
+      <INDIVIDUAL_ADDRESS>
+        <CITY>Inventedville</CITY>
+        <COUNTRY>Sampleland</COUNTRY>
+      </INDIVIDUAL_ADDRESS>
+      <INDIVIDUAL_DATE_OF_BIRTH>
+        <TYPE_OF_DATE>APPROXIMATELY</TYPE_OF_DATE>
+        <YEAR>1970</YEAR>
+      </INDIVIDUAL_DATE_OF_BIRTH>
+      <INDIVIDUAL_PLACE_OF_BIRTH>
+        <CITY>Inventedville</CITY>
+        <COUNTRY>Sampleland</COUNTRY>
+      </INDIVIDUAL_PLACE_OF_BIRTH>
+      <INDIVIDUAL_DOCUMENT>
+        <TYPE_OF_DOCUMENT>Passport</TYPE_OF_DOCUMENT>
+        <NUMBER>X0000000</NUMBER>
+        <NOTE/>
+      </INDIVIDUAL_DOCUMENT>
+      <SORT_KEY/>
+      <SORT_KEY_LAST_MOD/>
+    </INDIVIDUAL>
+    <INDIVIDUAL>
+      <DATAID>9900002</DATAID>
+      <VERSIONNUM>1</VERSIONNUM>
+      <FIRST_NAME>ODALRIC</FIRST_NAME>
+      <SECOND_NAME>PLACEHOLD</SECOND_NAME>
+      <THIRD_NAME>FICTAVIO</THIRD_NAME>
+      <FOURTH_NAME>TESTARIS</FOURTH_NAME>
+      <UN_LIST_TYPE>Exemplaria</UN_LIST_TYPE>
+      <REFERENCE_NUMBER>YYi.002</REFERENCE_NUMBER>
+      <LISTED_ON>2019-05-06</LISTED_ON>
+      <COMMENTS1/>
+      <HAS_INTERPOL_LINK>false</HAS_INTERPOL_LINK>
+      <INTERPOL_LINK/>
+      <LIST_TYPE>
+        <VALUE>UN List</VALUE>
+      </LIST_TYPE>
+      <INDIVIDUAL_ALIAS>
+        <QUALITY>Low</QUALITY>
+        <ALIAS_NAME>Odo</ALIAS_NAME>
+        <CITY_OF_BIRTH>Inventedville</CITY_OF_BIRTH>
+      </INDIVIDUAL_ALIAS>
+      <INDIVIDUAL_ALIAS>
+        <QUALITY>Good</QUALITY>
+        <ALIAS_NAME>na</ALIAS_NAME>
+      </INDIVIDUAL_ALIAS>
+      <INDIVIDUAL_ALIAS>
+        <QUALITY></QUALITY>
+        <ALIAS_NAME></ALIAS_NAME>
+      </INDIVIDUAL_ALIAS>
+      <INDIVIDUAL_ALIAS/>
+      <INDIVIDUAL_ADDRESS>
+        <COUNTRY/>
+      </INDIVIDUAL_ADDRESS>
+      <INDIVIDUAL_PLACE_OF_BIRTH>
+        <COUNTRY/>
+      </INDIVIDUAL_PLACE_OF_BIRTH>
+      <INDIVIDUAL_DOCUMENT>
+        <TYPE_OF_DOCUMENT/>
+        <NUMBER/>
+      </INDIVIDUAL_DOCUMENT>
+      <SORT_KEY/>
+      <SORT_KEY_LAST_MOD/>
+    </INDIVIDUAL>
+  </INDIVIDUALS>
+  <ENTITIES>
+    <ENTITY>
+      <DATAID>9900101</DATAID>
+      <VERSIONNUM>1</VERSIONNUM>
+      <FIRST_NAME>FICTIVE HARBOUR SYNDICATE</FIRST_NAME>
+      <UN_LIST_TYPE>Sampleland</UN_LIST_TYPE>
+      <REFERENCE_NUMBER>XXe.001</REFERENCE_NUMBER>
+      <LISTED_ON>2021-07-08</LISTED_ON>
+      <COMMENTS1>Invented record for tests.</COMMENTS1>
+      <HAS_INTERPOL_LINK>false</HAS_INTERPOL_LINK>
+      <INTERPOL_LINK/>
+      <LIST_TYPE>
+        <VALUE>UN List</VALUE>
+      </LIST_TYPE>
+      <ENTITY_ALIAS>
+        <QUALITY>a.k.a.</QUALITY>
+        <ALIAS_NAME>FHS GROUP</ALIAS_NAME>
+      </ENTITY_ALIAS>
+      <ENTITY_ALIAS>
+        <QUALITY>f.k.a.</QUALITY>
+        <ALIAS_NAME>OLD FICTIVE DOCKS</ALIAS_NAME>
+      </ENTITY_ALIAS>
+      <ENTITY_ADDRESS>
+        <COUNTRY>Sampleland</COUNTRY>
+      </ENTITY_ADDRESS>
+      <SORT_KEY/>
+      <SORT_KEY_LAST_MOD/>
+    </ENTITY>
+    <ENTITY>
+      <DATAID>9900102</DATAID>
+      <VERSIONNUM>1</VERSIONNUM>
+      <FIRST_NAME>MOCK &amp; SAMPLE TRADING</FIRST_NAME>
+      <UN_LIST_TYPE>Exemplaria</UN_LIST_TYPE>
+      <REFERENCE_NUMBER>YYe.002</REFERENCE_NUMBER>
+      <LISTED_ON>2022-09-10</LISTED_ON>
+      <COMMENTS1/>
+      <HAS_INTERPOL_LINK>false</HAS_INTERPOL_LINK>
+      <INTERPOL_LINK/>
+      <LIST_TYPE>
+        <VALUE>UN List</VALUE>
+      </LIST_TYPE>
+      <ENTITY_ALIAS>
+        <QUALITY/>
+        <ALIAS_NAME/>
+      </ENTITY_ALIAS>
+      <ENTITY_ADDRESS>
+        <COUNTRY/>
+      </ENTITY_ADDRESS>
+      <SORT_KEY/>
+      <SORT_KEY_LAST_MOD/>
+    </ENTITY>
+  </ENTITIES>
+</CONSOLIDATED_LIST>

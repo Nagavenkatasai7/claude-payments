@@ -62,7 +62,9 @@ export type StepUpTarget =
   | 'live.certify' | 'live.revoke' | 'live.contract' | 'optin.counsel' | 'optin.approve' | 'posture.sign'
   | 'compliance_user.set' | 'switch.resume'
   // Reserved for PR5/PR6/PR8 (no caller yet): added in the same single union edit.
-  | 'licence.save' | 'corridor.save' | 'funding.save' | 'aml_rule.save' | 'risk_signal.save';
+  | 'licence.save' | 'corridor.save' | 'funding.save' | 'aml_rule.save' | 'risk_signal.save'
+  // Fix pack 5 (R08, P28): the India MHA list upload and its "confirm still current".
+  | 'sanctions_list.upload';
 
 export interface StaffStepUpDeps {
   redis: RedisLike;

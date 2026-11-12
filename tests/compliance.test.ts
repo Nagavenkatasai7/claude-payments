@@ -432,3 +432,29 @@ describe('screenTransfer — alsoRecipientNames (fix pack 2 T9)', () => {
     }
   });
 });
+
+// Fix pack 5 T29 (R08): destinationCountry picks the list floor ONLY under
+// SANCTIONS_LIST=lists; in every other mode it changes nothing.
+describe('screenTransfer — destinationCountry outside lists mode (fix pack 5 T29)', () => {
+  const original = process.env.SANCTIONS_LIST;
+  afterEach(() => restoreOfacSource(original));
+  const same = (e: Record<string, unknown>) => ({ ...e, screenedAt: '<t>', ...('listCheckedAt' in e ? { listCheckedAt: '<c>' } : {}) });
+
+  const MODES: Array<[string, () => void]> = [
+    ['unset', () => { delete process.env.SANCTIONS_LIST; }],
+    ['mock', () => { process.env.SANCTIONS_LIST = 'mock'; }],
+    ['ofac-sdn', () => { primeOfacSource({ checkedAgoMs: 3_600_000 }); }],
+  ];
+  for (const [label, prime] of MODES) {
+    it(`${label}: the evidence for 'IN' deep-equals the evidence without a destination`, async () => {
+      prime();
+      const base = { amountUsd: 50, recipientName: 'Golden Payee Person', senderName: 'John Doe', transfersToday: 0, requireLiveList: true };
+      const without = await screenTransfer(base);
+      const withIn = await screenTransfer({ ...base, destinationCountry: 'IN' });
+      expect(withIn.status).toBe(without.status);
+      expect(withIn.reasons).toEqual(without.reasons);
+      expect(same(withIn.evidence as unknown as Record<string, unknown>)).toEqual(same(without.evidence as unknown as Record<string, unknown>));
+      expect('lists' in withIn.evidence!).toBe(false);
+    });
+  }
+});

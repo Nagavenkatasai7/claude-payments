@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach } from 'vitest';
+import { sql } from 'drizzle-orm';
 import { createPartnerRepo } from '@/db/repos/partner-repo';
 import { capabilityOpen, isLiveCertified } from '@/lib/live-gate';
 import { LIVE_CAPABILITIES, parseLiveControls, postureSigned } from '@/lib/live-controls';
@@ -113,5 +114,91 @@ describe('approvedDisclosureConfig / approveDisclosureForTest (pack 4)', () => {
     await certifyPartnerForTest(db, pid('acme'));
     const p = await createPartnerRepo(db).getPartner(pid('acme'));
     expect(p?.supportConfig).toBeUndefined();
+  });
+});
+
+// Fix pack 5 T14 (P32): the owner's funding-mode record and a paid real-money row.
+describe('certifyPartnerForTest fundingMode / paidRealMoneyTransfer (pack 5)', () => {
+  it("writes fundingMode partner_collected by default; fundingMode: 'partner_psp' writes that; fundingMode: null writes none", async () => {
+    await certifyPartnerForTest(db, pid('acme'));
+    const a = (await createPartnerRepo(db).getPartner(pid('acme')))?.liveControls?.fundingMode;
+    expect(a).toMatchObject({ mode: 'partner_collected', setBy: 'test-admin' });
+    expect(Date.parse(a?.setAt ?? '')).toBeLessThan(Date.now());
+    await certifyPartnerForTest(db, pid('acme'), { fundingMode: 'partner_psp' });
+    expect((await createPartnerRepo(db).getPartner(pid('acme')))?.liveControls?.fundingMode?.mode).toBe('partner_psp');
+    await certifyPartnerForTest(db, pid('acme'), { fundingMode: null });
+    const p = await createPartnerRepo(db).getPartner(pid('acme'));
+    expect(p?.liveControls?.fundingMode).toBeUndefined();
+    expect(isLiveCertified(p)).toBe(true);
+  });
+
+  it('paidRealMoneyTransfer: a paid cleared live b2c row, its sender and fresh live evidence; fundingProvider by raw UPDATE', async () => {
+    const { paidRealMoneyTransfer } = await import('./helpers-live');
+    const { createStore } = await import('@/lib/store');
+    const { fakeRedis } = await import('./helpers');
+    const { createCustomerStore } = await import('@/lib/customer-store');
+    const { listScreenEvidence } = await import('@/lib/sanctions/evidence-read');
+    const t = await paidRealMoneyTransfer(db, { id: 'prm_1', fundingProvider: 'mock', fundingRef: 'mockfund-prm_1', originator: { address: true, dob: true } });
+    const store = createStore(fakeRedis(), db);
+    const row = await store.getTransfer('prm_1');
+    expect(row).toMatchObject({ status: 'paid', complianceStatus: 'cleared', partnerId: 'acme', fundingProvider: 'mock', fundingRef: 'mockfund-prm_1' });
+    expect(row?.environment ?? 'live').toBe('live');
+    expect(Date.now() - Date.parse(row?.paidAt ?? '')).toBeGreaterThan(15 * 60_000);
+    const c = await createCustomerStore(db, store).getCustomer(t.partnerId, t.phone);
+    expect(c?.fullName).toBeTruthy();
+    expect(c?.residentialAddress).toBeTruthy();
+    expect(c?.dateOfBirth).toBeTruthy();
+    const ev = await listScreenEvidence(db, row!, new Date());
+    expect(ev.at(-1)).toMatchObject({ listFitness: 'live', decision: 'clear' });
+    const plain = await paidRealMoneyTransfer(db, { id: 'prm_2' });
+    expect((await store.getTransfer(plain.id))?.fundingProvider).toBeUndefined();
+  });
+});
+
+// Fix pack 5 T20a (P32): the ONE originator fixture helper.
+describe('seedOriginatorForTest (pack 5 T20a)', () => {
+  const PHONE = '15551230042';
+  const onFile = async (partnerId: string) => {
+    const { createCustomerRepo } = await import('@/db/repos/customer-repo');
+    return createCustomerRepo(db, async () => null).originatorOnFile(pid(partnerId), PHONE);
+  };
+
+  it('default: the address only is on file', async () => {
+    const { seedOriginatorForTest } = await import('./helpers-live');
+    await seedOriginatorForTest(db, pid('acme'), PHONE);
+    expect(await onFile('acme')).toEqual({ address: true, dateOfBirth: false });
+  });
+
+  it('{ address: true, dob: true }: both; the date of birth is 40 years before now (YYYY-MM-DD, UTC)', async () => {
+    const { seedOriginatorForTest } = await import('./helpers-live');
+    const { createStore } = await import('@/lib/store');
+    const { fakeRedis } = await import('./helpers');
+    const { createCustomerStore } = await import('@/lib/customer-store');
+    await seedOriginatorForTest(db, pid('acme'), PHONE, { address: true, dob: true });
+    expect(await onFile('acme')).toEqual({ address: true, dateOfBirth: true });
+    const c = await createCustomerStore(db, createStore(fakeRedis(), db)).getCustomer(pid('acme'), PHONE);
+    expect(c?.dateOfBirth).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+    const years = (Date.now() - Date.parse(`${c?.dateOfBirth}T00:00:00Z`)) / (365.25 * 86_400_000);
+    expect(years).toBeGreaterThan(39.9);
+    expect(years).toBeLessThan(40.1);
+    expect(c?.residentialAddress).toBeTruthy();
+    expect(await onFile('beta')).toEqual({ address: false, dateOfBirth: false });
+  });
+
+  it('{ dob: true } alone: the date of birth only', async () => {
+    const { seedOriginatorForTest } = await import('./helpers-live');
+    await seedOriginatorForTest(db, pid('acme'), PHONE, { dob: true });
+    expect(await onFile('acme')).toEqual({ address: false, dateOfBirth: true });
+  });
+
+  it('paidRealMoneyTransfer({ originator: { address: true } }) uses it (the address only; none without the option)', async () => {
+    const { paidRealMoneyTransfer } = await import('./helpers-live');
+    const { createCustomerRepo } = await import('@/db/repos/customer-repo');
+    const t = await paidRealMoneyTransfer(db, { id: 'prm_o1', originator: { address: true } });
+    const repo = createCustomerRepo(db, async () => null);
+    expect(await repo.originatorOnFile(t.partnerId, t.phone)).toEqual({ address: true, dateOfBirth: false });
+    await db.execute(sql`DELETE FROM customers`);
+    const u = await paidRealMoneyTransfer(db, { id: 'prm_o2' });
+    expect(await repo.originatorOnFile(u.partnerId, u.phone)).toEqual({ address: false, dateOfBirth: false });
   });
 });

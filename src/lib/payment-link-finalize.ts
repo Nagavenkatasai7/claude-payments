@@ -11,6 +11,7 @@ import { sanctionsAuditEvent } from './sanctions/evidence';
 import { enqueueSanctionsBlockNotices } from './sanctions/notices';
 import { pokeWorker } from './outbox';
 import { logWarn } from './log';
+import { writeOriginatorInfo } from './originator-info';
 import { newTransferId } from './id';
 import { isLinkTokenShape, linkPayability, linkQuote, type LinkFundingMethod } from './payment-links';
 import { screenPayee } from './payees';
@@ -40,7 +41,13 @@ import type { Partner, Transfer } from './types';
 //     re-screen (resumeMinted), then the pay route resumes THAT transfer
 //   → fix pack 3: a real-money link on an uncertified owner (or the default
 //     tenant) is refused with the link still open (nothing written)
-//   → ensureCustomer (NO WhatsApp opt-in) → KYC gate → cap pre-check
+//   → ensureCustomer (NO WhatsApp opt-in) → KYC gate
+//   → fix pack 5 T22 (P21): the sender's travel-rule data the route validated
+//     (input.originator, real money only) written set-if-unset on the link
+//     owner's customer with its customer.travel_rule_set row; a throw answers
+//     'originator_not_recorded' with nothing claimed (the link stays open). A
+//     resume writes it the same way after its KYC gate, before the re-screen.
+//   → cap pre-check
 //   → CLAIM, one transaction: the `paylink:<linkId>` idempotency key is bound to
 //     a pre-generated transfer id AND the link moves open → used. A second tab, a
 //     crash replay or a retry gets the SAME id; a cancel or the expiry that won
@@ -116,7 +123,16 @@ export type LinkFinalizeError =
   | 'blocked'
   // Pack 3 (contract 5): a live control refused the mint (MintRefusedError).
   // Nothing was minted; the route answers 409 PAY_NOT_AVAILABLE.
-  | 'not_available';
+  | 'not_available'
+  // Fix pack 5 T22 (P21): the sender's address or date of birth could not be
+  // written. Nothing was claimed, minted or charged; the route answers 503.
+  | 'originator_not_recorded';
+
+/** Fix pack 5 T22 (P21): the travel-rule values the link route validated. */
+export interface LinkOriginatorInput {
+  address?: string;
+  dateOfBirth?: string;
+}
 
 export type LinkFinalizeResult =
   | { ok: true; transferId: string }
@@ -131,7 +147,13 @@ class ClaimLostError extends Error {
 
 export async function finalizeLinkPayment(
   stores: LinkFinalizeStores,
-  input: { token: string; fundingMethod: LinkFundingMethod; rate: LockedLinkRate | null; now?: Date },
+  input: {
+    token: string;
+    fundingMethod: LinkFundingMethod;
+    rate: LockedLinkRate | null;
+    now?: Date;
+    originator?: LinkOriginatorInput;
+  },
 ): Promise<LinkFinalizeResult> {
   const { store, customerStore, partnerStore, monthlyVolumeStore, dailyVolumeStore, db } = stores;
   const now = input.now ?? new Date();
@@ -184,7 +206,7 @@ export async function finalizeLinkPayment(
   // route resumes THAT transfer; nothing is re-priced or re-minted here. Time
   // has passed since the mint, so the KYC gate and a sender + recipient
   // re-screen run again first (the hosted pay route's Program-Fix 14 follow-up).
-  if (payable.transfer) return resumeMinted(stores, partner, link, payable.transfer, bank.accountHolder);
+  if (payable.transfer) return resumeMinted(stores, partner, link, payable.transfer, bank.accountHolder, input.originator);
 
   // sends.paused BEFORE anything is written (createTransfer re-checks under the
   // claim; that refusal is the resumable bound-but-unminted shape).
@@ -219,6 +241,11 @@ export async function finalizeLinkPayment(
   const customer = await customerStore.ensureCustomer(partnerId, link.customerPhone);
   const requiresKyc = sendGateActive(partner);
   if (requiresKyc && !isSendVerified(customer)) return { ok: false, error: 'kyc_required' };
+  // Fix pack 5 T22 (P21): after ensureCustomer and the KYC gate, before the
+  // claim (a KYC refusal writes nothing).
+  if (!(await writeLinkOriginator(db, link, input.originator, {}))) {
+    return { ok: false, error: 'originator_not_recorded' };
+  }
   // The sender is screened by the legal name on file, else the name the partner
   // gave for this customer (createTransfer screens it).
   const senderName = (customer.fullName ?? '').trim() || link.customerName;
@@ -323,9 +350,14 @@ async function resumeMinted(
   link: PaymentLink,
   transfer: Transfer,
   accountHolder: string,
+  originator: LinkOriginatorInput | undefined,
 ): Promise<LinkFinalizeResult> {
   const customer = await stores.customerStore.ensureCustomer(link.partnerId, link.customerPhone);
   if (sendGateActive(partner) && !isSendVerified(customer)) return { ok: false, error: 'kyc_required' };
+  // Fix pack 5 T22 (P21): after the KYC gate, BEFORE the re-screen and any charge.
+  if (!(await writeLinkOriginator(stores.db, link, originator, { transferId: transfer.id }))) {
+    return { ok: false, error: 'originator_not_recorded' };
+  }
   // Fix pack 2 T3 (R02): the transfer's RAIL partner (routed, else owner) and
   // its own environment decide real money; rescreenBeforePay then needs a live
   // list and also screens the stored recipient name (the payee's legal name).
@@ -344,5 +376,32 @@ async function resumeMinted(
     case 'flagged':
     case 'cleared':
       return { ok: true, transferId: transfer.id };
+  }
+}
+
+/**
+ * Fix pack 5 T22 (P21): write the validated travel-rule values on the link
+ * owner's customer (link.partnerId, link.customerPhone), source 'payment_link',
+ * routeId = the link id. No value -> no write, true. A guard miss (a value
+ * already on file) is not an error: the settle hold (P22) catches a gap. A
+ * throw is logged by error NAME only and answers false.
+ */
+async function writeLinkOriginator(
+  db: Db,
+  link: PaymentLink,
+  originator: LinkOriginatorInput | undefined,
+  extra: { transferId?: string },
+): Promise<boolean> {
+  if (!originator?.address && !originator?.dateOfBirth) return true;
+  try {
+    await writeOriginatorInfo(db, { partnerId: link.partnerId, phone: link.customerPhone }, originator, {
+      source: 'payment_link',
+      routeId: link.id,
+      ...(extra.transferId ? { transferId: extra.transferId } : {}),
+    });
+    return true;
+  } catch (err) {
+    logWarn('paylink.originator_write', err instanceof Error ? err.name : 'error', { linkId: link.id });
+    return false;
   }
 }

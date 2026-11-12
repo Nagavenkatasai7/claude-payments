@@ -23,6 +23,8 @@ import {
 } from '@/components/ui/table';
 import { DiagnosePanel } from './diagnose-panel';
 import { approveRefundAction, dismissRefundAction, retryRefundAction } from '../actions';
+import { cardRefundBlockedIds } from '@/lib/refund-row-flags';
+import { CARD_REFUND_UNAVAILABLE } from '@/lib/funding-class';
 import { SenderCell, FundingRefs } from '../sender-cell';
 import { resolveSenderNames, senderNameKey } from '@/lib/sender-names';
 import type { Transfer } from '@/lib/types';
@@ -82,6 +84,9 @@ export default async function OpsPage() {
       ...snap.staleReviews,
     ],
   );
+  // Final check F9 (X2): a real-money card payment cannot be approved or retried
+  // here; its row shows the reason instead (a rail read per listed card row only).
+  const cardBlocked = await cardRefundBlockedIds(getDb(), [...snap.refundsRequested, ...snap.refundsFailed]);
   const refundsTotal =
     snap.refundsRequested.length + snap.refundsPending.length + snap.refundsFailed.length;
   const healthy =
@@ -390,11 +395,15 @@ export default async function OpsPage() {
                           <TableCell>{age(t.createdAt)} ago</TableCell>
                           <TableCell className="text-right">
                             <div className="flex justify-end gap-2">
-                              <form action={approveRefundAction} className="flex items-center gap-1">
-                                <input type="hidden" name="id" value={t.id} />
-                                <Input name="note" maxLength={500} placeholder="Note (optional)" aria-label="Note (optional)" className="h-8 w-36" />
-                                <Button type="submit" size="sm" variant="default">Approve</Button>
-                              </form>
+                              {cardBlocked.has(t.id) ? (
+                                <span className="max-w-xs text-left text-xs text-muted-foreground">Cannot approve: {CARD_REFUND_UNAVAILABLE}</span>
+                              ) : (
+                                <form action={approveRefundAction} className="flex items-center gap-1">
+                                  <input type="hidden" name="id" value={t.id} />
+                                  <Input name="note" maxLength={500} placeholder="Note (optional)" aria-label="Note (optional)" className="h-8 w-36" />
+                                  <Button type="submit" size="sm" variant="default">Approve</Button>
+                                </form>
+                              )}
                               <form action={dismissRefundAction} className="flex items-center gap-1">
                                 <input type="hidden" name="id" value={t.id} />
                                 <Input name="note" maxLength={500} placeholder="Note (optional)" aria-label="Note (optional)" className="h-8 w-36" />
@@ -442,11 +451,15 @@ export default async function OpsPage() {
                           <TableCell className="tabular-nums">{refundAmount(t)}</TableCell>
                           <TableCell>{age(t.createdAt)} ago</TableCell>
                           <TableCell className="text-right">
-                            <form action={retryRefundAction} className="flex items-center gap-1">
-                              <input type="hidden" name="id" value={t.id} />
-                              <Input name="note" maxLength={500} placeholder="Note (optional)" aria-label="Note (optional)" className="h-8 w-36" />
-                              <Button type="submit" size="sm" variant="default">Retry</Button>
-                            </form>
+                            {cardBlocked.has(t.id) ? (
+                              <span className="max-w-xs text-left text-xs text-muted-foreground">Cannot retry: {CARD_REFUND_UNAVAILABLE}</span>
+                            ) : (
+                              <form action={retryRefundAction} className="flex items-center gap-1">
+                                <input type="hidden" name="id" value={t.id} />
+                                <Input name="note" maxLength={500} placeholder="Note (optional)" aria-label="Note (optional)" className="h-8 w-36" />
+                                <Button type="submit" size="sm" variant="default">Retry</Button>
+                              </form>
+                            )}
                           </TableCell>
                         </TableRow>
                       ))}

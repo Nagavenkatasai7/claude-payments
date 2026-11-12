@@ -6,6 +6,8 @@ import { normalizeName, tokenKey } from '../sanctions/normalize';
 import { ListSanctionsScreener } from '../sanctions/list-screener';
 import type { SanctionsListSource } from '../sanctions/list-source';
 import { PostgresSanctionsListSource } from '../sanctions/pg-list-source';
+import { MultiListSanctionsScreener } from '../sanctions/multi-list-screener';
+import { SANCTIONS_SOURCES, floorLists, type SanctionsSourceId } from '../sanctions/list-sets';
 import { createSanctionsListRepo } from '@/db/repos/sanctions-list-repo';
 import { getDb } from '@/db/client';
 
@@ -106,14 +108,27 @@ export class MockSanctionsScreener implements SanctionsScreener {
 // daily loader stored in Postgres (PR C, migration 0023; fails closed to
 // `flagged` when no version is loaded); anything else → the mock plus one
 // warning. It is optional, not in boot-assert, and unset in production.
+// Fix pack 5 (R08, P25): 'lists' (opt-in) → a MultiListSanctionsScreener over
+// floorLists(destinationCountry) (list-sets.ts), one Postgres source per list;
+// any missing list fails the screen closed. The other values ignore the
+// destination and are byte-identical to before.
 
-function defaultOfacSource(): SanctionsListSource {
+function defaultListSource(source: SanctionsSourceId): SanctionsListSource {
   // getDb() is resolved lazily (at the first cold load), so selecting the mock
   // — the default — never opens a pool.
-  return new PostgresSanctionsListSource(() => createSanctionsListRepo(getDb()), { source: 'ofac-sdn' });
+  return new PostgresSanctionsListSource(() => createSanctionsListRepo(getDb()), { source });
 }
 
-let ofacSource: SanctionsListSource = defaultOfacSource();
+// One source per list, filled lazily (ofac-sdn is the only one outside 'lists').
+const listSources = new Map<SanctionsSourceId, SanctionsListSource>();
+function listSource(source: SanctionsSourceId): SanctionsListSource {
+  let s = listSources.get(source);
+  if (!s) {
+    s = defaultListSource(source);
+    listSources.set(source, s);
+  }
+  return s;
+}
 let warnedUnknown = false;
 // The factory runs on EVERY screen; indexing the SDN list (~44k names) per call
 // would be wasteful, so a list screener is kept per distinct base list (the
@@ -121,16 +136,35 @@ let warnedUnknown = false;
 const ofacScreeners = new Map<string, ListSanctionsScreener>();
 const MAX_CACHED_SCREENERS = 64;
 
-/** Test seam: replace the OFAC list source (null restores the Postgres source) and reset the one-time warning. */
-export function setOfacListSourceForTests(src: SanctionsListSource | null): void {
-  ofacSource = src ?? defaultOfacSource();
+/** Test seam (pack 5 T28): replace one list's source (null restores its Postgres source), reset the one-time warning and the caches. */
+export function setListSourceForTests(source: SanctionsSourceId, src: SanctionsListSource | null): void {
+  listSources.set(source, src ?? defaultListSource(source));
   warnedUnknown = false;
   ofacScreeners.clear();
 }
 
+/** Test seam (pack 5 T28): the source one list currently uses. */
+export function listSourceForTests(source: SanctionsSourceId): SanctionsListSource {
+  return listSource(source);
+}
+
+/** Test seam: replace the OFAC list source (null restores the Postgres source) and reset the one-time warning. */
+export function setOfacListSourceForTests(src: SanctionsListSource | null): void {
+  setListSourceForTests('ofac-sdn', src);
+}
+
 /** Test seam: the OFAC list source currently in use. */
 export function ofacListSourceForTests(): SanctionsListSource {
-  return ofacSource;
+  return listSource('ofac-sdn');
+}
+
+/** warm() is contractually non-throwing; a custom source is guarded here. */
+async function warmSource(source: SanctionsListSource): Promise<void> {
+  try {
+    await source.warm?.();
+  } catch {
+    // swallowed on purpose (see above)
+  }
 }
 
 /**
@@ -141,11 +175,15 @@ export function ofacListSourceForTests(): SanctionsListSource {
  * loaded version, and a process with none fails closed at screen time.
  */
 export async function warmSanctionsList(): Promise<void> {
-  if (env.sanctionsList !== 'ofac-sdn') return;
-  try {
-    await ofacSource.warm?.();
-  } catch {
-    // warm() is contractually non-throwing; a custom source is guarded here.
+  const which = env.sanctionsList;
+  if (which === 'ofac-sdn') {
+    await warmSource(listSource('ofac-sdn'));
+    return;
+  }
+  // Fix pack 5 (P25): 'lists' warms every source (the screen inside the mint
+  // transaction may use any of them), each on its own, never throwing.
+  if (which === 'lists') {
+    await Promise.allSettled(SANCTIONS_SOURCES.map((s) => warmSource(listSource(s))));
   }
 }
 
@@ -155,12 +193,23 @@ export async function warmSanctionsList(): Promise<void> {
  * load; list-health.ts reads that as 'not_live'. Never a name: ids and hashes.
  */
 export async function servedOfacListInfo(): Promise<SanctionsListInfo> {
-  await warmSanctionsList();
-  const list = await ofacSource.load();
+  return servedListInfo('ofac-sdn');
+}
+
+/**
+ * Fix pack 5 (P25): servedOfacListInfo for any source. It warms only that
+ * source, and only where a screen would use it (ofac-sdn under 'ofac-sdn',
+ * any source under 'lists'), so the OFAC call order is unchanged.
+ */
+export async function servedListInfo(source: SanctionsSourceId): Promise<SanctionsListInfo> {
+  const which = env.sanctionsList;
+  const src = listSource(source);
+  if (which === 'lists' || (which === 'ofac-sdn' && source === 'ofac-sdn')) await warmSource(src);
+  const list = await src.load();
   if (!list || !Array.isArray(list.entries) || list.entries.length === 0) {
     throw new Error('empty sanctions list');
   }
-  const checkedAt = ofacSource.checkedAt?.()?.toISOString();
+  const checkedAt = src.checkedAt?.()?.toISOString();
   return {
     source: list.source,
     version: list.version,
@@ -170,21 +219,38 @@ export async function servedOfacListInfo(): Promise<SanctionsListInfo> {
   };
 }
 
-function ofacScreener(baseList: string[]): ListSanctionsScreener {
-  const key = baseList.join('\u0000');
+function listScreener(source: SanctionsSourceId, baseList: string[]): ListSanctionsScreener {
+  const key = `${source}\u0000${baseList.join('\u0000')}`;
   let s = ofacScreeners.get(key);
   if (!s) {
     if (ofacScreeners.size >= MAX_CACHED_SCREENERS) ofacScreeners.clear();
-    s = new ListSanctionsScreener(ofacSource, { extraNames: [...baseList] });
+    s = new ListSanctionsScreener(listSource(source), { extraNames: [...baseList], sourceName: source });
     ofacScreeners.set(key, s);
   }
   return s;
 }
 
-export function getSanctionsScreener(baseList: string[]): SanctionsScreener {
+function ofacScreener(baseList: string[]): ListSanctionsScreener {
+  return listScreener('ofac-sdn', baseList);
+}
+
+export function getSanctionsScreener(
+  baseList: string[],
+  opts?: { destinationCountry?: CountryCode | null },
+): SanctionsScreener {
   const which = env.sanctionsList;
   if (which === '' || which === 'mock') return new MockSanctionsScreener(baseList);
   if (which === 'ofac-sdn') return ofacScreener(baseList ?? []);
+  if (which === 'lists') {
+    // The base list (WATCHLIST ∪ the partner's extras) rides on ofac-sdn only,
+    // so each extra is screened once.
+    return new MultiListSanctionsScreener(
+      floorLists(opts?.destinationCountry).map((s) => ({
+        source: s,
+        screener: listScreener(s, s === 'ofac-sdn' ? baseList ?? [] : []),
+      })),
+    );
+  }
   if (!warnedUnknown) {
     warnedUnknown = true;
     logWarn('sanctions.unknown-list', 'SANCTIONS_LIST has an unknown value; screening with the mock list', {});

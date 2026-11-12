@@ -77,9 +77,9 @@ export async function POST(req: NextRequest) {
   if (integrations.payment.providerType !== 'simulator') {
     return NextResponse.json({ ok: false }, { status: 404 });
   }
-  // fix 29: the timestamped header decides alone when present; the legacy
-  // x-signature is still accepted without it (deprecation log). Current +
-  // unexpired previous signing secret (rotation grace).
+  // fix 29: the timestamped header decides alone. Fix pack 5 T2 (P6): a
+  // legacy-only instruction is refused (401; the verifier logs the reason, no
+  // alert). Current + unexpired previous signing secret (rotation grace).
   const nowMs = Date.now();
   const verified = verifyRailSignature(
     raw,
@@ -129,6 +129,12 @@ async function handleVerifiedInstruction(
     return NextResponse.json({ ok: true, providerRef: `simrail-${reference}`, action: 'reverse' });
   }
 
+  // Fix pack 5 T3 (P6): a settle must carry a well-formed amount. The callback
+  // echoes it, and a paid_out without one would 422 (amount_required) at our
+  // webhook and dead-letter rail.callback, so refuse it here, before enqueue.
+  const amount = echoAmount(body.amount);
+  if (!amount) return NextResponse.json({ ok: false, error: 'amount_required' }, { status: 400 });
+
   // Settle asynchronously: a DELAYED outbox row (Stage 2b — was a best-effort
   // after() sleep). The worker POSTs the SIGNED status callback through the
   // public webhook with retries/backoff/dead-letter — the REAL delivery path,
@@ -144,7 +150,6 @@ async function handleVerifiedInstruction(
   // account settles as before.
   const unreachable =
     isUnreachableAccount(body.payout?.destination) && (body.payout?.rail ?? 'bank') === 'bank';
-  const amount = echoAmount(body.amount);
   await createOutboxRepo(getDb()).enqueue(
     'rail.callback',
     {
@@ -153,7 +158,7 @@ async function handleVerifiedInstruction(
       ...(unreachable ? { status: 'failed', reason: UNREACHABLE_REASON } : {}),
       // fix 29: the rail reports back the amount it was instructed to pay; the
       // webhook checks it against the locked amount before delivering.
-      ...(amount ? { amount } : {}),
+      amount,
     },
     { delayMs: SETTLE_DELAY_MS, dedupeKey: `railcb:${reference}` },
   );

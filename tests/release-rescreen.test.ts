@@ -20,7 +20,7 @@ import { createStore } from '@/lib/store';
 import { createCustomerStore } from '@/lib/customer-store';
 import { fakeRedis } from './helpers';
 import { freshDb, seedPartner } from './helpers-db';
-import { certifyPartnerForTest } from './helpers-live';
+import { certifyPartnerForTest, seedOriginatorForTest } from './helpers-live';
 import type { Db } from '@/db/client';
 import type { Transfer } from '@/lib/types';
 import { beginHold } from '@/lib/settlement';
@@ -81,6 +81,17 @@ async function rail(partnerId: string, providerType: string) {
     payment: { providerType, credentials: { settlementUrl: STORED, signingSecret: 'sgn' }, webhookSecret: 'whk' },
     whatsapp: {},
   });
+}
+
+/**
+ * Fix pack 5 T14 (P8 G14): a row with a 'pi_' fundingRef stands for a Stripe
+ * charge. Stamp funding_provider 'stripe' (a NULL provider with a ref reads as
+ * a mock charge, which G14 and the sweeps never instruct) and record the
+ * owner's funding mode 'partner_psp' so the class matches.
+ */
+async function stripeFunded(id: string) {
+  await db.execute(sql`UPDATE transfers SET funding_provider = 'stripe' WHERE id = ${id}`);
+  await certifyPartnerForTest(db, 'acme', { fundingMode: 'partner_psp' });
 }
 
 function base(o: Partial<Transfer> & { id: string }): Transfer {
@@ -159,6 +170,8 @@ beforeEach(async () => {
     senderPhone: SENDER_PHONE, firstSeenAt: nowIso, kycStatus: 'verified', fullName: SENDER,
     senderCountry: 'US', partnerId: 'acme', optInAt: nowIso, createdAt: nowIso, updatedAt: nowIso,
   });
+  // Fix pack 5 T20a (P0 rule 9): the sender's travel-rule data on file, ahead of the T20b/T23 gates.
+  await seedOriginatorForTest(db, 'acme', SENDER_PHONE, { address: true, dob: true });
 });
 afterEach(() => restoreOfacSource(originalList));
 
@@ -575,7 +588,7 @@ describe('heal path: a paid real-money row refused for an old screen (review F1/
   // Pack 2 review R1 (E2): a heal match on a PAID (charged) row blocks the ledger
   // row in the same transaction as the evidence and the notices, tells a person
   // it is paid and charged, and the row is never instructed but can be refunded.
-  it('the sweep re-screen finds a match: the paid row is BLOCKED (on the compliance list), one paidmatch alert, never instructed, still refundable', async () => {
+  it('the sweep re-screen finds a match: the paid row is BLOCKED (on the compliance list), one paidmatch alert, never instructed; a card refund is refused (GE1)', async () => {
     fetchFn.mockReset();
     fetchFn.mockResolvedValue({ ok: true, json: async () => ({ providerRef: 'never' }) });
     await rail('acme', 'http');
@@ -584,6 +597,8 @@ describe('heal path: a paid real-money row refused for an old screen (review F1/
       paidAt: new Date(Date.now() - 20 * 60_000).toISOString(),
     });
     await store.saveTransfer(t);
+    // Fix pack 5 T14 (G14): a 'pi_' ref is a Stripe charge; a NULL provider with a ref reads as mock.
+    await stripeFunded(t.id);
     await seedLiveEvidence(
       db,
       { id: t.id, partnerId: t.partnerId, recipientName: t.recipientName, senderName: SENDER },
@@ -644,10 +659,12 @@ describe('heal path: a paid real-money row refused for an old screen (review F1/
     await drainOnce(deps(), 'w2');
     expect(fetchFn).not.toHaveBeenCalled();
 
-    // Still refundable: the staff refund claims it (none -> pending + funding.refund).
-    await issueRefund(db, t.id, REL);
-    expect((await store.getTransfer(t.id))?.refundStatus).toBe('pending');
-    expect(await keys()).toContain('refund:rr_heal_m');
+    // Review round 2 GE1: this row is a card payment through the partner's Stripe key on
+    // a real-money rail, which SmartRemit cannot refund yet: Issue refund refuses it for
+    // that reason (not for the block), and nothing is claimed or enqueued.
+    await expect(issueRefund(db, t.id, REL)).rejects.toThrow(/^Cannot refund: .*Stripe dashboard/);
+    expect((await store.getTransfer(t.id))?.refundStatus ?? 'none').toBe('none');
+    expect(await keys()).not.toContain('refund:rr_heal_m');
   });
 
   // Pack 2 review round 3 (K1): a heal match on a paid row that was (or may
@@ -674,6 +691,7 @@ describe('heal path: a paid real-money row refused for an old screen (review F1/
       paidAt: new Date(Date.now() - 20 * 60_000).toISOString(),
     });
     await store.saveTransfer(t);
+    await stripeFunded(t.id); // fix pack 5 T14 (G14): a 'pi_' ref is a Stripe charge
     await seedLiveEvidence(
       db,
       { id: t.id, partnerId: t.partnerId, recipientName: t.recipientName, senderName: SENDER },

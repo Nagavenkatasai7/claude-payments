@@ -42,7 +42,7 @@ vi.mock('@/lib/ip-rate-limit', () => ({ enforceIpRateLimit: (...a: unknown[]) =>
 import { POST } from '@/app/api/funding-webhook/[provider]/[partnerId]/route';
 
 const WH = ['whsec', 'route', 'only'].join('_');
-const KEY = ['sk', 'test', 'route', 'only'].join('_');
+const KEY = ['rk', 'test', 'routeonly'].join('_'); // fix pack 5 T16 (P16): a restricted key
 const now = () => Math.floor(Date.now() / 1000);
 const sign = (raw: string, secret = WH, t = now()) =>
   `t=${t},v1=${createHmac('sha256', secret).update(`${t}.${raw}`).digest('hex')}`;

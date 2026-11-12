@@ -3,12 +3,14 @@ import { readFileSync } from 'node:fs';
 import { sql } from 'drizzle-orm';
 import { freshDb, seedPartner } from './helpers-db';
 import type { Db } from '@/db/client';
-import { EnvKeyRing, defaultProvider } from '@/lib/field-crypto';
+import { EnvKeyRing, decryptField, defaultProvider, sealFieldV2 } from '@/lib/field-crypto';
 import { createTransferRepo } from '@/db/repos/transfer-repo';
 import { createRecipientRepo } from '@/db/repos/aux-repos';
 import { createIntegrationsRepo } from '@/db/repos/integrations-repo';
 import { createTicketRepo } from '@/db/repos/ticket-repo';
 import { conversationMessageId, createConversationLogRepo } from '@/db/repos/conversation-log-repo';
+import { RAIL_OUT, createRailMessageRepo } from '@/db/repos/rail-message-repo';
+import { ctx } from '@/lib/crypto-context';
 import { REENCRYPT_TABLES } from '../scripts/reencrypt-aad-v2';
 import {
   KEY_RING_TABLES,
@@ -148,6 +150,72 @@ describe('scripts/reencrypt-key-ring (fix 45 P4)', { retry: 0 }, () => {
     const [row] = await raw(`SELECT legal_name_enc FROM recipients`);
     expect(row.legal_name_enc?.startsWith('v2.k1.')).toBe(true);
     expect(await createRecipientRepo(db, defaultProvider()).getRecipientLegalName('acme', '15551230000', '919876543210')).toBe('Anita Sharma');
+  });
+
+  it('fix pack 5 T16 (P3): a funding config sealed under k0 is resealed under k1 and getFundingConfig opens it', async () => {
+    await seedPartner(db, 'acme');
+    const key = ['rk', 'test', 'keyringonly'].join('_');
+    await createIntegrationsRepo(db, new EnvKeyRing(KEY_0)).setFundingConfig('acme', { providerType: 'stripe', secretKey: key, webhookSecrets: ['whsec_k'] });
+    rotateEnv();
+    const report = await reencryptKeyRing(db, { apply: true, table: 'partner_integrations' });
+    expect(report.find((x) => x.column === 'funding_credentials_enc')).toMatchObject({ stale: 1, resealed: 1, failed: 0 });
+    const [row] = await raw(`SELECT funding_credentials_enc FROM partner_integrations`);
+    expect(row.funding_credentials_enc?.startsWith('v2.k1.')).toBe(true);
+    expect(await createIntegrationsRepo(db, defaultProvider()).getFundingConfig('acme')).toEqual({
+      providerType: 'stripe', secretKey: key, webhookSecrets: ['whsec_k'],
+    });
+  });
+
+  it('pack 5: a k0 rail_messages body is resealed under k1 through the append-only trigger and still opens', async () => {
+    await seedPartner(db, 'pa');
+    const body = '{"transfer_id":"tr_rm1","amount":{"destination":16600}}';
+    const { id } = await createRailMessageRepo(db, new EnvKeyRing(KEY_0)).append({
+      partnerId: 'pa', railPartnerId: 'pa', transferId: 'tr_rm1', direction: RAIL_OUT, kind: 'settle', body, signatureHeader: 't=1,v2=ab',
+    });
+    const [before] = await raw(`SELECT * FROM rail_messages`);
+    expect(before.body_enc?.startsWith('v2.k0.')).toBe(true);
+    rotateEnv();
+    const report = await reencryptKeyRing(db, { apply: true, table: 'rail_messages' });
+    expect(report).toEqual([
+      { table: 'rail_messages', column: 'body_enc', stale: 1, resealed: 1, skipped: 0, failed: 0 },
+    ]);
+    const [after] = await raw(`SELECT * FROM rail_messages`);
+    expect(after.body_enc?.startsWith('v2.k1.')).toBe(true);
+    const { body_enc: _b0, ...restBefore } = before;
+    const { body_enc: _b1, ...restAfter } = after;
+    expect(restAfter).toEqual(restBefore);
+    expect(decryptField(String(after.body_enc), defaultProvider(), ctx.railMessage(id, 1, 'settle'))).toBe(body);
+    // The trigger still rejects everything else.
+    const rejection = async (q: string): Promise<string> => {
+      try {
+        await db.execute(sql.raw(q));
+      } catch (e) {
+        const cause = (e as { cause?: unknown }).cause;
+        return `${String((e as Error).message)} ${cause instanceof Error ? cause.message : String(cause ?? '')}`;
+      }
+      throw new Error('expected the statement to be rejected');
+    };
+    expect(await rejection(`UPDATE rail_messages SET kind = 'reverse'`)).toMatch(/rail_messages is append-only/);
+    expect(await rejection(`DELETE FROM rail_messages`)).toMatch(/rail_messages is append-only/);
+    const again = await reencryptKeyRing(db, { apply: true, table: 'rail_messages' });
+    expect(again[0].stale).toBe(0);
+  });
+
+  it('pack 5: a row whose sealed body no longer matches its body_sha256 is NOT re-sealed and is counted failed', async () => {
+    await seedPartner(db, 'pa');
+    const ring = new EnvKeyRing(KEY_0);
+    const { id } = await createRailMessageRepo(db, ring).append({
+      partnerId: 'pa', railPartnerId: 'pa', transferId: 'tr_rm2', direction: RAIL_OUT, kind: 'settle', body: '{"a":1}', signatureHeader: null,
+    });
+    // A body_enc-only change (the trigger allows it): another body, sealed under the SAME row context.
+    const swapped = sealFieldV2('{"a":2}', ring, ctx.railMessage(id, 1, 'settle'), 'k0');
+    await db.execute(sql`UPDATE rail_messages SET body_enc = ${swapped} WHERE id = ${id}::uuid`);
+    rotateEnv();
+    const report = await reencryptKeyRing(db, { apply: true, table: 'rail_messages' });
+    expect(report[0]).toMatchObject({ stale: 1, resealed: 0, failed: 1 });
+    const [row] = await raw(`SELECT body_enc FROM rail_messages`);
+    expect(row.body_enc).toBe(swapped);
+    expect(row.body_enc?.startsWith('v2.k0.')).toBe(true);
   });
 
   it('pages numerically through bigint ids with batch=1 (ids past 10)', async () => {

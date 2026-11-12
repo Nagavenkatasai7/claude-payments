@@ -25,7 +25,7 @@ export const STATIC_PAGE_SEGMENTS: ReadonlySet<string> = new Set([
   'onboarding', 'ops', 'partner', 'partner-requests', 'partners', 'pay', 'payees',
   'payment-links', 'portal', 'privacy', 'profile', 'rates', 'receipt', 'recipients',
   'referral-rewards', 'referrals', 'refunds', 'register', 'reports', 'reset', 'review',
-  'reviews', 'revoke', 'rewards', 'schedules', 'security', 'seller', 'send', 'settings', 'signout',
+  'reviews', 'revoke', 'rewards', 'sanctions-lists', 'schedules', 'security', 'seller', 'send', 'settings', 'signout',
   'site-inactive', 'staff', 'statement', 'support', 'switches', 'team', 'terms', 'tickets',
   'token', 'transactions', 'transfers', 'trust', 'verify', 'waitlist', 'webhooks', 'whatsapp',
 ]);

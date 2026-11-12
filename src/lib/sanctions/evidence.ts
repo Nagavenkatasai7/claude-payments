@@ -34,6 +34,21 @@ export interface ScreeningEvidenceParty {
   matched: boolean;
   matchScore: number;
   matchedEntryId?: string;
+  /**
+   * Fix pack 5 T29 (SANCTIONS_LIST=lists only): this party was NOT screened
+   * (its screen failed closed on a partial list set), so matched false /
+   * score 0 is not a clear. Absent everywhere else.
+   */
+  unscreened?: true;
+}
+
+/** Fix pack 5 T29 (P26): one list of a SANCTIONS_LIST=lists set, as screened. */
+export interface ScreeningEvidenceList {
+  source: string;
+  version: string;
+  hash: string;
+  fitness: ListFitness;
+  checkedAt?: string;
 }
 
 export interface ScreeningEvidence {
@@ -53,6 +68,14 @@ export interface ScreeningEvidence {
   listCheckedAt?: string;
   /** Fix pack 2 (R02): the base list's hash before corridor additions, when known. */
   listBaseHash?: string;
+  /**
+   * Fix pack 5 T29 (R08, P26): written ONLY under SANCTIONS_LIST=lists, one
+   * item per list of the set in floor order. listSource / listVersion keep the
+   * composite values and listFitness is the SET fitness. A list that did not
+   * answer reads version 'unavailable', hash '', fitness 'not_live' and no
+   * checkedAt (it was not checked). Hashes and versions only, never a name.
+   */
+  lists?: ScreeningEvidenceList[];
 }
 
 /** The audit_events row shape every sanctions.screen write uses (actor is NOT NULL, schema.ts). */

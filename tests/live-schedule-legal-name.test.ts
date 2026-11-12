@@ -24,13 +24,16 @@ import { RECIPIENT_IDENTITY_MISSING_REASON } from '@/lib/compliance-config';
 import { processTransferPayment } from '@/lib/pay-process';
 import { fakeRedis } from './helpers';
 import { freshDb, seedPartner } from './helpers-db';
-import { certifyPartnerForTest } from './helpers-live';
+import { certifyPartnerForTest, seedOriginatorForTest } from './helpers-live';
 import { okVerify, realMoneyPayBody, testEvidence } from './helpers-pay-evidence';
 import { primeOfacSource, restoreOfacSource, setRailProviderType } from './helpers-sanctions';
 import type { KycProvider } from '@/lib/providers/kyc-provider';
 import type { PartnerIntegrations } from '@/lib/partner-integrations';
 import type { Schedule, Transfer } from '@/lib/types';
 
+// Fix pack 5 T13a: this file tests the live schedule and the account-holder name, not the funding rule; stands in for a Stripe-funded row
+// (the mock-funding refusal is pinned in tests/pay-funding-refusal.test.ts).
+vi.mock('@/lib/funding-class', async (orig) => ({ ...(await orig<typeof import('@/lib/funding-class')>()), payFundingRefusal: () => false }));
 vi.mock('next/server', async (orig) => {
   const real = await orig<typeof import('next/server')>();
   return { ...real, after: (_cb: () => unknown) => {} };
@@ -130,6 +133,8 @@ async function liveOwner() {
     senderPhone: SENDER, firstSeenAt: nowIso, kycStatus: 'verified', senderCountry: 'US',
     partnerId: OWNER, optInAt: nowIso, createdAt: nowIso, updatedAt: nowIso, fullName: 'Alex Sender',
   });
+  // Fix pack 5 T20a (P0 rule 9): the sender's travel-rule data on file, ahead of the T20b settle hold.
+  await seedOriginatorForTest(db, OWNER, SENDER, { address: true, dob: true });
 }
 
 async function saveBook(legalName?: string) {

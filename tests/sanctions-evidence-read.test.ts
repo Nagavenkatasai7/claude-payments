@@ -177,3 +177,91 @@ describe('uncoveredRoles', { retry: 0 }, () => {
     expect(uncoveredRoles([], { senderName: '', recipientNames: [] })).toEqual([]);
   });
 });
+
+// Fix pack 5 T29 (P26): lists[] (SANCTIONS_LIST=lists only). A well-formed one
+// is kept item by item (whitelisted keys); a malformed one never SKIPS the row
+// (an older live row must never be judged instead): the row is kept, lists is
+// dropped and listFitness forced to 'not_live', so the newest row refuses.
+describe('lists[] (fix pack 5 T29)', { retry: 0 }, () => {
+  const item = (over: Record<string, unknown> = {}) => ({
+    source: 'ofac-sdn', version: 'v1', hash: 'a'.repeat(64), fitness: 'live', checkedAt: new Date(Date.now() - HOUR).toISOString(), ...over,
+  });
+
+  it('a well-formed lists[] is kept (source, version, hash, fitness, checkedAt?); unknown item keys dropped', async () => {
+    const t = transfer();
+    const lists = [item(), item({ source: 'un-sc', checkedAt: undefined, extra: 'dropped' })];
+    await rawAudit({ partnerId: 'acme', action: 'sanctions.screen', subjectId: t.id, meta: { ...ev(), lists } });
+    const rows = await listScreenEvidence(db, t, new Date());
+    expect(rows).toHaveLength(1);
+    expect(rows[0].listFitness).toBe('live');
+    expect(rows[0].lists).toEqual([
+      { source: 'ofac-sdn', version: 'v1', hash: 'a'.repeat(64), fitness: 'live', checkedAt: lists[0].checkedAt },
+      { source: 'un-sc', version: 'v1', hash: 'a'.repeat(64), fitness: 'live' },
+    ]);
+  });
+
+  const BAD: Array<[string, unknown]> = [
+    ['lists not an array', { source: 'ofac-sdn' }],
+    ['an item that is not an object', ['ofac-sdn']],
+    ['an item with a wrong type', [item({ hash: 7 })]],
+    ['an item with checkedAt of a wrong type', [item({ checkedAt: 5 })]],
+    ['an unknown fitness value', [item({ fitness: 'fresh' })]],
+  ];
+  for (const [label, lists] of BAD) {
+    it(`${label} -> the row is KEPT, lists dropped, listFitness forced 'not_live'`, async () => {
+      const t = transfer();
+      await rawAudit({ partnerId: 'acme', action: 'sanctions.screen', subjectId: t.id, meta: { ...ev(), lists } });
+      const rows = await listScreenEvidence(db, t, new Date());
+      expect(rows).toHaveLength(1);
+      expect(rows[0].listFitness).toBe('not_live');
+      expect('lists' in rows[0]).toBe(false);
+    });
+  }
+
+  it('so instructGateRefuses on that newest row refuses, and an older live row is never judged instead', async () => {
+    const t = transfer();
+    const now = new Date();
+    await seedLiveEvidence(db, t, { at: new Date(now.getTime() - 2 * MIN) });
+    await rawAudit({
+      partnerId: 'acme', action: 'sanctions.screen', subjectId: t.id,
+      meta: { ...ev({ listSource: 'lists:ofac-sdn+ofac-cons' }), lists: [item({ fitness: 'fresh' })] }, at: new Date(now.getTime() - MIN),
+    });
+    const rows = await listScreenEvidence(db, t, now);
+    expect(rows).toHaveLength(2);
+    const newest = rows.at(-1)!;
+    expect(newest.listSource).toBe('lists:ofac-sdn+ofac-cons');
+    expect(instructGateRefuses(newest, now)).toBe(true);
+    expect(instructGateRefuses(rows[0], now)).toBe(false);
+  });
+
+  it('a malformed party unscreened flag keeps the row, marks the party unscreened and forces not_live', async () => {
+    const t = transfer();
+    await rawAudit({
+      partnerId: 'acme', action: 'sanctions.screen', subjectId: t.id,
+      meta: { ...ev(), parties: [{ role: 'sender', inputHash: 'h', matched: false, matchScore: 0, unscreened: 'yes' }] },
+    });
+    const rows = await listScreenEvidence(db, t, new Date());
+    expect(rows).toHaveLength(1);
+    expect(rows[0].listFitness).toBe('not_live');
+    expect(rows[0].parties).toEqual([{ role: 'sender', inputHash: 'h', matched: false, matchScore: 0, unscreened: true }]);
+  });
+
+  it('a well-formed unscreened party is kept as read', async () => {
+    const t = transfer();
+    await rawAudit({
+      partnerId: 'acme', action: 'sanctions.screen', subjectId: t.id,
+      meta: { ...ev(), parties: [{ role: 'sender', inputHash: 'h', matched: false, matchScore: 0, unscreened: true }] },
+    });
+    const rows = await listScreenEvidence(db, t, new Date());
+    expect(rows[0].listFitness).toBe('live');
+    expect(rows[0].parties[0].unscreened).toBe(true);
+  });
+
+  it('a row without lists (pack 4 and older) is read exactly as today: no lists key, no unscreened key', async () => {
+    const t = transfer();
+    const meta = { ...ev(), parties: [{ role: 'recipient', inputHash: 'h', matched: false, matchScore: 0 }] };
+    await rawAudit({ partnerId: 'acme', action: 'sanctions.screen', subjectId: t.id, meta });
+    const rows = await listScreenEvidence(db, t, new Date());
+    expect(rows).toEqual([meta]);
+  });
+});

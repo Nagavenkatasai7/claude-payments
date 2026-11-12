@@ -10,22 +10,42 @@ import { logWarn } from '../log';
 //   (current, plus the previous one during a rotation grace period).
 //
 // The legacy `x-signature` (HMAC over the raw body alone, current secret) is
-// still SENT byte-identical and still ACCEPTED when the new header is absent,
-// with a deprecation log naming the partner. When the new header is present
-// it alone decides — there is no fall-through to the legacy header.
+// still SENT byte-identical, but since fix pack 5 a request that carries only
+// it is REFUSED (reason legacy_rejected); the new header alone decides.
 //
 // verifyWebhookSignature (payment-webhook-verify.ts) is untouched: the Meta and
 // funding webhooks share it.
+//
+// Fix pack 5: signing with no secret throws UnsignedRailError.
 
 export const RAIL_SIG_HEADER = 'x-smartremit-signature';
 export const LEGACY_SIG_HEADER = 'x-signature';
 /** Accepted clock skew either way, in seconds. */
 export const RAIL_SIG_TOLERANCE_SEC = 300;
 
+/** Why a rail POST was refused (fix pack 5, P6). Logged, never answered. */
+export type RailSigFailReason = 'no_secret' | 'missing' | 'malformed' | 'stale' | 'bad_signature' | 'legacy_rejected';
+
+/**
+ * `legacyValid` is set only on `legacy_rejected`: whether the old x-signature
+ * HMAC verified (a genuine partner still on the old scheme).
+ */
 export type RailSigResult =
-  | { ok: false }
-  | { ok: true; scheme: 'v2'; nonce: string }
-  | { ok: true; scheme: 'legacy' };
+  | { ok: false; reason: RailSigFailReason; legacyValid?: boolean }
+  | { ok: true; scheme: 'v2'; nonce: string };
+
+/**
+ * Fix pack 5 T1 (P5): thrown by signRailHeaders when there is no non-empty
+ * secret. Nothing is ever POSTed to or from a rail unsigned. Not a
+ * RailInstructError: the instruct refuses an empty secret itself, before it
+ * gets here; the reverse and rail.callback let this one fail the row.
+ */
+export class UnsignedRailError extends Error {
+  constructor() {
+    super('no_signing_secret');
+    this.name = 'UnsignedRailError';
+  }
+}
 
 interface HeaderReader {
   get(name: string): string | null;
@@ -38,7 +58,8 @@ function v1For(secret: string, t: number, rawBody: string): string {
 /**
  * The outbound headers for a rail POST. `secrets[0]` is the current secret and
  * the only one the legacy header uses; the new header carries one v1 per
- * secret. No secrets ⇒ no headers (the unsigned behaviour is unchanged).
+ * secret. No non-empty secret ⇒ UnsignedRailError: nothing is ever sent
+ * unsigned (fix pack 5, P5).
  */
 export function signRailHeaders(
   rawBody: string,
@@ -46,7 +67,7 @@ export function signRailHeaders(
   nowMs: number,
 ): Record<string, string> {
   const active = secrets.filter((s) => s !== '');
-  if (active.length === 0) return {};
+  if (active.length === 0) throw new UnsignedRailError();
   const t = Math.floor(nowMs / 1000);
   const v1s = active.map((s) => `v1=${v1For(s, t, rawBody)}`).join(',');
   return {
@@ -85,7 +106,10 @@ function hexEqual(a: string, b: string): boolean {
 
 /**
  * Verify a rail POST. Fail-closed: no secrets, no header, a malformed or stale
- * new header, or no matching v1 ⇒ `{ ok: false }`.
+ * new header, no matching v1, or only the legacy header ⇒ `{ ok: false, reason }`.
+ * Every refusal is logged here, once (`rail-sig.refused`, ids and the reason
+ * only), so both rail routes log it without duplicated code; they answer a
+ * bare 401 (no oracle).
  *
  * `nonce` = sha256(`${t}.${rawBody}`): independent of which secret matched,
  * so the same timestamped message maps to one replay key during a rotation.
@@ -97,30 +121,39 @@ export function verifyRailSignature(
   nowMs: number,
   ctx: { partnerId?: string | null; route: string },
 ): RailSigResult {
+  const refuse = (reason: RailSigFailReason, legacyValid?: boolean): RailSigResult => {
+    logWarn('rail-sig.refused', 'rail signature refused', {
+      reason,
+      partnerId: ctx.partnerId ?? null,
+      route: ctx.route,
+    });
+    return legacyValid === undefined ? { ok: false, reason } : { ok: false, reason, legacyValid };
+  };
+
   const active = secrets.filter((s) => s !== '');
-  if (active.length === 0) return { ok: false };
+  if (active.length === 0) return refuse('no_secret');
 
   const v2 = headers.get(RAIL_SIG_HEADER);
   if (v2 !== null) {
     const parsed = parseHeader(v2);
-    if (!parsed) return { ok: false };
+    if (!parsed) return refuse('malformed');
     const nowSec = Math.floor(nowMs / 1000);
-    if (Math.abs(nowSec - parsed.t) > RAIL_SIG_TOLERANCE_SEC) return { ok: false };
+    if (Math.abs(nowSec - parsed.t) > RAIL_SIG_TOLERANCE_SEC) return refuse('stale');
     const matched = active.some((s) => {
       const expected = v1For(s, parsed.t, rawBody);
       return parsed.v1.some((got) => hexEqual(expected, got));
     });
-    if (!matched) return { ok: false };
+    if (!matched) return refuse('bad_signature');
     const nonce = createHash('sha256').update(`${parsed.t}.${rawBody}`).digest('hex');
     return { ok: true, scheme: 'v2', nonce };
   }
 
   const legacy = headers.get(LEGACY_SIG_HEADER) ?? '';
-  if (legacy === '') return { ok: false };
-  if (!active.some((s) => verifyWebhookSignature(rawBody, legacy, s))) return { ok: false };
-  logWarn('rail-sig.legacy', 'legacy rail signature accepted; x-smartremit-signature is recommended', {
-    partnerId: ctx.partnerId ?? null,
-    route: ctx.route,
-  });
-  return { ok: true, scheme: 'legacy' };
+  if (legacy === '') return refuse('missing');
+  // Fix pack 5 (P6): legacy-only is refused. legacyValid lets the payment
+  // webhook alert ops about a genuine partner still on the old scheme.
+  return refuse(
+    'legacy_rejected',
+    active.some((s) => verifyWebhookSignature(rawBody, legacy, s)),
+  );
 }

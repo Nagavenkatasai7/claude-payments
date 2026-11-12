@@ -95,8 +95,13 @@ export class MockFundingProvider implements FundingProvider {
     const transferId = typeof b.transfer_id === 'string' ? b.transfer_id : '';
     const event = typeof b.event === 'string' ? b.event : '';
     if (!transferId) return null;
-    if (event === 'captured' || event === 'refunded') {
+    if (event === 'captured') {
       const ref = typeof b.ref === 'string' && b.ref ? b.ref : `mockfund-${transferId}`;
+      return { transferId, event, ref };
+    }
+    if (event === 'refunded') {
+      // Fix pack 5 T13a (P13): a refund is never labelled as a charge.
+      const ref = typeof b.ref === 'string' && b.ref ? b.ref : `refund-webhook-${transferId}`;
       return { transferId, event, ref };
     }
     if (event === 'refund_failed') {
@@ -117,10 +122,25 @@ export function getFundingProvider(): FundingProvider {
 
 // ── Program-Fix 7: per-transfer selection (flag OFF ⇒ always the mock) ────────
 
+// fix pack 5 (P16): only a restricted key (rk_live_ / rk_test_) is ever used:
+// https://docs.stripe.com/keys (verified 2026-11-11: "Sandbox keys start with
+// ... `rk_test_` for restricted keys", live mode keys "start with `pk_live_`,
+// `rk_live_`, and `sk_live_`"; the key types table lists "Restricted API key
+// (RAK) `rk_...`", "Secret API key `sk_...` ... unrestricted permissions on all
+// Stripe APIs" and "Organization API key `sk_org_...`"). A secret, organization
+// or publishable key, or anything malformed, makes Stripe unavailable for the
+// partner (fail closed).
+export const RESTRICTED_STRIPE_KEY = /^rk_(live|test)_[A-Za-z0-9]+$/;
+
+/** True only for a string that is a restricted Stripe key (P16). Never throws. */
+export function isRestrictedStripeKey(k: unknown): boolean {
+  return typeof k === 'string' && RESTRICTED_STRIPE_KEY.test(k);
+}
+
 export type FundingSelection =
   | { kind: 'mock'; provider: FundingProvider }
   | { kind: 'stripe'; provider: StripeFundingProvider }
-  | { kind: 'refused'; reason: 'default_tenant' | 'routed' | 'unconfigured' | 'disabled_with_intent' };
+  | { kind: 'refused'; reason: 'default_tenant' | 'routed' | 'unconfigured' | 'disabled_with_intent' | 'unrestricted_key' };
 
 /**
  * Decide how THIS transfer's sender is charged. Pure (the caller reads the
@@ -135,9 +155,14 @@ export type FundingSelection =
  *     would be merchant of record) and ROUTED transfers (funds at one
  *     licensee, payout at another) never charge through Stripe.
  *  5. Stripe config without a secret key ⇒ refused (fail closed).
+ *  6. fix pack 5 (P16): a key that is not a restricted key (rk_live_ /
+ *     rk_test_) ⇒ refused 'unrestricted_key' (fail closed); the pay caller
+ *     raises the stripekey alert (alertUnrestrictedStripeKey, pay-process.ts).
  */
 export function selectFundingProvider(
-  transfer: Transfer,
+  // Fix pack 5 T13a: only the fields the rules read, so payFundingRefusal can
+  // judge a draft (no row yet) the same way. Every Transfer still fits.
+  transfer: Pick<Transfer, 'fundingProvider' | 'fundingIntentRef' | 'environment' | 'transferType' | 'partnerId' | 'settlementPartnerId'>,
   opts: { enabled: boolean; config: PartnerFundingConfig | null; fetchImpl?: typeof fetch },
 ): FundingSelection {
   const bound = transfer.fundingProvider === 'stripe' || !!transfer.fundingIntentRef;
@@ -154,6 +179,7 @@ export function selectFundingProvider(
   if (transfer.settlementPartnerId) return { kind: 'refused', reason: 'routed' };
   const secretKey = opts.config?.providerType === 'stripe' ? opts.config.secretKey ?? '' : '';
   if (!secretKey) return { kind: 'refused', reason: 'unconfigured' };
+  if (!isRestrictedStripeKey(secretKey)) return { kind: 'refused', reason: 'unrestricted_key' };
   return { kind: 'stripe', provider: new StripeFundingProvider({ secretKey }, opts.fetchImpl) };
 }
 

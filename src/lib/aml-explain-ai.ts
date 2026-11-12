@@ -8,6 +8,7 @@ import {
   RECIPIENT_WATCHLIST_REASON,
   SENDER_IDENTITY_MISSING_REASON,
   RECIPIENT_IDENTITY_MISSING_REASON,
+  ORIGINATOR_INFO_MISSING_REASON,
   SENDER_SCREENING_REASON,
   SENDER_WATCHLIST_REASON,
   VELOCITY_REASON,
@@ -49,6 +50,7 @@ export type HoldReasonCode =
   | 'screening'
   | 'sender_identity_missing'
   | 'recipient_identity_missing'
+  | 'originator_info_missing'
   | 'large_amount'
   | 'velocity'
   | 'aml_hold'
@@ -64,6 +66,7 @@ export const HOLD_REASON_CODES: Readonly<Record<string, HoldReasonCode>> = Objec
   [SENDER_IDENTITY_MISSING_REASON]: 'sender_identity_missing',
   [SENDER_SCREENING_REASON]: 'screening',
   [RECIPIENT_IDENTITY_MISSING_REASON]: 'recipient_identity_missing',
+  [ORIGINATOR_INFO_MISSING_REASON]: 'originator_info_missing',
   [LARGE_AMOUNT_REASON]: 'large_amount',
   [VELOCITY_REASON]: 'velocity',
   [AML_HOLD_REASON]: 'aml_hold',
@@ -378,6 +381,7 @@ const HOLD_TEXT: Readonly<Record<HoldReasonCode, string>> = Object.freeze({
   screening: 'name screening',
   sender_identity_missing: 'missing sender identity',
   recipient_identity_missing: 'missing recipient identity',
+  originator_info_missing: 'missing sender information',
   large_amount: 'a large amount',
   velocity: 'high transfer velocity',
   aml_hold: 'an AML review hold',

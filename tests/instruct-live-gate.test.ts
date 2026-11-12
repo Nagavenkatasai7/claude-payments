@@ -3,11 +3,12 @@ import { sql } from 'drizzle-orm';
 import { createStore } from '@/lib/store';
 import { fakeRedis } from './helpers';
 import { freshDb, seedPartner } from './helpers-db';
-import { certifyPartnerForTest } from './helpers-live';
+import { certifyPartnerForTest, seedOriginatorForTest } from './helpers-live';
 import { primeOfacSource, restoreOfacSource, seedLiveEvidence } from './helpers-sanctions';
 import { createOutboxRepo } from '@/db/repos/outbox-repo';
 import { createIntegrationsRepo } from '@/db/repos/integrations-repo';
 import { createFeatureFlagRepo } from '@/db/repos/feature-flag-repo';
+import { createIdempotencyRepo } from '@/db/repos/aux-repos';
 import { updateLiveControlsKey } from '@/db/repos/partner-repo';
 import {
   drainOnce,
@@ -161,6 +162,8 @@ beforeEach(async () => {
   fetchFn.mockResolvedValue(new Response(JSON.stringify({ providerRef: 'rail-1' }), { status: 200 }));
   await store.saveTransfer(transferFixture());
   await saveRail('acme', 'http');
+  // Fix pack 5 T20a (P0 rule 9): the sender's travel-rule data on file, ahead of the T20b/T23 gates.
+  await seedOriginatorForTest(db, 'acme', '15551230000', { address: true, dob: true });
 });
 afterEach(() => {
   invalidateFlagCache(db);
@@ -203,6 +206,10 @@ describe('settlement.instruct and the live-certification gate (pack 3 T6)', { re
     await seedPartner(db, 'railp');
     await saveRail('railp', 'http', RAILP);
     await store.saveTransfer(transferFixture({ settlementPartnerId: 'railp' }));
+    // Fix pack 5 T23 (P22, owner Q1): a non-exempt routed real-money row waits
+    // on the travel rule after this gate; a Partner-API-minted (exempt) routed
+    // row is still sent, so this case keeps proving the rail partner decides.
+    await createIdempotencyRepo(db).claim('acme', `order-${ID}`, ID);
     await enqueueInstruct();
     await expectDeferred(await drainOnce(deps(), 'w1'));
     expect(await opsAlerts()).toEqual([`livegate:${ID}`]);
@@ -257,9 +264,21 @@ describe('settlement.instruct and the live-certification gate (pack 3 T6)', { re
     expect(await opsAlerts()).toEqual([]);
   });
 
-  it.each([['mock'], ['no integrations row']])('uncertified %s rail -> unchanged (no livegate alert)', async (kind) => {
+  // Fix pack 5 T1 (P5, G11): with no integrations row there is no signing secret, so the
+  // instruct is refused unsigned (a charged rail-config failure), still with no livegate alert.
+  // (In production a mock or absent rail never reaches instruct: settlement.ts enqueues mock.settle.)
+  it('uncertified rail with no integrations row -> refused unsigned (no fetch), no livegate alert', async () => {
+    await db.execute(sql`DELETE FROM partner_integrations WHERE partner_id = 'acme'`);
+    await enqueueInstruct();
+    const r = await drainOnce(deps(), 'w1');
+    expect(fetchFn).not.toHaveBeenCalled();
+    expect(r).toMatchObject({ processed: 0, failed: 1, released: 0 });
+    expect((await rowState()).last_error).toBe('Signing secret not configured.');
+    expect((await opsAlerts()).filter((k) => k.startsWith('livegate:'))).toEqual([]);
+  });
+
+  it.each([['mock']])('uncertified %s rail -> unchanged (no livegate alert)', async (kind) => {
     if (kind === 'mock') await saveRail('acme', 'mock');
-    else await db.execute(sql`DELETE FROM partner_integrations WHERE partner_id = 'acme'`);
     await enqueueInstruct();
     const r = await drainOnce(deps(), 'w1');
     expect(r.processed).toBe(1);

@@ -11,16 +11,26 @@ import { listScreenEvidence } from '@/lib/sanctions/evidence-read';
 import { sendGateActive } from '@/lib/kyc-gate';
 import { logWarn } from '@/lib/log';
 import type { Transfer } from '@/lib/types';
+import type { TravelRuleRequirement } from '@/lib/travel-rule';
+import { ComplianceBlockUnavailableError, InstructPermanentError, isKeyConfigError, isTransientInstructError } from './instruct-errors';
+import { railPartnerOf } from './live-gate';
+
+// Fix pack 5 T4 (P7): defined in instruct-errors.ts (no import cycle once T5
+// makes this file throw InstructPermanentError), re-exported here.
+export { ComplianceBlockUnavailableError } from './instruct-errors';
 
 // Program-Fix 31 PR B (rail-10): the DB side of the settlement instruction's
 // additive `compliance` block. The worker calls this once per settlement.instruct
 // and spreads the result after every legacy key; the pure shape lives in
 // buildComplianceBlock (http-payment-provider.ts).
 //
-// FAIL OPEN: nothing here may stop a paid transfer from being instructed. A
-// failed customer / partner read (or a throw in the builder) degrades to a
-// block with originator null and a warn carrying the transfer id only; if even
-// that throws, the key is omitted (the block is optional for the rail, docs §3).
+// FAIL CLOSED (fix pack 5, P10): no instruction leaves without this block. A
+// transient read failure (P7 allow-list) throws ComplianceBlockUnavailableError
+// (retried, instructblock: alert from attempt 3), and so does a key-ring
+// misconfiguration (isKeyConfigError, review round 1 RA2); any other failure throws
+// InstructPermanentError('compliance_block') (dead-lettered at once; ops Retry /
+// partner Replay after the fix). The routed rule (originator null, C3) is not a
+// failure. The warn carries the transfer id and the error NAME only.
 //
 // TENANT: the customer and the partner are read under the OWNER partnerId
 // (customers are keyed (partner_id, phone)), never the routed rail partner's.
@@ -32,7 +42,8 @@ import type { Transfer } from '@/lib/types';
  * re-screen hours after the mint is the reference and no other audit row can crowd it out.
  * Malformed rows are skipped (the previous valid row is the reference). parseEvidence already
  * type-checked the four fields; the per-party input hashes and scores are never copied onto
- * the wire. A read error throws into loadComplianceBlock's fail-open catch.
+ * the wire; only the per-role party COUNTS are (fix pack 5 T5, `names_screened`). A read error
+ * throws into loadComplianceBlock's fail-closed catch.
  */
 async function screeningRef(db: DbOrTx, transfer: Transfer, now: Date): Promise<ComplianceScreeningRef | null> {
   const newest = (await listScreenEvidence(db, transfer, now)).at(-1);
@@ -42,6 +53,12 @@ async function screeningRef(db: DbOrTx, transfer: Transfer, now: Date): Promise<
     listVersion: newest.listVersion,
     decision: newest.decision,
     screenedAt: newest.screenedAt,
+    namesScreened: {
+      sender: newest.parties.filter((p) => p.role === 'sender').length,
+      recipient: newest.parties.filter((p) => p.role === 'recipient').length,
+    },
+    // Fix pack 5 T29 (P26): lists mode only; never the hashes or check times.
+    ...(newest.lists ? { lists: newest.lists.map(({ source, version, fitness }) => ({ source, version, fitness })) } : {}),
   };
 }
 
@@ -49,7 +66,8 @@ export async function loadComplianceBlock(
   db: DbOrTx,
   transfer: Transfer,
   now: Date = new Date(),
-): Promise<ComplianceBlock | undefined> {
+  opts: { travelRule?: TravelRuleRequirement | null } = {},
+): Promise<ComplianceBlock> {
   try {
     const transfers = createTransferRepo(db);
     const customer = await createCustomerRepo(db, (p, ph) => transfers.firstTransferAt(p, ph)).getCustomer(
@@ -61,16 +79,17 @@ export async function loadComplianceBlock(
     return buildComplianceBlock(transfer, customer, now, {
       kycGateActive: sendGateActive(partner),
       screening,
+      travelRule: opts.travelRule ?? null,
     });
-  } catch {
+  } catch (err) {
     // The error text is never logged: a decrypt or driver error can carry PII.
-    logWarn('instruct.compliance_block', 'compliance block degraded; originator omitted', {
-      transferId: transfer.id,
-    });
-    try {
-      return buildComplianceBlock(transfer, null, now, { omitOriginator: true });
-    } catch {
-      return undefined;
+    logWarn('instruct.compliance_block', err instanceof Error ? err.name : 'error', { transferId: transfer.id });
+    // Review round 1 (RA2, owner Q8): a key-ring misconfiguration (named in
+    // the error or its cause, isKeyConfigError) heals when the env is fixed,
+    // so it is transient here too, as at G1.
+    if (isTransientInstructError(err) || isKeyConfigError(err)) {
+      throw new ComplianceBlockUnavailableError(transfer.id, railPartnerOf(transfer), { cause: err });
     }
+    throw new InstructPermanentError(transfer.id, 'compliance_block', { cause: err });
   }
 }

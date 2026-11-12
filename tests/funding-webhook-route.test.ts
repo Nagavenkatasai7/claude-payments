@@ -16,13 +16,34 @@ import { NextRequest } from 'next/server';
 import { createHmac } from 'node:crypto';
 import { sql } from 'drizzle-orm';
 import { createTransferRepo } from '@/db/repos/transfer-repo';
-import { freshDb } from './helpers-db';
+import { freshDb, seedPartner } from './helpers-db';
+import { seedRealMoneyRail } from './helpers-live';
+import { createIntegrationsRepo } from '@/db/repos/integrations-repo';
 import type { Transfer } from '@/lib/types';
 
 let db: Awaited<ReturnType<typeof freshDb>>;
 vi.mock('@/db/client', async (orig) => {
   const real = await orig<typeof import('@/db/client')>();
   return { ...real, getDb: () => db };
+});
+
+// Fix pack 5 T13a: the route pokes the worker after an ops.alert enqueue.
+vi.mock('@/lib/outbox', () => ({ pokeWorker: () => {}, pokeWorkerDelayed: () => {} }));
+
+// Review round 2 GE2: a toggle that makes ONLY the rail-type read throw (every
+// other integrations call, and the transfer reads, stay real).
+let failRailRead = false;
+vi.mock('@/db/repos/integrations-repo', async (orig) => {
+  const real = await orig<typeof import('@/db/repos/integrations-repo')>();
+  return {
+    ...real,
+    createIntegrationsRepo: (...a: Parameters<typeof real.createIntegrationsRepo>) => {
+      const r = real.createIntegrationsRepo(...a);
+      return failRailRead
+        ? { ...r, paymentProviderType: async () => { throw new Error('connection terminated'); } }
+        : r;
+    },
+  };
 });
 
 // Stage 3 posture: the per-IP limiter would dial Upstash — always allow here.
@@ -65,6 +86,7 @@ beforeEach(async () => {
 });
 
 afterEach(() => {
+  failRailRead = false;
   delete process.env.FUNDING_WEBHOOK_SECRET_STRIPE;
   delete process.env.FUNDING_WEBHOOK_SECRET_MOCK;
 });
@@ -225,5 +247,186 @@ describe('POST /api/funding-webhook/[provider] — security posture', () => {
       rows: Array<{ n: number }>;
     };
     expect(rows.rows[0].n).toBe(0);
+  });
+});
+
+describe('pack 5 (T13a): no mock confirmation or refund on real money', () => {
+  type AlertRow = { dedupe_key: string; payload: { message: string } };
+  const alerts = async (): Promise<AlertRow[]> =>
+    ((await db.execute(sql`SELECT dedupe_key, payload FROM outbox WHERE kind = 'ops.alert' ORDER BY id`)) as unknown as {
+      rows: AlertRow[];
+    }).rows;
+  const signedMock = (b: Record<string, unknown>) => {
+    const raw = JSON.stringify(b);
+    return post('mock', raw, sig(raw, MOCK_SECRET));
+  };
+  async function simulatorRail(partnerId: string): Promise<void> {
+    await createIntegrationsRepo(db).saveIntegrations(partnerId, {
+      kyc: {}, whatsapp: {}, payment: { providerType: 'simulator', credentials: { signingSecret: 's' } },
+    });
+  }
+
+  beforeEach(async () => {
+    await seedPartner(db, 'acme');
+    await seedRealMoneyRail(db, 'acme');
+  });
+
+  it('captured on a real-money row: 200 { ok: true, ignored: true }, funding_ref stays NULL, ONE fundcapture:<id> alert', async () => {
+    await repo.saveTransfer(makeTransfer({ id: 'rm1', partnerId: 'acme' }));
+    const res = await signedMock({ transfer_id: 'rm1', event: 'captured', ref: 'fund-x' });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ ok: true, ignored: true });
+    const t = await repo.getTransfer('rm1');
+    expect(t?.fundingRef).toBeUndefined();
+    expect(t?.fundingProvider).toBeUndefined();
+    expect(t?.status).toBe('awaiting_payment');
+    let a = await alerts();
+    expect(a.map((r) => r.dedupe_key)).toEqual(['fundcapture:rm1']);
+    expect(a[0].payload.message).toContain('rm1');
+    expect(a[0].payload.message).toContain('acme');
+    for (const v of ['15551234567', 'Mom', '919876543210', '123456789', 'fund-x']) expect(a[0].payload.message).not.toContain(v);
+
+    // A replay adds no second alert.
+    expect((await signedMock({ transfer_id: 'rm1', event: 'captured', ref: 'fund-y' })).status).toBe(200);
+    a = await alerts();
+    expect(a).toHaveLength(1);
+    expect((await repo.getTransfer('rm1'))?.fundingRef).toBeUndefined();
+  });
+
+  it("captured on the same partner's sandbox row ('test') is recorded as today", async () => {
+    await repo.saveTransfer(makeTransfer({ id: 'sb1', partnerId: 'acme', environment: 'test' }));
+    const res = await signedMock({ transfer_id: 'sb1', event: 'captured', ref: 'fund-sb' });
+    expect(await res.json()).toEqual({ ok: true });
+    expect((await repo.getTransfer('sb1'))?.fundingRef).toBe('fund-sb');
+    expect(await alerts()).toEqual([]);
+  });
+
+  it('captured on a simulator row and on a default-tenant row is recorded as today', async () => {
+    await seedPartner(db, 'simp');
+    await simulatorRail('simp');
+    await repo.saveTransfer(makeTransfer({ id: 'si1', partnerId: 'simp' }));
+    await repo.saveTransfer(makeTransfer({ id: 'df1' }));
+    expect(await (await signedMock({ transfer_id: 'si1', event: 'captured', ref: 'fund-si' })).json()).toEqual({ ok: true });
+    expect(await (await signedMock({ transfer_id: 'df1', event: 'captured', ref: 'fund-df' })).json()).toEqual({ ok: true });
+    expect((await repo.getTransfer('si1'))?.fundingRef).toBe('fund-si');
+    expect((await repo.getTransfer('df1'))?.fundingRef).toBe('fund-df');
+    expect(await alerts()).toEqual([]);
+  });
+
+  it('a routed row is judged by its settlement rail (owner simulator, settlement partner http -> refused)', async () => {
+    await seedPartner(db, 'simp');
+    await simulatorRail('simp');
+    await repo.saveTransfer(makeTransfer({ id: 'ro1', partnerId: 'simp', settlementPartnerId: 'acme' }));
+    expect(await (await signedMock({ transfer_id: 'ro1', event: 'captured', ref: 'fund-ro' })).json()).toEqual({ ok: true, ignored: true });
+    expect((await repo.getTransfer('ro1'))?.fundingRef).toBeUndefined();
+    expect((await alerts()).map((r) => r.dedupe_key)).toEqual(['fundcapture:ro1']);
+  });
+
+  it('refunded on a real-money row: 200 { ok: true, ignored: true }, refund_status stays pending, refund_ref NULL, ONE fundrefund:<id> alert', async () => {
+    await repo.saveTransfer(makeTransfer({ id: 'rf1', partnerId: 'acme', status: 'paid', fundingRef: 'fund-rf1', refundStatus: 'pending' }));
+    const res = await signedMock({ transfer_id: 'rf1', event: 'refunded', ref: 'rf-001' });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ ok: true, ignored: true });
+    let t = await repo.getTransfer('rf1');
+    expect(t?.refundStatus).toBe('pending');
+    expect(t?.refundRef).toBeUndefined();
+    expect(t?.refundedAt).toBeUndefined();
+    let a = await alerts();
+    expect(a.map((r) => r.dedupe_key)).toEqual(['fundrefund:rf1']);
+    expect(a[0].payload.message).toContain('"refunded"');
+    expect(a[0].payload.message).toContain('rf1');
+    expect(a[0].payload.message).toContain('acme');
+    for (const v of ['15551234567', 'Mom', '919876543210', '123456789', 'rf-001', 'fund-rf1']) expect(a[0].payload.message).not.toContain(v);
+    // Final check F9 (U3): the whole text. No Stripe refund exists and a partner-collected refund with
+    // no reverse never completes by itself, so the tail names the exits that are true.
+    expect(a[0].payload.message).toBe(
+      '⚠️ SmartRemit ops: a funding "refunded" callback for transfer rf1 (partner acme) was refused: ' +
+        'its rail moves real money, and the generic funding webhook cannot confirm a real refund. The refund stays pending; ' +
+        "A refund here completes only on the partner's signed reverse, or as nofunds-<id> when nothing was collected on the live rail (a mock-funded or demo-era transfer). " +
+        "A card payment is refunded in the partner's Stripe dashboard and is not recorded here; " +
+        'any other partner-collected refund with no reverse waits for a person (refundrouted:<id>, refundheld:<id> or refundunrecorded:<id>). Check the payment provider and the partner before acting.',
+    );
+    expect(a[0].payload.message).not.toContain('the Stripe refund completes');
+
+    expect((await signedMock({ transfer_id: 'rf1', event: 'refunded', ref: 'rf-002' })).status).toBe(200);
+    a = await alerts();
+    expect(a).toHaveLength(1);
+    t = await repo.getTransfer('rf1');
+    expect(t?.refundStatus).toBe('pending');
+  });
+
+  it('refund_failed on a real-money row: the same answer, refund_status stays pending, the same fundrefund:<id> dedupe', async () => {
+    await repo.saveTransfer(makeTransfer({ id: 'rf2', partnerId: 'acme', status: 'paid', fundingRef: 'fund-rf2', refundStatus: 'pending' }));
+    const res = await signedMock({ transfer_id: 'rf2', event: 'refund_failed' });
+    expect(await res.json()).toEqual({ ok: true, ignored: true });
+    expect((await repo.getTransfer('rf2'))?.refundStatus).toBe('pending');
+    // After a refused 'refunded', a 'refund_failed' for the same row shares the key.
+    expect(await (await signedMock({ transfer_id: 'rf2', event: 'refunded' })).json()).toEqual({ ok: true, ignored: true });
+    const a = await alerts();
+    expect(a.map((r) => r.dedupe_key)).toEqual(['fundrefund:rf2']);
+    expect(a[0].payload.message).toContain('"refund_failed"');
+    expect((await repo.getTransfer('rf2'))?.refundStatus).toBe('pending');
+  });
+
+  it('refunded and refund_failed on a simulator row and a sandbox row are recorded as today', async () => {
+    await seedPartner(db, 'simp');
+    await simulatorRail('simp');
+    await repo.saveTransfer(makeTransfer({ id: 'sr1', partnerId: 'simp', status: 'paid', fundingRef: 'f', refundStatus: 'pending' }));
+    await repo.saveTransfer(makeTransfer({ id: 'sr2', partnerId: 'simp', status: 'paid', fundingRef: 'f', refundStatus: 'pending' }));
+    await repo.saveTransfer(makeTransfer({ id: 'sb2', partnerId: 'acme', environment: 'test', status: 'paid', fundingRef: 'f', refundStatus: 'pending' }));
+    await repo.saveTransfer(makeTransfer({ id: 'sb3', partnerId: 'acme', environment: 'test', status: 'paid', fundingRef: 'f', refundStatus: 'pending' }));
+    expect(await (await signedMock({ transfer_id: 'sr1', event: 'refunded', ref: 'r-sr1' })).json()).toEqual({ ok: true });
+    expect(await (await signedMock({ transfer_id: 'sr2', event: 'refund_failed' })).json()).toEqual({ ok: true });
+    expect(await (await signedMock({ transfer_id: 'sb2', event: 'refunded', ref: 'r-sb2' })).json()).toEqual({ ok: true });
+    expect(await (await signedMock({ transfer_id: 'sb3', event: 'refund_failed' })).json()).toEqual({ ok: true });
+    expect(await repo.getTransfer('sr1')).toMatchObject({ refundStatus: 'completed', refundRef: 'r-sr1' });
+    expect((await repo.getTransfer('sr2'))?.refundStatus).toBe('failed');
+    expect(await repo.getTransfer('sb2')).toMatchObject({ refundStatus: 'completed', refundRef: 'r-sb2' });
+    expect((await repo.getTransfer('sb3'))?.refundStatus).toBe('failed');
+    expect(await alerts()).toEqual([]);
+  });
+
+  // Review round 2 GE2: an unreadable rail type is not "real money" here. The
+  // route answers 503 with no write and no alert, so the sender retries.
+  it('refunded on a simulator row while the rail-type read fails: 503 { ok: false }, refund stays pending, no fundrefund:<id> alert', async () => {
+    await seedPartner(db, 'simp');
+    await simulatorRail('simp');
+    await repo.saveTransfer(makeTransfer({ id: 'rr1', partnerId: 'simp', status: 'paid', fundingRef: 'f', refundStatus: 'pending' }));
+    failRailRead = true;
+    const res = await signedMock({ transfer_id: 'rr1', event: 'refunded', ref: 'r-rr1' });
+    expect(res.status).toBe(503);
+    expect(await res.json()).toEqual({ ok: false });
+    expect((await repo.getTransfer('rr1'))?.refundStatus).toBe('pending');
+    expect(await alerts()).toEqual([]);
+    // The retry after the blip is recorded as today.
+    failRailRead = false;
+    expect(await (await signedMock({ transfer_id: 'rr1', event: 'refunded', ref: 'r-rr1' })).json()).toEqual({ ok: true });
+    expect(await repo.getTransfer('rr1')).toMatchObject({ refundStatus: 'completed', refundRef: 'r-rr1' });
+  });
+
+  it('captured on a real-money row while the rail-type read fails: 503, nothing recorded, no alert', async () => {
+    await repo.saveTransfer(makeTransfer({ id: 'rr2', partnerId: 'acme' }));
+    failRailRead = true;
+    const res = await signedMock({ transfer_id: 'rr2', event: 'captured', ref: 'fund-rr2' });
+    expect(res.status).toBe(503);
+    expect((await repo.getTransfer('rr2'))?.fundingRef).toBeUndefined();
+    expect(await alerts()).toEqual([]);
+  });
+
+  it("a sandbox row makes no rail read: recorded as today while the read would fail", async () => {
+    await repo.saveTransfer(makeTransfer({ id: 'rr3', partnerId: 'acme', environment: 'test', status: 'paid', fundingRef: 'f', refundStatus: 'pending' }));
+    failRailRead = true;
+    expect(await (await signedMock({ transfer_id: 'rr3', event: 'refunded', ref: 'r-rr3' })).json()).toEqual({ ok: true });
+    expect((await repo.getTransfer('rr3'))?.refundStatus).toBe('completed');
+  });
+
+  it('refunded with no ref completes with refund-webhook-<id>, never mockfund-', async () => {
+    await seedPartner(db, 'simp');
+    await simulatorRail('simp');
+    await repo.saveTransfer(makeTransfer({ id: 'nr1', partnerId: 'simp', status: 'paid', fundingRef: 'f', refundStatus: 'pending' }));
+    expect(await (await signedMock({ transfer_id: 'nr1', event: 'refunded' })).json()).toEqual({ ok: true });
+    const t = await repo.getTransfer('nr1');
+    expect(t).toMatchObject({ refundStatus: 'completed', refundRef: 'refund-webhook-nr1' });
+    expect(t?.refundRef).not.toMatch(/^mockfund-/);
   });
 });

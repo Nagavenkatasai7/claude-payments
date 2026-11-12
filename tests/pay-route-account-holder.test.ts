@@ -23,7 +23,7 @@ import { createCustomerStore } from '@/lib/customer-store';
 import { createDraftStore } from '@/lib/draft-store';
 import { fakeRedis } from './helpers';
 import { captureQueries, freshDb, seedPartner } from './helpers-db';
-import { certifyPartnerForTest } from './helpers-live';
+import { certifyPartnerForTest, seedOriginatorForTest } from './helpers-live';
 import { okVerify, realMoneyPayBody } from './helpers-pay-evidence';
 import { primeOfacSource, restoreOfacSource, setRailProviderType } from './helpers-sanctions';
 import { createIdempotencyRepo, createRecipientRepo } from '@/db/repos/aux-repos';
@@ -35,6 +35,9 @@ import { defaultProvider, encryptField } from '@/lib/field-crypto';
 import { ctx } from '@/lib/crypto-context';
 import type { PartnerIntegrations } from '@/lib/partner-integrations';
 
+// Fix pack 5 T13a: this file tests the account-holder name rule, not the funding rule; stands in for a Stripe-funded row
+// (the mock-funding refusal is pinned in tests/pay-funding-refusal.test.ts).
+vi.mock('@/lib/funding-class', async (orig) => ({ ...(await orig<typeof import('@/lib/funding-class')>()), payFundingRefusal: () => false }));
 vi.mock('next/server', async (orig) => {
   const real = await orig<typeof import('next/server')>();
   return { ...real, after: (_cb: () => unknown) => {} };
@@ -205,6 +208,9 @@ async function seedOwner(fullName: string, partnerId: string) {
     senderPhone: SENDER, firstSeenAt: nowIso, kycStatus: 'verified',
     senderCountry: 'US', partnerId, optInAt: nowIso, createdAt: nowIso, updatedAt: nowIso, fullName,
   });
+  // Fix pack 5 T20b (P0 rule 9): the sender's travel-rule data on file, so the settle-time
+  // ORIGINATOR_INFO_MISSING hold (P22) stays out of the cases about the account-holder name.
+  await seedOriginatorForTest(db, partnerId, SENDER, { address: true, dob: true });
 }
 
 /** OWNER: certified with an approved provider block, on an http rail, live OFAC list. */

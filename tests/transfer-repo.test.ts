@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { freshDb, seedPartner } from './helpers-db';
-import { createTransferRepo, type TransferRepo } from '@/db/repos/transfer-repo';
+import { sql } from 'drizzle-orm';
+import { createTransferRepo, TransferDecryptError, type TransferRepo } from '@/db/repos/transfer-repo';
 import { createAuditRepo, createIdempotencyRepo } from '@/db/repos/aux-repos';
 import { EnvKeyProvider } from '@/lib/field-crypto';
 import type { Db } from '@/db/client';
@@ -558,5 +559,85 @@ describe('senderTotalsSince (fix 16: ledger totals under one query)', () => {
     const t = await repo.senderTotalsSince('default', PHONE, DAY, MONTH);
     expect(t.todayUsdCents).toBe(37_000 + 100);
     expect(t.monthUsdCents).toBe(37_000 + 100_000 + 5_555 + 100 + 200);
+  });
+});
+
+describe('transfer-repo: getTransferForUpdate wraps only the decrypt (fix pack 5 T4, P7 G1)', () => {
+  it('a decrypt failure is rethrown as TransferDecryptError (name, ids-only message, cause kept)', async () => {
+    await repo.saveTransfer(fixture());
+    await db.execute(sql`UPDATE transfers SET payout_destination_enc = 'v2.k0.not-a-blob' WHERE id = 'tr_1'`);
+    const err = await db
+      .transaction((tx) => createTransferRepo(tx, provider).getTransferForUpdate('tr_1', { decrypt: true }))
+      .catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(TransferDecryptError);
+    const e = err as TransferDecryptError;
+    expect(e.name).toBe('TransferDecryptError');
+    expect(e.message).toBe('transfer_decrypt_failed:tr_1');
+    expect(e.transferId).toBe('tr_1');
+    expect(e.cause).toBeInstanceOf(Error);
+    expect(e.message).not.toContain('not-a-blob');
+  });
+
+  it('without decrypt nothing is wrapped (the masked read never opens the blob)', async () => {
+    await repo.saveTransfer(fixture());
+    await db.execute(sql`UPDATE transfers SET payout_destination_enc = 'v2.k0.not-a-blob' WHERE id = 'tr_1'`);
+    const t = await db.transaction((tx) => createTransferRepo(tx, provider).getTransferForUpdate('tr_1'));
+    expect(t?.id).toBe('tr_1');
+  });
+
+  it('a query error is NOT wrapped', async () => {
+    const failing = new Proxy(db, {
+      get(target, prop, receiver) {
+        if (prop === 'select') return () => { throw new Error('Failed query: select\nparams: '); };
+        const v = Reflect.get(target, prop, receiver);
+        return typeof v === 'function' ? v.bind(target) : v;
+      },
+    });
+    const err = await createTransferRepo(failing, provider)
+      .getTransferForUpdate('tr_1', { decrypt: true })
+      .catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(Error);
+    expect(err).not.toBeInstanceOf(TransferDecryptError);
+    expect((err as Error).message).toMatch(/^Failed query/);
+  });
+});
+
+describe('transfer-repo: setFundingRef provider stamp (fix pack 5 T12, P12)', { retry: 0 }, () => {
+  async function rawFunding(id: string) {
+    const raw = await db.execute(
+      sql`SELECT funding_provider, funding_ref, funding_intent_ref FROM transfers WHERE id = ${id}`,
+    );
+    return (raw as unknown as { rows: Record<string, string | null>[] }).rows[0];
+  }
+
+  it('setFundingRef with a provider stamps funding_provider once (COALESCE), in the same write-once update', async () => {
+    await repo.saveTransfer(fixture({ id: 'fp_mock' }));
+    await repo.setFundingRef('fp_mock', 'mockfund-fp_mock', 'mock');
+    expect(await rawFunding('fp_mock')).toMatchObject({ funding_provider: 'mock', funding_ref: 'mockfund-fp_mock' });
+    // A second call with another ref and provider changes nothing (write-once).
+    await repo.setFundingRef('fp_mock', 'mockfund-other', 'stripe');
+    expect(await rawFunding('fp_mock')).toMatchObject({ funding_provider: 'mock', funding_ref: 'mockfund-fp_mock' });
+  });
+
+  it('setFundingRef with two args (old callers) leaves funding_provider NULL', async () => {
+    await repo.saveTransfer(fixture({ id: 'fp_two' }));
+    await repo.setFundingRef('fp_two', 'mockfund-fp_two');
+    expect(await rawFunding('fp_two')).toMatchObject({ funding_provider: null, funding_ref: 'mockfund-fp_two' });
+    expect((await repo.getTransfer('fp_two'))!.fundingProvider).toBeUndefined();
+  });
+
+  it('an intent-bound row is never touched', async () => {
+    await repo.saveTransfer(fixture({ id: 'fp_bound' }));
+    expect(await repo.bindFundingIntent('fp_bound', 'default', 'stripe', 'pi_bound')).not.toBeNull();
+    await repo.setFundingRef('fp_bound', 'mockfund-fp_bound', 'mock');
+    expect(await rawFunding('fp_bound')).toMatchObject({
+      funding_provider: 'stripe', funding_ref: null, funding_intent_ref: 'pi_bound',
+    });
+  });
+
+  it("the mapper reads 'mock' back", async () => {
+    await repo.saveTransfer(fixture({ id: 'fp_read' }));
+    await repo.setFundingRef('fp_read', 'mockfund-fp_read', 'mock');
+    expect((await repo.getTransfer('fp_read'))!.fundingProvider).toBe('mock');
   });
 });

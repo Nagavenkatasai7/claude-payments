@@ -41,7 +41,7 @@ function Outcome({ state, done }: { state: Result; done: string }) {
   );
 }
 
-function CodeField({ id }: { id: string }) {
+export function CodeField({ id }: { id: string }) {
   return (
     <label className="flex flex-col gap-1.5 text-sm font-medium" htmlFor={id}>
       Your authenticator code
@@ -122,6 +122,30 @@ export function ContractForm({ partnerId, action }: { partnerId: string; action:
         </Button>
       </div>
       <Outcome state={state} done="Contract recorded." />
+    </form>
+  );
+}
+
+// Fix pack 5 T17 (P17): the partner's funding mode. Every save asks for the code (the action's
+// step-up is always: true); the action refuses partner_psp without Stripe funding and a restricted key.
+export function FundingModeForm({ partnerId, action }: { partnerId: string; action: LiveAction }) {
+  const [state, submit, pending] = useLive(action);
+  return (
+    <form action={submit} className="flex flex-col gap-3" data-testid="live-funding-form">
+      <label className="flex flex-col gap-1.5 text-sm font-medium">
+        Funding mode
+        <select name="mode" className={INPUT_CLASS} defaultValue="partner_collected">
+          <option value="partner_collected">Partner collects the sender&apos;s money</option>
+          <option value="partner_psp">Partner&apos;s own Stripe account (needs Stripe funding and a restricted key)</option>
+        </select>
+      </label>
+      <CodeField id={`live-funding-code-${partnerId}`} />
+      <div>
+        <Button type="submit" size="sm" variant="outline" disabled={pending}>
+          {pending ? 'Saving…' : 'Save funding mode'}
+        </Button>
+      </div>
+      <Outcome state={state} done="Funding mode saved." />
     </form>
   );
 }

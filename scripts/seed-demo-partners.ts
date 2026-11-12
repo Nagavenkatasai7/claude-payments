@@ -154,6 +154,20 @@ async function main() {
           webhookSecret: randomBytes(32).toString('hex'),
         },
       });
+    } else if (!integ.payment.credentials?.signingSecret || !integ.payment.webhookSecret) {
+      // fix pack 5 T1: an unsigned simulator rail is refused at pay and at the worker.
+      // Heal an EXISTING simulator row: fill ONLY the missing secret(s), keep every other field.
+      await integrationsStore.saveIntegrations(id, {
+        ...integ,
+        payment: {
+          ...integ.payment,
+          credentials: {
+            ...integ.payment.credentials,
+            signingSecret: integ.payment.credentials?.signingSecret || randomBytes(32).toString('hex'),
+          },
+          webhookSecret: integ.payment.webhookSecret || randomBytes(32).toString('hex'),
+        },
+      });
     }
 
     // Ensure an API key (idempotent): issue only if the partner has none.

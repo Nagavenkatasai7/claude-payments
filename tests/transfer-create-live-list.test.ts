@@ -12,7 +12,7 @@ import { createTransferRepo } from '@/db/repos/transfer-repo';
 import { resetRateCacheForTests } from '@/lib/rate';
 import { fakeRedis } from './helpers';
 import { captureQueries, freshDb, seedPartner, seedSender } from './helpers-db';
-import { primeOfacSource, restoreOfacSource } from './helpers-sanctions';
+import { primeListSet, primeOfacSource, restoreOfacSource } from './helpers-sanctions';
 import { certifyPartnerForTest } from './helpers-live';
 import type { Db } from '@/db/client';
 import type { ScreeningEvidence } from '@/lib/sanctions/evidence';
@@ -141,6 +141,19 @@ describe('mint live-list gate — real-money rails (fix pack 2 R02)', { retry: 0
     const [ev] = await evidenceRows(db, t.id);
     expect(ev).toMatchObject({ decision: 'clear', listFitness: 'live', listSource: 'ofac-sdn' });
     expect(ev.listCheckedAt).toBeDefined();
+    expect(await listAlerts(db)).toEqual([]);
+  });
+
+  it('fix pack 5 T29: SANCTIONS_LIST=lists, every list live, a real-money mint to IN -> cleared on the four-list floor (lists.length 4, set fitness live)', async () => {
+    const { db, store, partnerStore, mvs } = await makeStores();
+    await partnerWith(db, 'acme', 'http');
+    await certifyPartnerForTest(db, 'acme');
+    primeListSet({});
+    const t = await createTransfer(store, partnerStore, mvs, { ...base, partnerId: 'acme', destinationCountry: 'IN' });
+    expect(t.complianceStatus).toBe('cleared');
+    const [ev] = await evidenceRows(db, t.id);
+    expect(ev).toMatchObject({ decision: 'clear', listFitness: 'live', listSource: 'lists:ofac-sdn+ofac-cons+un-sc+in-mha-uapa' });
+    expect(ev.lists).toHaveLength(4);
     expect(await listAlerts(db)).toEqual([]);
   });
 

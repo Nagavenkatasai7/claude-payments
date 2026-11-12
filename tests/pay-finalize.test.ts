@@ -17,6 +17,31 @@ import { DEFAULT_PARTNER_ID } from '@/lib/defaults';
 
 const PHONE = '15551234567';
 
+// Fix pack 5 T21a (P21): the order of the originator write and the mint, and a write fault.
+// Both modules are the real ones (spread); the wrappers only record and, on demand, throw.
+const origSeam = vi.hoisted(() => ({ order: [] as string[], writeThrows: false }));
+vi.mock('@/lib/originator-info', async (orig) => {
+  const real = await orig<typeof import('@/lib/originator-info')>();
+  return {
+    ...real,
+    writeOriginatorInfo: async (...a: Parameters<typeof real.writeOriginatorInfo>) => {
+      origSeam.order.push('writeOriginatorInfo');
+      if (origSeam.writeThrows) throw new TypeError('originator write failed');
+      return real.writeOriginatorInfo(...a);
+    },
+  };
+});
+vi.mock('@/lib/transfer-create', async (orig) => {
+  const real = await orig<typeof import('@/lib/transfer-create')>();
+  return {
+    ...real,
+    createTransfer: async (...a: Parameters<typeof real.createTransfer>) => {
+      origSeam.order.push('createTransfer');
+      return real.createTransfer(...a);
+    },
+  };
+});
+
 async function buildStores() {
   const redis = fakeRedis();
   const db = await freshDb(); // truncates + reseeds 'default' partner
@@ -1063,5 +1088,113 @@ describe('finalizeDraftPayment: the recipient legal name at the mint (pack 4 T15
     )) as unknown as { rows: Array<{ meta: { parties: Array<{ role: string }> } }> };
     expect(rows.rows).toHaveLength(1);
     expect(rows.rows[0].meta.parties.map((p) => p.role)).toEqual(['recipient', 'sender', 'recipient']);
+  });
+});
+
+// Fix pack 5 T21a (P21, critic C4): the sender's travel-rule data typed on the
+// pay page is written on the draft OWNER's customer row after the cap pre-check
+// and BEFORE the claim; a failure claims and mints nothing.
+describe('finalizeDraftPayment: the originator data (pack 5 T21a)', { retry: 0 }, () => {
+  const ADDRESS = '7 Invented Close, Mocktown 12345';
+  const onFile = async (stores: Awaited<ReturnType<typeof buildStores>>) => {
+    const { createCustomerRepo } = await import('@/db/repos/customer-repo');
+    return createCustomerRepo(stores.db, async () => null).originatorOnFile('default', PHONE);
+  };
+  const travelRuleMeta = async (stores: Awaited<ReturnType<typeof buildStores>>) => {
+    const r = (await stores.db.execute(
+      sql`SELECT meta FROM audit_events WHERE action = 'customer.travel_rule_set' ORDER BY id`,
+    )) as unknown as { rows: Array<{ meta: unknown }> };
+    return r.rows.map((x) => x.meta);
+  };
+  beforeEach(() => {
+    origSeam.order = [];
+    origSeam.writeThrows = false;
+  });
+
+  it('opts.originator is written for the draft owner before createTransfer, with its audit row', async () => {
+    const stores = await buildStores();
+    const draftId = await makeDraft(stores, 200);
+    const r = await finalizeDraftPayment(stores, draftId, undefined, { originator: { address: ADDRESS } });
+    expect(r.ok).toBe(true);
+    expect(origSeam.order).toEqual(['writeOriginatorInfo', 'createTransfer']);
+    expect(await onFile(stores)).toEqual({ address: true, dateOfBirth: false });
+    expect(await travelRuleMeta(stores)).toEqual([{ source: 'pay_page', fields: ['address'], routeId: draftId }]);
+  });
+
+  it('after the cap pre-check: an over-cap draft writes nothing', async () => {
+    const stores = await buildStores();
+    const draftId = await makeDraft(stores, 200);
+    await seedLedgerSpend(stores.db, { partnerId: 'default', phone: PHONE, amountUsd: 500 });
+    expect(await finalizeDraftPayment(stores, draftId, undefined, { originator: { address: ADDRESS } })).toEqual({ ok: false, error: 'cap' });
+    expect(origSeam.order).toEqual([]);
+    expect(await onFile(stores)).toEqual({ address: false, dateOfBirth: false });
+  });
+
+  it('skipped when alreadyMinted (a replay after a crash before consume)', async () => {
+    const stores = await buildStores();
+    const draftId = await makeDraft(stores, 200);
+    vi.spyOn(stores.draftStore, 'consumeDraft').mockResolvedValueOnce(null);
+    const first = await finalizeDraftPayment(stores, draftId);
+    expect(first.ok).toBe(true);
+    origSeam.order = [];
+    const again = await finalizeDraftPayment(stores, draftId, undefined, { originator: { address: ADDRESS } });
+    expect(again).toEqual(first);
+    expect(origSeam.order).not.toContain('writeOriginatorInfo');
+    expect(await onFile(stores)).toEqual({ address: false, dateOfBirth: false });
+  });
+
+  it("a throw returns { ok:false, error:'originator_not_recorded' } with nothing claimed or minted; one warn with the draft id and the error name", async () => {
+    const stores = await buildStores();
+    const draftId = await makeDraft(stores, 200);
+    origSeam.writeThrows = true;
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    expect(await finalizeDraftPayment(stores, draftId, undefined, { originator: { address: ADDRESS } })).toEqual({
+      ok: false, error: 'originator_not_recorded',
+    });
+    expect(origSeam.order).toEqual(['writeOriginatorInfo']);
+    expect(await createIdempotencyRepo(stores.db).find(DEFAULT_PARTNER_ID, `draft:${draftId}`)).toBeNull();
+    expect(await stores.store.getTransferCount('default', PHONE)).toBe(0);
+    expect(await stores.draftStore.getDraft(draftId)).not.toBeNull();
+    const lines = warn.mock.calls.map((c) => c.map(String).join(' ')).filter((l) => l.includes('pay.finalize_originator'));
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toContain('TypeError');
+    expect(lines[0]).toContain(draftId);
+    expect(lines[0]).not.toContain(ADDRESS);
+    warn.mockRestore();
+  });
+
+  it('a b2b draft never writes', async () => {
+    const stores = await buildStores();
+    const { customer } = await stores.customerStore.upsertOnFirstInbound('default', PHONE);
+    await stores.customerStore.saveCustomer({ ...customer, kycStatus: 'verified', fullName: 'Alex Rivera' });
+    const draftId = await stores.draftStore.createDraft({
+      senderPhone: PHONE, partnerId: 'default',
+      recipient: { name: 'Globex Trading LLC', recipientPhone: '919876543210', payoutMethod: 'bank', payoutDestination: '' },
+      amountUsd: 400, amountSource: 400, sourceCurrency: 'USD', fundingMethod: 'ach_pull',
+      quote: { feeUsd: 1.99, fxRate: 85, amountInr: 34000 },
+      transferType: 'b2b', senderEntityType: 'business', recipientEntityType: 'business',
+      senderBusinessName: 'Acme Imports Ltd', recipientBusinessName: 'Globex Trading LLC',
+    });
+    expect((await finalizeDraftPayment(stores, draftId, undefined, { originator: { address: ADDRESS } })).ok).toBe(true);
+    expect(origSeam.order).not.toContain('writeOriginatorInfo');
+    expect(await onFile(stores)).toEqual({ address: false, dateOfBirth: false });
+  });
+
+  it('the EDD saveCustomer after the mint keeps the address written before it (T18 keep rule, end to end)', async () => {
+    const stores = await buildStores();
+    const { customer } = await stores.customerStore.upsertOnFirstInbound('default', PHONE);
+    await stores.customerStore.saveCustomer({ ...customer, kycStatus: 'verified', fullName: 'Alex Rivera' });
+    const draftId = await stores.draftStore.createDraft({
+      senderPhone: PHONE, partnerId: 'default',
+      recipient: { name: 'Mom', recipientPhone: '919876543210', payoutMethod: 'upi', payoutDestination: 'mom@upi' },
+      amountUsd: 200, amountSource: 200, sourceCurrency: 'USD', fundingMethod: 'bank_transfer',
+      quote: { feeUsd: 0, fxRate: 85, amountInr: 17000 },
+      sourceOfFunds: 'employment', occupation: 'salaried',
+    });
+    const r = await finalizeDraftPayment(stores, draftId, undefined, { originator: { address: ADDRESS } });
+    expect(r.ok).toBe(true);
+    const after = await stores.customerStore.getCustomer('default', PHONE);
+    expect(after?.sourceOfFunds).toBe('employment'); // the EDD save ran after the mint
+    expect(after?.residentialAddress).toBe(ADDRESS); // and kept the address
   });
 });

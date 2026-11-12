@@ -11,6 +11,8 @@ import { getPartnerIntegrationsStore } from '@/lib/partner-integrations-store';
 import { getDb } from '@/db/client';
 import { createOutboxRepo, type OutboxRepo } from '@/db/repos/outbox-repo';
 import { createTransferRepo } from '@/db/repos/transfer-repo';
+import { createRailMessageRepo, RAIL_IN } from '@/db/repos/rail-message-repo';
+import { railRecordAlertKey } from '@/lib/instruct-errors';
 import { parsePayoutReference } from '@/lib/order-references';
 import { pokeWorker } from '@/lib/outbox';
 import { resolvePartnerBranding } from '@/lib/partner-config';
@@ -95,19 +97,96 @@ export async function POST(
     route: 'payment-webhook',
   });
   if (!verified.ok) {
+    // Fix pack 5 T2 (P6): the verifier already logged the reason. A refused
+    // legacy-only callback whose old HMAC verified is a genuine rail partner
+    // still on the old scheme: tell ops (deduped per rail per hour). An
+    // invalid legacy header raises nothing (no anonymous alert spam).
+    if (verified.reason === 'legacy_rejected' && verified.legacyValid) {
+      await alertRailLegacy(railPartnerId);
+    }
     return NextResponse.json({ ok: false }, { status: 401 }); // fail-closed
   }
 
   // fix 29: replay guard for the timestamped scheme — CHECK here, MARK only
-  // after the handling below returned. A throw propagates (the rail retries)
+  // after the handling below returned a 2xx. A throw propagates (the rail retries)
   // and leaves no mark. Redis down ⇒ 'unavailable' ⇒ proceed (fail-open; the
   // ±5 min window still holds and every downstream effect is idempotent).
   if (verified.scheme === 'v2' && (await railNonceSeen(verified.nonce)) === 'seen') {
     return NextResponse.json({ ok: true, duplicate: true });
   }
+  // fix pack 5 (P4, D6): the sealed record of every verified callback, before
+  // any effect; the nonce is marked only after handling, so a failed record is
+  // retried by the rail; the stored body is the verified text from req.text(),
+  // so a leading BOM is dropped and invalid UTF-8 becomes U+FFFD, and
+  // body_sha256 hashes that text. The insert is ON CONFLICT (id) DO NOTHING
+  // under inboundRailMessageId, so a replay that passes the nonce check (Redis
+  // down, fail-open) adds no row and is still handled (idempotent effects).
+  try {
+    await createRailMessageRepo(getDb()).append({
+      partnerId: refTransfer?.partnerId ?? null,
+      railPartnerId,
+      transferId: refTransfer?.id ?? refTransferId ?? null,
+      direction: RAIL_IN,
+      kind: 'callback',
+      body: raw,
+      signatureHeader: req.headers.get('x-smartremit-signature'),
+    });
+  } catch (err) {
+    logWarn('payment-webhook.rail-record', err instanceof Error ? err.name : 'error', {
+      transferId: refTransferId ?? null,
+      railPartnerId,
+    });
+    await alertRailRecordInbound(refTransferId ?? null); // best-effort, never throws
+    pokeWorker();
+    return NextResponse.json({ ok: false }, { status: 500 });
+  }
   const response = await handleVerified(provider, body, railPartnerId, railIntegrations, refTransfer);
-  if (verified.scheme === 'v2') await markRailNonce(verified.nonce);
+  // Fix pack 5 T3 (P6): mark only after a HANDLED 2xx. A 422 (amount_required,
+  // reference_unresolved) leaves the nonce unmarked, so a corrected retry of
+  // the same message is processed, not taken for a duplicate.
+  if (verified.scheme === 'v2' && response.ok) await markRailNonce(verified.nonce);
   return response;
+}
+
+/**
+ * Fix pack 5 T2 (P30): one `raillegacy:<rail|unresolved>:<hour>` ops alert.
+ * Ids only. Best-effort: a failed write is logged by error name and the
+ * caller still answers the same 401.
+ */
+async function alertRailLegacy(railPartnerId: string | null): Promise<void> {
+  const rail = railPartnerId ?? 'unresolved';
+  const message =
+    `⚠️ SmartRemit ops: a rail callback for rail partner ${rail} was refused (401): ` +
+    'it was signed only with the legacy x-signature header. Ask the rail partner to sign with ' +
+    'x-smartremit-signature (see the webhooks docs); the rail keeps retrying until it does. ' +
+    'Further refusals for this rail this hour are coalesced into this alert.';
+  try {
+    await createOutboxRepo(getDb()).enqueue(
+      'ops.alert',
+      { message },
+      { dedupeKey: `raillegacy:${rail}:${Math.floor(Date.now() / 3_600_000)}` },
+    );
+    pokeWorker();
+  } catch (err) {
+    logWarn('payment-webhook.raillegacy', err instanceof Error ? err.name : 'error', { partnerId: railPartnerId });
+  }
+}
+
+/**
+ * Fix pack 5 T10 (P30): one `railrecord:<hour>` ops alert (the key the worker
+ * shares) when a verified callback could not be recorded. Ids only.
+ * Best-effort: a failed write is logged by error name and the caller still
+ * answers the same 500.
+ */
+async function alertRailRecordInbound(transferId: string | null): Promise<void> {
+  const message =
+    `⚠️ SmartRemit ops: a verified rail callback (transfer ${transferId ?? 'unresolved'}) could not be recorded in rail_messages, ` +
+    'so it was NOT processed (answered 500; the rail retries). Further failures this hour are coalesced into this alert.';
+  try {
+    await createOutboxRepo(getDb()).enqueue('ops.alert', { message }, { dedupeKey: railRecordAlertKey() });
+  } catch (err) {
+    logWarn('payment-webhook.railrecord', err instanceof Error ? err.name : 'error', { transferId });
+  }
 }
 
 async function handleVerified(
@@ -139,13 +218,18 @@ async function handleVerified(
     return NextResponse.json({ ok: true });
   }
 
-  // fix 29 (money-09): a delivery is checked before it may land.
+  // fix 29 (money-09) + fix pack 5 T3 (P6): a delivery is checked before it may land.
   //  • a row already HELD for an amount mismatch (`railamount:<id>`) is never
   //    delivered by a later callback — staff resolve it by cancel/refund;
+  //  • the callback must name the transfer it is about: no resolvable
+  //    reference, or one that differs from the parsed transfer ⇒ 422
+  //    reference_unresolved (ids-only log, no alert, nothing applied);
   //  • the callback's `amount` must equal the locked instruction amount. A
   //    mismatch (or a partial/unparseable block) never settles: one deduped
   //    ops alert (transfer id only) and 200 held, so the rail stops retrying.
-  //    No amount at all is accepted for now, with a deprecation log.
+  //    No amount block at all ⇒ 422 amount_required (nothing saved) plus one
+  //    `railnoamount:<rail|unresolved>:<hour>` alert; the rail retries until
+  //    it reports the amount (a 4xx leaves the nonce unmarked).
   if (result.status === 'delivered') {
     if (await outbox.hasDedupeKey(`railamount:${result.transferId}`)) {
       logWarn('payment-webhook.held', 'delivery refused: transfer is held for an amount mismatch', {
@@ -153,23 +237,49 @@ async function handleVerified(
       });
       return NextResponse.json({ ok: true, held: true });
     }
-    if (refTransfer && refTransfer.id === result.transferId) {
-      const amountCheck = checkCallbackAmount(refTransfer, body);
-      if (amountCheck === 'mismatch') {
-        await holdForAmountMismatch(outbox, result.transferId, refTransfer.complianceStatus === 'blocked');
-        logWarn('payment-webhook.amount_mismatch', 'delivery held: callback amount differs from the instruction', {
-          transferId: result.transferId,
-          partnerId: railPartnerId,
-        });
-        return NextResponse.json({ ok: true, held: true });
-      }
-      if (amountCheck === 'absent') {
-        logWarn('payment-webhook.amount_absent', 'paid_out callback without an amount block (deprecated)', {
-          transferId: result.transferId,
-          partnerId: railPartnerId,
-          provider,
-        });
-      }
+    if (!refTransfer || refTransfer.id !== result.transferId) {
+      logWarn('payment-webhook.reference_unresolved', 'delivered callback refused: the reference does not resolve to this transfer', {
+        transferId: result.transferId,
+        refTransferId: refTransfer?.id ?? null,
+        partnerId: railPartnerId,
+        provider,
+      });
+      return NextResponse.json({ ok: false, error: 'reference_unresolved' }, { status: 422 });
+    }
+    const amountCheck = checkCallbackAmount(refTransfer, body);
+    if (amountCheck === 'mismatch') {
+      await holdForAmountMismatch(outbox, result.transferId, refTransfer.complianceStatus === 'blocked');
+      logWarn('payment-webhook.amount_mismatch', 'delivery held: callback amount differs from the instruction', {
+        transferId: result.transferId,
+        partnerId: railPartnerId,
+      });
+      return NextResponse.json({ ok: true, held: true });
+    }
+    if (amountCheck === 'missing') {
+      // The pokeWorker() above already ran, so this alert row is picked up.
+      // The id comes from the ledger row (`refTransfer.id`, proven equal to
+      // `result.transferId` by the reference check above), never from `result`:
+      // `result` is built by a provider that holds the rail's integrations, and
+      // the static outbox gate (tests/outbox-payload-secrets.test.ts) refuses a
+      // payload whose local dataflow reaches a PartnerIntegrations field.
+      const rail = railPartnerId ?? 'unresolved';
+      await outbox.enqueue(
+        'ops.alert',
+        {
+          message:
+            `⚠️ SmartRemit ops: a paid_out callback from rail partner ${rail} for transfer ${refTransfer.id} was refused (422 amount_required): ` +
+            'it carried no amount block, so the transfer was not marked delivered. Ask the rail partner to report amount.destination and ' +
+            'amount.destination_currency (see the webhooks docs); the rail keeps retrying until it does. ' +
+            'Further refusals for this rail this hour are coalesced into this alert.',
+        },
+        { dedupeKey: `railnoamount:${rail}:${Math.floor(Date.now() / 3_600_000)}` },
+      );
+      logWarn('payment-webhook.amount_missing', 'paid_out callback refused: no amount block', {
+        transferId: result.transferId,
+        partnerId: railPartnerId,
+        provider,
+      });
+      return NextResponse.json({ ok: false, error: 'amount_required' }, { status: 422 });
     }
   }
 

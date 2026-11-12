@@ -43,8 +43,8 @@ describe('recordInstructDelivery', () => {
     const r = await rows();
     expect(r).toHaveLength(1);
     expect(r[0]).toMatchObject({ partnerId: 'pa', kind: 'settlement.instruct', subjectId: 'tr_1', outboxId: 42, attempt: 3, outcome: 'ok', httpStatus: 200, latencyMs: 13 });
-    // The table has no URL / body / error column; the row carries nothing else.
-    expect(Object.keys(r[0]).sort()).toEqual(['attempt', 'createdAt', 'httpStatus', 'id', 'kind', 'latencyMs', 'outboxId', 'outcome', 'partnerId', 'subjectId']);
+    // The table has no URL / body / error column; body_sha256 (0039) is a hash, never a body.
+    expect(Object.keys(r[0]).sort()).toEqual(['attempt', 'bodySha256', 'createdAt', 'httpStatus', 'id', 'kind', 'latencyMs', 'outboxId', 'outcome', 'partnerId', 'subjectId']);
   });
 
   it('a non-integer or out-of-range status is stored as null; a negative latency as 0', async () => {
@@ -81,6 +81,15 @@ describe('recordInstructDelivery', () => {
     expect((logWarnSpy.mock.calls[0] as unknown[])[1]).toBe('DeliveryLogTimeout');
   });
 
+  it('recordInstructDelivery stores the body_sha256 it is given; NULL when none', async () => {
+    const sha = 'a'.repeat(64);
+    await recordInstructDelivery(db, { ...meta, bodySha256: sha, outcome: 'ok', httpStatus: 200, latencyMs: 1 });
+    await recordInstructDelivery(db, { ...meta, outcome: 'ok', httpStatus: 200, latencyMs: 1 });
+    await recordInstructDelivery(db, { ...meta, bodySha256: null, outcome: 'ok', httpStatus: 200, latencyMs: 1 });
+    const r = await db.select().from(partnerWebhookDeliveries).orderBy(partnerWebhookDeliveries.id);
+    expect(r.map((x) => x.bodySha256)).toEqual([sha, null, null]);
+  });
+
   it('the default cap is small next to the row deadline and the rail timeout', async () => {
     const { ROW_DEADLINE_MS } = await import('@/lib/outbox-worker');
     const { RAIL_TIMEOUT_MS } = await import('@/lib/providers/http-payment-provider');
@@ -104,6 +113,16 @@ describe('withInstructDeliveryLog', () => {
     expect(out.res).toBe(res);
     await out.logged;
     expect((await rows()).map((r) => [r.outcome, r.httpStatus])).toEqual([['http_error', 503]]);
+  });
+
+  it('passes the body_sha256 on for ok, http_error and network', async () => {
+    const sha = 'b'.repeat(64);
+    const m = { ...meta, bodySha256: sha };
+    await (await withInstructDeliveryLog(db, m, async () => new Response('{}', { status: 200 }))).logged;
+    await (await withInstructDeliveryLog(db, m, async () => new Response(null, { status: 500 }))).logged;
+    await expect(withInstructDeliveryLog(db, m, async () => Promise.reject(new Error('net')))).rejects.toThrow('net');
+    const r = await db.select().from(partnerWebhookDeliveries).orderBy(partnerWebhookDeliveries.id);
+    expect(r.map((x) => [x.outcome, x.bodySha256])).toEqual([['ok', sha], ['http_error', sha], ['network', sha]]);
   });
 
   it('records network and rethrows the SAME error when the POST throws', async () => {
@@ -156,7 +175,7 @@ describe('listDeliveries (the /partner delivery log reader)', () => {
     await db.insert(partnerWebhookDeliveries).values({ partnerId: 'pa', kind: 'ping', attempt: 1, outcome: 'ok', httpStatus: 204, latencyMs: 3 });
     const page = await listDeliveries(db, 'pa', {});
     expect(page.rows.map((r) => [r.kind, r.subjectId])).toEqual([['settlement.instruct', 'tr_pa_1'], ['settlement.instruct', 'tr_pa_0']]);
-    expect(Object.keys(page.rows[0]).sort()).toEqual(['attempt', 'createdAt', 'httpStatus', 'id', 'kind', 'latencyMs', 'outcome', 'subjectId']);
+    expect(Object.keys(page.rows[0]).sort()).toEqual(['attempt', 'bodySha256', 'createdAt', 'httpStatus', 'id', 'kind', 'latencyMs', 'outcome', 'subjectId']);
     expect(JSON.stringify(page.rows)).not.toContain('tr_pb_');
     expect(page.nextBefore).toBeNull();
   });
@@ -169,6 +188,15 @@ describe('listDeliveries (the /partner delivery log reader)', () => {
     const second = await listDeliveries(db, 'pa', { before: first.nextBefore });
     expect(second.rows.map((r) => r.subjectId)).toEqual(['tr_pa_2', 'tr_pa_1', 'tr_pa_0']);
     expect(second.nextBefore).toBeNull();
+  });
+
+  // Fix pack 5 T10 (P33): the log shows each instruction's body hash.
+  it('listDeliveries returns bodySha256 (null for a row an older build wrote)', async () => {
+    const sha = 'ab'.repeat(32);
+    await recordInstructDelivery(db, { ...meta, transferId: 'tr_old', outcome: 'ok', httpStatus: 200, latencyMs: 1 });
+    await recordInstructDelivery(db, { ...meta, transferId: 'tr_new', bodySha256: sha, outcome: 'ok', httpStatus: 200, latencyMs: 1 });
+    const page = await listDeliveries(db, 'pa', {});
+    expect(page.rows.map((r) => [r.subjectId, r.bodySha256])).toEqual([['tr_new', sha], ['tr_old', null]]);
   });
 
   it("a cursor never reaches another tenant's rows", async () => {

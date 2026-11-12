@@ -30,13 +30,13 @@ const HELPERS: Record<string, string[]> = {
   // Callers poke (or are the worker / the cron route, which pokes).
   'src/lib/stale-money.ts': ['escalateStuckPaid', 'expireUnpaidLinks'],
   'src/lib/cron-run.ts': ['runDueSchedules'],
-  'src/lib/sanctions/list-loader.ts': ['runOfacSdnLoad'],
+  'src/lib/sanctions/list-loader.ts': ['runOfacSdnLoad', 'runListLoad'],
   // partner-demo R3a: the storage cap-watch — called only from the cron route.
   'src/lib/storage-watch.ts': ['checkStorageCap'],
   // Fix pack 2 (R02): the list-not-live alert — called only from the cron route.
   'src/lib/sanctions/list-health.ts': ['checkSanctionsListHealth'],
-  // Fix pack 2 T7 (R07): the archive-failed / unconfigured alerts — called only from the cron route.
-  'src/lib/sanctions/list-archive.ts': ['archivePending'],
+  // Fix pack 2 T7 (R07): the archive-failed / unconfigured alerts; pack 5 LC2: the lag alert — called only from the cron route.
+  'src/lib/sanctions/list-archive.ts': ['archivePending', 'alertArchiveLag'],
   // Fix pack 2 T5 (R04): the block notices — enqueued inside each block's own
   // transaction; every caller pokes after it commits (store.ts recordSanctionsBlock,
   // pay-rescreen, payment-link-*, tools) or is a listed helper (settlement.ts).
@@ -58,7 +58,7 @@ const HELPERS: Record<string, string[]> = {
   // transaction; their callers (the partner / platform live-controls actions) poke.
   // Fix pack 4 T5 (C11): notifyLiveChange (the alert + email half, no audit row) is also called by
   // partner-support-settings.ts setDisclosure, listed below.
-  'src/lib/live-controls-write.ts': ['writePosture', 'writeComplianceUser', 'writeContract', 'writeCertification', 'writeOptIn', 'notifyLiveChange'],
+  'src/lib/live-controls-write.ts': ['writePosture', 'writeComplianceUser', 'writeContract', 'writeCertification', 'writeOptIn', 'notifyLiveChange', 'writeFundingMode'],
   // Fix pack 4 T5 (C11): no .enqueue( of its own; setDisclosure calls notifyLiveChange
   // (live-controls-write.ts) when a platform save clears a certified partner's provider
   // approval. Its two callers (the partner settings and the admin partner disclosure actions) poke.
@@ -66,6 +66,9 @@ const HELPERS: Record<string, string[]> = {
   // Pack 3 review I1: the livegate:stuck: alert — called only from the two
   // stuck-paid sweeps (reconcileSweep, escalateStuckPaid), listed above.
   'src/lib/livegate-alerts.ts': ['alertStuckLivegate'],
+  // Fix pack 5 T6 (P9): the <reason>:stuck:<id> alert, the same rule, called
+  // only from the same two stuck-paid sweeps.
+  'src/lib/instruct-gates.ts': ['alertStuckHeld'],
   // Fix pack 4 T8 (C8, critic M9): the payevidence:<hour> alert when a pay-page
   // payment's evidence could not be written; its callers (pay-process.ts, the
   // B2B pay route and, from review R1-P1 A2, the transfer pay route) poke.

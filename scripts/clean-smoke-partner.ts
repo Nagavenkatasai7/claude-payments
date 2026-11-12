@@ -6,8 +6,11 @@
  *   set -a; source .env.local; set +a; node_modules/.bin/tsx scripts/clean-smoke-partner.ts
  *
  * SAFE: only deletes partners named exactly 'E2E Smoke Partner' that have ZERO
- * transfers, ZERO customers and ZERO conversation_messages rows (a real partner
- * is never touched; the sealed conversation log is never deleted). FK-ordered,
+ * transfers, ZERO customers, ZERO conversation_messages rows and ZERO
+ * rail_messages rows as owner or rail (fix pack 5: append-only, its DELETE
+ * trigger refuses, and its FK blocks the partner delete). A real partner is
+ * never touched; the sealed conversation log and the rail record are never
+ * deleted. FK-ordered,
  * and ONE transaction (Program-Fix 45 P5): a refusal part-way commits nothing.
  * Program-Fix 45 P5: the partner's rows in the Postgres staff ledger (0022,
  * FK to partners) are deleted first. The partner-scoped staff
@@ -27,11 +30,19 @@ export async function cleanSmokePartners(db: DbOrTx, log: (line: string) => void
       SELECT p.id, p.name,
         (SELECT count(*) FROM transfers t WHERE t.partner_id = p.id)::int AS transfers,
         (SELECT count(*) FROM customers c WHERE c.partner_id = p.id)::int AS customers,
-        (SELECT count(*) FROM conversation_messages m WHERE m.partner_id = p.id)::int AS conversations
+        (SELECT count(*) FROM conversation_messages m WHERE m.partner_id = p.id)::int AS conversations,
+        (SELECT count(*) FROM rail_messages r WHERE r.partner_id = p.id OR r.rail_partner_id = p.id)::int AS rail_messages
       FROM partners p
       WHERE p.name = ${SMOKE_PARTNER_NAME}
     `)) as unknown as {
-      rows: Array<{ id: string; name: string; transfers: number; customers: number; conversations: number }>;
+      rows: Array<{
+        id: string;
+        name: string;
+        transfers: number;
+        customers: number;
+        conversations: number;
+        rail_messages: number;
+      }>;
     }).rows;
 
     if (targets.length === 0) {
@@ -42,9 +53,10 @@ export async function cleanSmokePartners(db: DbOrTx, log: (line: string) => void
     for (const t of targets) {
       // Partner-Demo R3b: conversation_messages is a permanent, sealed audit
       // log — a partner with any row is never deleted (and the rows never are).
-      if (t.transfers > 0 || t.customers > 0 || t.conversations > 0) {
+      // Fix pack 5: the same for the append-only rail record, as owner OR rail.
+      if (t.transfers > 0 || t.customers > 0 || t.conversations > 0 || t.rail_messages > 0) {
         log(
-          `  ⚠ skip ${t.id} — has ${t.transfers} transfers / ${t.customers} customers / ${t.conversations} conversation messages (NOT a disposable smoke row)`,
+          `  ⚠ skip ${t.id} — has ${t.transfers} transfers / ${t.customers} customers / ${t.conversations} conversation messages / ${t.rail_messages} rail messages (NOT a disposable smoke row)`,
         );
         continue;
       }

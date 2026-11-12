@@ -16,6 +16,7 @@ import type { Scope } from './staff-scope';
 import type { Partner, PartnerId, Transfer } from './types';
 import { isPartnerReleasableHold, isRescreenOnlyHold, senderScreeningHoldActive, type CustomerScreeningFlags } from './compliance-config';
 import { realMoneyRail } from './live-gate';
+import { CARD_REFUND_UNAVAILABLE, cardRefundUnavailableFor, collectedOnRealMoneyFor } from './funding-class';
 import { readSenderScreeningFlags } from '@/db/repos/customer-repo';
 import { listScreenEvidence, liveFresh } from './sanctions/evidence-read';
 import { warmSanctionsList } from './providers/sanctions-provider';
@@ -42,6 +43,16 @@ export const SENDER_SCREENING_RELEASE_REFUSAL = 'Cannot release: clear the sende
  * (PR7) such a row can only be rejected or refunded.
  */
 export const RECIPIENT_IDENTITY_RELEASE_REFUSAL = 'This transfer cannot be released: the account holder name is missing. Reject or refund it.';
+
+/**
+ * Fix pack 5 (R38, P22): the release refusal (partner and platform staff
+ * alike) for a real-money row whose sender's travel-rule data (the address,
+ * or the date of birth by band) is not on file, or that is routed to another
+ * tenant's rail, whatever reason it is held for. Until a capture path for a
+ * held row exists (PR7) such a row can only be rejected or refunded.
+ */
+export const ORIGINATOR_INFO_RELEASE_REFUSAL =
+  "This transfer cannot be released: the sender's address or date of birth is missing. Reject or refund it.";
 
 /**
  * Pack 2 review F1 (A1): the refusal when a real-money release re-screened the
@@ -430,6 +441,8 @@ export async function releaseTransfer(
     if (rr.kind === 'sender_hold') throw new Error(SENDER_SCREENING_RELEASE_REFUSAL);
     // Fix pack 4 (C19): the clear re-screen's evidence is kept; nothing else written.
     if (rr.kind === 'identity_missing') throw new Error(RECIPIENT_IDENTITY_RELEASE_REFUSAL);
+    // Fix pack 5 (P22): the same, for missing travel-rule data (the evidence is kept).
+    if (rr.kind === 'originator_missing') throw new Error(ORIGINATOR_INFO_RELEASE_REFUSAL);
     if (rr.kind === 'already') {
       throw new Error(
         partnerRelease
@@ -453,6 +466,7 @@ export async function releaseTransfer(
   const r = await releaseHold(db, transfer, railIntegrations, audit, partnerRelease);
   if (r.kind === 'sender_hold') throw new Error(SENDER_SCREENING_RELEASE_REFUSAL);
   if (r.kind === 'identity_missing') throw new Error(RECIPIENT_IDENTITY_RELEASE_REFUSAL); // fix pack 4 (C19): nothing written
+  if (r.kind === 'originator_missing') throw new Error(ORIGINATOR_INFO_RELEASE_REFUSAL); // fix pack 5 (P22): nothing written
   if (r.kind === 'already') {
     throw new Error(
       partnerRelease
@@ -586,8 +600,20 @@ export async function issueRefund(db: Db, id: string, audit?: StaffAuditCtx, sco
         `Cannot refund: transfer is ${transfer.status} — only paid or delivered transfers can be refunded.`,
       );
     }
-    if (!transfer.fundingRef) {
+    // Fix pack 5 (P15, M3): a real-money partner-collected row has no fundingRef
+    // (the partner holds the money); its refund is the signed reverse of P15
+    // step 5. realMoneyFor is read only when fundingRef is null (no new read on
+    // a charged row). Review round 1: never a routed row (RF1), and only when
+    // this row's settle instruction went to its rail after go-live (RC2; a
+    // demo-era row is refused as before pack 5). A failed read throws.
+    const collectedOnRealMoney = await collectedOnRealMoneyFor(tx, transfer);
+    if (!transfer.fundingRef && !collectedOnRealMoney) {
       throw new Error('Cannot refund: transfer was never charged (no funding reference).');
+    }
+    // Review round 2 GE1: a real-money card payment (class 'stripe') cannot be
+    // refunded from SmartRemit yet; refused here, refund_status stays 'none'.
+    if (await cardRefundUnavailableFor(tx, transfer)) {
+      throw new Error(`Cannot refund: ${CARD_REFUND_UNAVAILABLE}`);
     }
     // An async debit that is still pending, failed, or was returned is not money we hold.
     if (transfer.fundingState && transfer.fundingState !== 'succeeded') {
@@ -602,9 +628,12 @@ export async function issueRefund(db: Db, id: string, audit?: StaffAuditCtx, sco
     if (!(await repo.updateRefund(id, { refundStatus: 'pending' }, { from: 'none' }))) {
       throw new Error('Cannot refund: a refund is already in progress or complete for this transfer.');
     }
+    // Review round 1 RC3: the issue-time real-money decision rides the payload,
+    // so a rail that is no longer real money at the drain never sends this
+    // refund down the mock path. Absent for every other row (unchanged payload).
     const fresh = await createOutboxRepo(tx).enqueue(
       'funding.refund',
-      { transferId: id },
+      { transferId: id, ...(collectedOnRealMoney ? { collectedOnRealMoney: true } : {}) },
       { dedupeKey: `refund:${id}` },
     );
     if (!fresh) {
@@ -635,15 +664,22 @@ export async function approveRefund(db: Db, id: string, audit?: StaffAuditCtx, s
     if (!transfer || (transfer.refundStatus ?? 'none') !== 'requested') {
       throw new Error('Cannot approve: refund is not awaiting approval.');
     }
+    // Review round 2 GE1: as issueRefund; the request stays 'requested'.
+    if (await cardRefundUnavailableFor(tx, transfer)) {
+      throw new Error(`Cannot approve: ${CARD_REFUND_UNAVAILABLE}`);
+    }
     // The guarded write is the claim, from exactly 'requested': a concurrent decision that committed
     // after the read above (a dismiss to 'none', another approve) leaves nothing to claim, so this
     // call throws (rolls back) instead of starting a refund or auditing a no-op.
     if (!(await repo.updateRefund(id, { refundStatus: 'pending' }, { from: 'requested' }))) {
       throw new Error('Cannot approve: refund is not awaiting approval.');
     }
+    // Review round 1 RC3: carry the real-money decision (as issueRefund). No
+    // admission here: a row that fails it is closed by the worker (RC2, RF1).
+    const collectedOnRealMoney = await collectedOnRealMoneyFor(tx, transfer);
     await createOutboxRepo(tx).enqueue(
       'funding.refund',
-      { transferId: id },
+      { transferId: id, ...(collectedOnRealMoney ? { collectedOnRealMoney: true } : {}) },
       { dedupeKey: `refund:${id}` },
     );
     if (audit) {
@@ -705,15 +741,21 @@ export async function retryRefund(db: Db, id: string, audit?: StaffAuditCtx, sco
     if (!transfer || (transfer.refundStatus ?? 'none') !== 'failed') {
       throw new Error('Cannot retry: refund is not in a failed state.');
     }
+    // Review round 2 GE1: as issueRefund; the refund stays 'failed'.
+    if (await cardRefundUnavailableFor(tx, transfer)) {
+      throw new Error(`Cannot retry: ${CARD_REFUND_UNAVAILABLE}`);
+    }
     // The guarded write is the claim, from exactly 'failed'. Each retry mints a UNIQUE dedupe key, so
     // this check (not the key) is what keeps a concurrent second retry from enqueueing a second
     // refund effect.
     if (!(await repo.updateRefund(id, { refundStatus: 'pending' }, { from: 'failed' }))) {
       throw new Error('Cannot retry: refund is not in a failed state.');
     }
+    // Review round 1 RC3: carry the real-money decision (as issueRefund).
+    const collectedOnRealMoney = await collectedOnRealMoneyFor(tx, transfer);
     await createOutboxRepo(tx).enqueue(
       'funding.refund',
-      { transferId: id },
+      { transferId: id, ...(collectedOnRealMoney ? { collectedOnRealMoney: true } : {}) },
       { dedupeKey: `refund:${id}:retry:${Date.now()}` },
     );
     if (audit) {

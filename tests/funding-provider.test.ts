@@ -24,13 +24,20 @@ describe('MockFundingProvider', () => {
     expect(await p.handleWebhook({ transfer_id: 't1', event: 'captured', ref: 'r1' }))
       .toEqual({ transferId: 't1', event: 'captured', ref: 'r1' });
     expect(await p.handleWebhook({ transfer_id: 't1', event: 'refunded' }))
-      .toEqual({ transferId: 't1', event: 'refunded', ref: 'mockfund-t1' });
+      .toEqual({ transferId: 't1', event: 'refunded', ref: 'refund-webhook-t1' }); // fix pack 5 T13a: never mockfund-
     expect(await p.handleWebhook({ transfer_id: 't1', event: 'refund_failed' }))
       .toEqual({ transferId: 't1', event: 'refund_failed', ref: undefined });
     expect(await p.handleWebhook({ event: 'captured' })).toBeNull();
     expect(await p.handleWebhook(null)).toBeNull();
     expect(await p.handleWebhook('nope')).toBeNull();
     expect(await p.handleWebhook({ transfer_id: 't1', event: 'exploded' })).toBeNull();
+  });
+
+  it('a ref-less captured still gets mockfund-<id> (demo only)', async () => {
+    expect(await p.handleWebhook({ transfer_id: 't1', event: 'captured' }))
+      .toEqual({ transferId: 't1', event: 'captured', ref: 'mockfund-t1' });
+    expect(await p.handleWebhook({ transfer_id: 't1', event: 'refunded', ref: '' }))
+      .toEqual({ transferId: 't1', event: 'refunded', ref: 'refund-webhook-t1' });
   });
 
   it('factory returns the mock today', () => {

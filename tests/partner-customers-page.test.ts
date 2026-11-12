@@ -454,6 +454,11 @@ describe('/partner/customers/[ref]: sending today and transfers (p2 B7, A10)', (
 // screening flag; the PEP row only when the customer answered.
 describe('/partner/customers/[ref]: profile (p2 B6)', () => {
   it('shows country, masked ID, declared PEP, source of funds, occupation and a masked reference; pii.view names them', async () => {
+    // Fix pack 5 (P20): a save that carries no address / date of birth keeps the ones on file, so
+    // this profile (seeded in beforeEach with both) is cleared explicitly to show a row without them.
+    await db.execute(
+      sql`UPDATE customers SET date_of_birth_enc = NULL, residential_address_enc = NULL WHERE partner_id = ${PA} AND phone = ${SHARED}`,
+    );
     await createCustomerStore(db, createStore(redis, db)).saveCustomer(
       customer({
         partnerId: PA,

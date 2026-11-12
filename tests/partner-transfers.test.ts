@@ -18,7 +18,7 @@ import {
   transfersListHref,
   TIMELINE_AUDIT_ACTIONS,
 } from '@/lib/partner-transfers';
-import { POSSIBLE_MATCH_REASON, SENDER_WATCHLIST_REASON } from '@/lib/compliance-config';
+import { ORIGINATOR_INFO_MISSING_REASON, POSSIBLE_MATCH_REASON, SENDER_WATCHLIST_REASON } from '@/lib/compliance-config';
 import { AML_HOLD_REASON } from '@/lib/aml-hold';
 import { t } from '@/lib/i18n';
 import type { Transfer, TransferStatus } from '@/lib/types';
@@ -305,6 +305,11 @@ describe('holds', () => {
     ]);
     expect(holdReasonKeys([SENDER_WATCHLIST_REASON])).toEqual(['partner.transfers.reason.screening']);
   });
+  // Fix pack 5 T20a (P22, P31): the travel-rule originator hold renders its own label.
+  it('holdReasonKeys: the originator-info reason renders "Sender information missing"', () => {
+    expect(holdReasonKeys([ORIGINATOR_INFO_MISSING_REASON])).toEqual(['partner.transfers.reason.originatorInfo']);
+    expect(t('partner.transfers.reason.originatorInfo')).toBe('Sender information missing');
+  });
 });
 
 describe('H5: funding + settlement views (existing columns only)', () => {
@@ -321,6 +326,10 @@ describe('H5: funding + settlement views (existing columns only)', () => {
     expect(v.state).toBeUndefined();
     expect(v.provider).toBeUndefined();
     expect(v.ref).toBe('****1234');
+  });
+  it('fundingView never names the mock provider (fix pack 5 T12, P12)', () => {
+    expect(fundingView(base({ fundingProvider: 'mock', fundingRef: 'mockfund-abcd' })).provider).toBeUndefined();
+    expect(fundingView(base({ fundingProvider: 'stripe' })).provider).toBe('Stripe');
   });
   it('fundingEventView: allowlisted type + outcome, masked event id', () => {
     const e = fundingEventView({ eventType: 'payment_intent.succeeded', outcome: 'funded', eventId: 'evt_1ABCDEF9876', receivedAt: new Date('2026-09-01T10:00:00Z') });

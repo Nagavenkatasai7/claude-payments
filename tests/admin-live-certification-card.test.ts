@@ -9,6 +9,7 @@ vi.mock('@/app/admin-dashboard/partners/go-live-actions', () => ({
   revokeLiveAction: async () => ({ ok: true }),
   recordContractAction: async () => ({ ok: true }),
   recordCounselAction: async () => ({ ok: true }),
+  setFundingModeAction: async () => ({ ok: true }),
   approveGoLiveAction: async () => undefined,
 }));
 
@@ -39,6 +40,7 @@ const html = (o: { liveControls?: LiveControls; readiness?: LiveReadiness | 'err
       revokeAction: action,
       contractAction: action,
       counselAction: action,
+      fundingModeAction: action,
     }),
   );
 const stateOf = (h: string) => /data-testid="live-cert-state"[^>]*>([^<]*)</.exec(h)?.[1];
@@ -64,13 +66,14 @@ describe('LiveCertificationCard', () => {
     expect(stateOf(html({ liveControls: certified(), readiness: 'error' }))).toBe('Certified');
   });
 
-  it("12 readiness lines in contract order; not-built lines read 'not built (PR5)' etc.", () => {
+  it("12 readiness lines in contract order; not-built lines read 'not built (PR8)' etc.", () => {
     const h = html();
     const ids = [...h.matchAll(/data-line="([a-z_]+)"/g)].map((m) => m[1]);
     expect(ids).toEqual([...LIVE_READINESS_LINE_IDS]);
-    for (const pr of ['PR5', 'PR8', 'PR9']) expect(h).toContain(`not built (${pr})`);
-    expect((h.match(/not built \(/g) ?? []).length).toBe(5);
+    for (const pr of ['PR8', 'PR9']) expect(h).toContain(`not built (${pr})`);
+    expect((h.match(/not built \(/g) ?? []).length).toBe(4);
     expect(h).not.toContain('not built (PR4)');
+    expect(h).not.toContain('not built (PR5)');
     expect(h).toContain('>pass<');
     expect(h).toContain('>fail<');
   });
@@ -124,11 +127,33 @@ describe('LiveCertificationCard', () => {
     const certify = /data-testid="live-certify-form"[\s\S]*?<\/form>/.exec(h)?.[0] ?? '';
     expect(certify).toContain('name="reason"');
     expect(certify).toContain(`name="${STEP_UP_FIELD}"`);
-    expect((h.match(new RegExp(`name="${STEP_UP_FIELD}"`, 'g')) ?? []).length).toBe(4); // certify, contract, counsel, clear
+    expect((h.match(new RegExp(`name="${STEP_UP_FIELD}"`, 'g')) ?? []).length).toBe(5); // certify, contract, counsel, clear, funding
     expect(h).toContain('name="signedOn"');
     expect(h).toContain('name="counselRef"');
     expect(h).toContain('name="clear" value="1"');
     expect(h).not.toContain('name="id"'); // the target is the bound route id, never a form field
     expect(h).not.toContain('name="partnerId"');
+  });
+
+  // Fix pack 5 T17 (P17): the stored funding mode (or 'none') and the funding-mode form.
+  it("the card shows the stored funding mode (or 'none') and a funding-mode form with a mode select and the code field", () => {
+    const fm = (h: string) => /data-testid="live-funding-mode"[^>]*>([\s\S]*?)<\/p>/.exec(h)?.[1].replace(/<!-- -->/g, '');
+    expect(fm(html())).toBe('Funding mode: none');
+    const lc = certified();
+    expect(fm(html({ liveControls: { ...lc, fundingMode: { mode: 'partner_collected', setBy: 'ops-a', setAt: new Date().toISOString() } } }))).toMatch(
+      /^Funding mode: Partner collects; set by ops-a on \d{4}-\d{2}-\d{2} \d{2}:\d{2} UTC\.$/,
+    );
+    expect(fm(html({ liveControls: { ...lc, fundingMode: { mode: 'partner_psp', setBy: 'ops-a', setAt: new Date().toISOString() } } }))).toMatch(
+      /^Funding mode: Partner&#x27;s own Stripe account; set by ops-a/,
+    );
+    const f = /data-testid="live-funding-form"[\s\S]*?<\/form>/.exec(html())?.[0] ?? '';
+    expect(f).toContain('<select name="mode"');
+    expect(f).toContain('value="partner_collected"');
+    expect(f).toContain('value="partner_psp"');
+    expect(f).toContain('Partner collects the sender&#x27;s money');
+    expect(f).toContain('Partner&#x27;s own Stripe account (needs Stripe funding and a restricted key)');
+    expect(f).toContain(`name="${STEP_UP_FIELD}"`);
+    expect(f).toContain('id="live-funding-code-acme"');
+    expect(f).toContain('Save funding mode');
   });
 });

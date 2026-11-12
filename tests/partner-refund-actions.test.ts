@@ -92,6 +92,8 @@ import { STEP_UP_FIELD, isStepUpRequired } from '@/lib/staff-step-up-result';
 import { hashPassword } from '@/lib/password';
 import { STAFF_REASON_MIN } from '@/lib/send-limits';
 import { t } from '@/lib/i18n';
+import { seedRealMoneyRail } from './helpers-live';
+import { CARD_REFUND_UNAVAILABLE } from '@/lib/funding-class';
 
 const REASON = 'Customer confirmed the request by phone.';
 const PASSWORD = 'correct horse battery staple';
@@ -223,6 +225,40 @@ describe('refundOpAction: the money effect', () => {
     await asAdmin();
     for (const id of ['tr_missing', '', 'a b', 'tr_b1']) expect(await refundOpAction(form(id, 'approve'))).toEqual({ ok: false, error: t('partner.refunds.notFound') });
     expect(await count('outbox')).toBe(0);
+  });
+});
+
+// Final check F9 (X2): approveRefund / retryRefund refuse a real-money card payment (funding class
+// 'stripe') with the CARD_REFUND_UNAVAILABLE reason. The action answers that reason, not the
+// generic "reload the page" refusal; every other refusal keeps its text.
+describe('refundOpAction: a real-money card payment (final check F9, X2)', () => {
+  const cardReason = CARD_REFUND_UNAVAILABLE.charAt(0).toUpperCase() + CARD_REFUND_UNAVAILABLE.slice(1);
+  // funding_provider is insert-only and the store's save does not write it: a raw UPDATE, as
+  // paidRealMoneyTransfer (tests/helpers-live.ts) does.
+  const stampStripe = async (...ids: string[]) => {
+    for (const id of ids) await db.execute(sql`UPDATE transfers SET funding_provider = 'stripe' WHERE id = ${id}`);
+  };
+  it('approve of a requested card row and retry of a failed one answer the card-refund reason; nothing written', async () => {
+    await seedRealMoneyRail(db, 'pa');
+    await seed('tr_a1', 'pa', 'requested', { fundingProvider: 'stripe', fundingRef: 'pi_a1', fundingMethod: 'debit_card' });
+    await seed('tr_a2', 'pa', 'failed', { fundingProvider: 'stripe', fundingRef: 'pi_a2', fundingMethod: 'debit_card' });
+    await stampStripe('tr_a1', 'tr_a2');
+    await asAdmin();
+    for (const [id, op] of [['tr_a1', 'approve'], ['tr_a2', 'retry']]) {
+      expect(await refundOpAction(form(id, op))).toEqual({ ok: false, error: cardReason });
+    }
+    expect((await transferRow('tr_a1')).refund_status).toBe('requested');
+    expect((await transferRow('tr_a2')).refund_status).toBe('failed');
+    expect(await count('outbox')).toBe(0);
+    expect(await count('audit_events')).toBe(0);
+  });
+  it('the same card row keeps the generic refusal for a wrong state, and dismiss still works', async () => {
+    await seedRealMoneyRail(db, 'pa');
+    await seed('tr_a1', 'pa', 'requested', { fundingProvider: 'stripe', fundingRef: 'pi_a1', fundingMethod: 'debit_card' });
+    await stampStripe('tr_a1');
+    await asAdmin();
+    expect(await refundOpAction(form('tr_a1', 'retry'))).toEqual({ ok: false, error: t('partner.refunds.notAllowed') });
+    expect(await refundOpAction(form('tr_a1', 'dismiss'))).toEqual({ ok: true });
   });
 });
 
