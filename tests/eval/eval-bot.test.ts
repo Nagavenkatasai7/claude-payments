@@ -350,6 +350,10 @@ describe('cases 60 and 61 check the lead-in line their titles promise (review ro
   it('case 61 fails when the quote lead line is Hinglish', async () => {
     expect(await failuresOf(61, 'Aapka quote neeche hai.\nShall I go ahead?')).not.toEqual([]);
   });
+  it('case 61 fails when the quote lead line is Hinglish and the English question names the quote (review round 2 F4-D1)', async () => {
+    expect(await failuresOf(61, 'Aapka quote neeche hai.\nShall I go ahead with this quote?')).not.toEqual([]);
+    expect(await failuresOf(61, 'Aapka quote neeche hai.\nShall I go ahead with these details?')).not.toEqual([]);
+  });
   it('case 61 fails when the Hinglish line is not the first line', async () => {
     expect(await failuresOf(61, 'Here is your quote.\nAapka quote neeche hai.\nShall I go ahead?')).not.toEqual([]);
   });

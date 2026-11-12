@@ -1497,7 +1497,10 @@ export const EVAL_CASES: EvalCase[] = [
       // line is in English.
       const hinglishAt = lines.map((l, i) => (ROMAN_HINDI.test(l) ? i : -1)).filter((i) => i >= 0);
       const body = hinglishAt[0] === 0 ? lines.slice(1) : lines;
-      const quoteLead = body.find((l) => /\b(?:quote|here(?:'s| is| are)|details|summary|breakdown)\b/i.test(l));
+      // F4-D1: the confirmation question is not the quote lead line ("Shall I go ahead with this
+      // quote?"); on the question's own line only the text before the question sentence counts.
+      const leadText = (l: string) => (l === question ? l.replace(/[^.!?]*\?\s*$/, '') : l);
+      const quoteLead = body.find((l) => /\b(?:quote|here(?:'s| is| are)|details|summary|breakdown)\b/i.test(leadText(l)));
       return fail(
         hinglishAt.some((i) => i !== 0) && 'a Hinglish line is not the first line',
         !quoteLead && 'the quote lead line is not in English',
