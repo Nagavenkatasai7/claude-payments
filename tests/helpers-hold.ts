@@ -2,9 +2,10 @@ import { sql } from 'drizzle-orm';
 import type { Db } from '@/db/client';
 import {
   AML_HOLD_REASON, LARGE_AMOUNT_REASON, LIST_UNAVAILABLE_REASON, ORIGINATOR_INFO_MISSING_REASON,
-  POSSIBLE_MATCH_REASON, RECIPIENT_WATCHLIST_REASON, SENDER_SCREENING_REASON,
+  POSSIBLE_MATCH_REASON, RECIPIENT_IDENTITY_MISSING_REASON, RECIPIENT_WATCHLIST_REASON, SENDER_SCREENING_REASON,
 } from '@/lib/compliance-config';
-import type { HoldClass } from '@/lib/hold-queue';
+import type { HoldClass, HoldDisposition } from '@/lib/hold-queue';
+import type { HoldReviewInput } from '@/lib/hold-review-tx';
 import type { PartnerId, Staff, Transfer } from '@/lib/types';
 import { seedPartner } from './helpers-db';
 import { certifyPartnerForTest, paidRealMoneyTransfer, seedRealMoneyRail } from './helpers-live';
@@ -146,4 +147,70 @@ export async function heldRowFor(
   const row = await createStore(fakeRedis(), db).getTransfer(id);
   if (!row) throw new Error(`heldRowFor: transfer '${id}' not found`);
   return row;
+}
+
+/**
+ * T8a (P9, DP9): a platform review for a held row of a CERTIFIED owner, read
+ * at call time (so a fingerprint after a re-screen is current). Classifies the
+ * row as the seam does (owner predicates, the sender flags, dataOnFile with
+ * the rail partner's integrations, blocked), inserts a final platform
+ * hold_reviews row (repo insert, no audit; actor `fixture:<class>`) with the
+ * first platform release disposition for every OTHER open class that has
+ * one, and returns the review for the chosen class (default: the last open
+ * class in HOLD_CLASSES order) with its first platform release disposition
+ * (or `o.disposition`). expectFinal true (platform decisions are one final step).
+ */
+export async function platformReviewFor(
+  db: Db,
+  transferId: string,
+  audit: { actor: string; reason: string },
+  o: { holdClass?: HoldClass; disposition?: HoldDisposition } = {},
+): Promise<HoldReviewInput> {
+  const { createTransferRepo } = await import('@/db/repos/transfer-repo');
+  const { createPartnerRepo } = await import('@/db/repos/partner-repo');
+  const { createIntegrationsRepo } = await import('@/db/repos/integrations-repo');
+  const { readSenderScreeningFlags } = await import('@/db/repos/customer-repo');
+  const { createHoldReviewRepo } = await import('@/db/repos/hold-review-repo');
+  const { identityMissingForRelease, originatorMissingForRelease } = await import('@/lib/release-data-checks');
+  const hq = await import('@/lib/hold-queue');
+  const scope = await import('@/lib/partner-decision-scope');
+  const t = await createTransferRepo(db).getTransfer(transferId);
+  if (!t) throw new Error(`platformReviewFor: transfer '${transferId}' not found`);
+  const owner = await createPartnerRepo(db).getPartner(t.partnerId);
+  if (!owner) throw new Error(`platformReviewFor: no owner '${t.partnerId}'`);
+  const flags = await readSenderScreeningFlags(db, t.partnerId, t.phone);
+  const reasons = t.complianceReasons ?? [];
+  let dataOnFile = false;
+  if (reasons.some((r) => r === ORIGINATOR_INFO_MISSING_REASON || r === RECIPIENT_IDENTITY_MISSING_REASON)) {
+    const rail = await createIntegrationsRepo(db).getIntegrations(t.settlementPartnerId ?? t.partnerId);
+    dataOnFile = !(await identityMissingForRelease(db, t, rail)) && !(await originatorMissingForRelease(db, t, rail));
+  }
+  const classes = hq.classifyHold(
+    reasons,
+    flags,
+    { queue: scope.holdQueueApplies(owner), partnerDecidesKyc: scope.partnerDecidesKyc(owner) },
+    { blocked: t.complianceStatus === 'blocked', dataOnFile },
+  );
+  const repo = createHoldReviewRepo(db);
+  const stored = (await repo.listForTransfer(t.partnerId, t.id)).map(hq.toReviewRowLite).filter((r) => r !== null);
+  const open = classes.filter((c) => !stored.some((r) => r.holdClass === c.holdClass && r.final && r.reasonsFp === hq.classReasonsFp(c, flags)));
+  const chosen = o.holdClass ?? open.at(-1)?.holdClass;
+  if (!chosen) throw new Error(`platformReviewFor: transfer '${transferId}' has no open class`);
+  for (const c of open) {
+    if (c.holdClass === chosen) continue;
+    const d = hq.allowedDispositions(c.holdClass, 'platform').release[0];
+    if (!d) continue;
+    const row = await repo.insert({
+      transferId: t.id, partnerId: t.partnerId, holdClass: c.holdClass, reasonsFp: hq.classReasonsFp(c, flags),
+      step: 1, final: true, disposition: d, reason: 'Fixture platform decision for the other class.', evidence: {},
+      actor: `fixture:${c.holdClass}`, actorScope: 'platform',
+    });
+    if (!row) throw new Error(`platformReviewFor: the ${c.holdClass} fixture row was refused`);
+  }
+  const disposition = o.disposition ?? hq.allowedDispositions(chosen, 'platform').release[0];
+  if (!disposition) throw new Error(`platformReviewFor: class '${chosen}' has no platform release disposition`);
+  return {
+    ownerId: t.partnerId, holdClass: chosen, rowFp: hq.rowReasonsFp(reasons), disposition,
+    reason: audit.reason, actor: audit.actor, actorScope: 'platform', evidence: {}, expectFinal: true,
+  };
 }

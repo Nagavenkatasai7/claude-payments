@@ -21,6 +21,10 @@ import { readSenderScreeningFlags } from '@/db/repos/customer-repo';
 import { listScreenEvidence, liveFresh } from './sanctions/evidence-read';
 import { warmSanctionsList } from './providers/sanctions-provider';
 import { screenHeldOnFile } from './list-hold-rescreen';
+import { createPartnerRepo } from '@/db/repos/partner-repo';
+import { classifyHold } from './hold-queue';
+import { holdQueueApplies, partnerDecidesKyc, reviewRecordApplies } from './partner-decision-scope';
+import { HoldReviewChangedError, refuseUnwiredPepClear, type HoldReviewInput } from './hold-review-tx';
 
 /**
  * Fix pack 2 T4 (R02): the refusal for a hold waiting on a fresh sanctions list
@@ -87,6 +91,20 @@ export const PLATFORM_RESCREEN_REFUSALS = {
     'Read the reasons on the compliance page, and release again only after that review.',
   blocked: 'Cannot release: the sanctions re-screen at release blocked this transfer.',
 } as const;
+
+/**
+ * Fix pack 7 (P12, P9 rule D6): the platform refusals on a partner certified
+ * for live money. A queue partner (posture holdDecider 'partner') decides its
+ * partner-decided classes itself; every other decision on a certified partner
+ * needs a recorded review with a disposition (an old tab posts none).
+ */
+export const PARTNER_DECIDES_HOLD_REFUSAL = 'The partner decides this hold: pause or escalate.';
+export const HOLD_REVIEW_RELOAD_REFUSAL =
+  'This partner needs a recorded decision with a disposition: reload the page and decide again.';
+export const HOLD_CHANGED_REFUSAL = 'This hold changed since the page loaded: reload the page and decide again.';
+
+/** The partner release refusal when the row or its sender changed (the partner actions map it to notAllowed). */
+const PARTNER_RELEASE_CHANGED = 'Cannot release: transfer is not in_review or its sender is not releasable (it changed concurrently)';
 
 /**
  * Staff "Cancel" = VOID an UNFUNDED draft, and nothing else (Phase 1 Task 5 /
@@ -350,6 +368,34 @@ export function canReleaseHeld(
 }
 
 /**
+ * Fix pack 7 (P9, D6): a release with NO review on a live row reads the owner
+ * (a throw propagates; null refuses with the generic permission text). On a
+ * certified owner (reviewRecordApplies): a partner release is refused with the
+ * partner's concurrent text (its legacy release is closed by design); a
+ * platform release is refused with PARTNER_DECIDES_HOLD_REFUSAL when a queue
+ * owner decides a class of the row, else HOLD_REVIEW_RELOAD_REFUSAL.
+ * Uncertified owners (every tenant today): one read, no change.
+ */
+async function refuseUnreviewedRelease(
+  db: Db,
+  transfer: Pick<Transfer, 'partnerId' | 'complianceReasons'>,
+  partnerRelease: { partnerId: PartnerId } | undefined,
+): Promise<void> {
+  const owner = await createPartnerRepo(db).getPartner(transfer.partnerId);
+  if (!owner) throw new Error('You do not have permission to perform this action.');
+  if (!reviewRecordApplies(owner)) return;
+  if (partnerRelease) throw new Error(PARTNER_RELEASE_CHANGED);
+  if (
+    holdQueueApplies(owner) &&
+    classifyHold(transfer.complianceReasons, null, { queue: true, partnerDecidesKyc: partnerDecidesKyc(owner) }, { blocked: false })
+      .some((c) => c.decider === 'partner')
+  ) {
+    throw new Error(PARTNER_DECIDES_HOLD_REFUSAL);
+  }
+  throw new Error(HOLD_REVIEW_RELOAD_REFUSAL);
+}
+
+/**
  * Release a held (in_review) transfer — a SETTLEMENT, not a status flip:
  * settlement.releaseHold commits in_review → paid AND the rail effect (signed
  * instruct / delayed mock settle) in ONE transaction, so the partner rail is
@@ -372,7 +418,16 @@ export async function releaseTransfer(
   id: string,
   audit: StaffAuditCtx,
   partnerRelease?: { partnerId: PartnerId },
+  review?: HoldReviewInput,
 ): Promise<void> {
+  // Fix pack 7 (P9): programming errors, before any read.
+  if (review) {
+    if (partnerRelease) throw new Error('releaseTransfer: review and partnerRelease are exclusive');
+    refuseUnwiredPepClear(review);
+    if (audit?.actor !== review.actor || audit.reason !== review.reason) {
+      throw new Error("releaseTransfer: the audit context must be the review's actor and reason");
+    }
+  }
   // Program-Fix 43 follow-up (defence in depth behind releaseTransferAction):
   // every release records WHO and WHY, so no audit context or a blank reason
   // is refused before any read or write.
@@ -399,6 +454,13 @@ export async function releaseTransfer(
   // read cannot be overtaken by a concurrent addition.
   if (isRescreenOnlyHold(transfer)) {
     throw new Error(RESCREEN_ONLY_RELEASE_REFUSAL);
+  }
+  // Fix pack 7 (P9, D6 defence in depth): a certified owner's hold moves only with a recorded
+  // review. A sandbox ('test') row is exempt and its owner is not read (P0 rule 3).
+  if (review) {
+    if (review.ownerId !== transfer.partnerId) throw new HoldReviewChangedError('changed');
+  } else if (transfer.environment !== 'test') {
+    await refuseUnreviewedRelease(db, transfer, partnerRelease);
   }
   const railIntegrations = await createIntegrationsRepo(db).getIntegrations(transfer.settlementPartnerId ?? transfer.partnerId);
   // Fix pack 2 T6 (R06): on a real-money rail, PLATFORM staff clear the
@@ -432,11 +494,14 @@ export async function releaseTransfer(
   ) {
     await warmSanctionsList();
     const { result, uncovered } = await screenHeldOnFile(db, transfer, true, now);
-    const rr = await releaseHoldAfterRescreen(db, transfer.id, { result, uncovered, railIntegrations, audit, partnerRelease });
+    const rr = await releaseHoldAfterRescreen(db, transfer.id, {
+      result, uncovered, railIntegrations, audit, partnerRelease, ...(review ? { review } : {}),
+    });
     if (rr.kind === 'released') {
       pokeWorker();
       return;
     }
+    if (rr.kind === 'changed') throw new HoldReviewChangedError(rr.why);
     // Review R1 (H2): a stamp that landed after the pre-read above (platform only).
     if (rr.kind === 'sender_hold') throw new Error(SENDER_SCREENING_RELEASE_REFUSAL);
     // Fix pack 4 (C19): the clear re-screen's evidence is kept; nothing else written.
@@ -445,9 +510,7 @@ export async function releaseTransfer(
     if (rr.kind === 'originator_missing') throw new Error(ORIGINATOR_INFO_RELEASE_REFUSAL);
     if (rr.kind === 'already') {
       throw new Error(
-        partnerRelease
-          ? 'Cannot release: transfer is not in_review or its sender is not releasable (it changed concurrently)'
-          : 'Cannot release: transfer is not in_review (it moved concurrently)',
+        partnerRelease ? PARTNER_RELEASE_CHANGED : 'Cannot release: transfer is not in_review (it moved concurrently)',
       );
     }
     if (rr.kind === 'blocked') pokeWorker(); // the block notices are committed
@@ -463,15 +526,14 @@ export async function releaseTransfer(
     );
   }
   // Program-Fix 28: the audit row is written INSIDE releaseHold's transaction.
-  const r = await releaseHold(db, transfer, railIntegrations, audit, partnerRelease);
+  const r = await releaseHold(db, transfer, railIntegrations, audit, partnerRelease, review);
+  if (r.kind === 'changed') throw new HoldReviewChangedError(r.why);
   if (r.kind === 'sender_hold') throw new Error(SENDER_SCREENING_RELEASE_REFUSAL);
   if (r.kind === 'identity_missing') throw new Error(RECIPIENT_IDENTITY_RELEASE_REFUSAL); // fix pack 4 (C19): nothing written
   if (r.kind === 'originator_missing') throw new Error(ORIGINATOR_INFO_RELEASE_REFUSAL); // fix pack 5 (P22): nothing written
   if (r.kind === 'already') {
     throw new Error(
-      partnerRelease
-        ? 'Cannot release: transfer is not in_review or its sender is not releasable (it changed concurrently)'
-        : 'Cannot release: transfer is not in_review (it moved concurrently)',
+      partnerRelease ? PARTNER_RELEASE_CHANGED : 'Cannot release: transfer is not in_review (it moved concurrently)',
     );
   }
   pokeWorker(); // fast path for the rail effect — the per-minute cron drains it regardless

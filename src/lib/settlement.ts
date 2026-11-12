@@ -25,6 +25,16 @@ import { readSenderScreeningFlags } from '@/db/repos/customer-repo';
 import type { ComplianceResult } from '@/lib/compliance';
 import { sanctionsAuditEvent } from '@/lib/sanctions/evidence';
 import { originatorInfoMissing } from '@/lib/originator-info';
+import { identityMissingForRelease, originatorMissingForRelease } from '@/lib/release-data-checks';
+import {
+  insertReview,
+  lockAndRouteReview,
+  refuseUnwiredPepClear,
+  routeLockedReview,
+  type HoldRefusedWhy,
+  type HoldReviewInput,
+} from '@/lib/hold-review-tx';
+import { rowReasonsFp } from '@/lib/hold-queue';
 import { isOpaqueTransferId } from '@/lib/id';
 import { payUrlFor } from '@/lib/pay-url';
 import { logWarn } from '@/lib/log';
@@ -129,7 +139,8 @@ export type ReleaseResult =
   | { kind: 'already' } // not in_review anymore — idempotent no-op, never resurrects
   | { kind: 'sender_hold' } // platform release on a real-money rail: the sender's screening hold is active (locked re-check); nothing written
   | { kind: 'identity_missing' } // fix pack 4 (C19): real money, b2c, not Partner-API / payment link, no legal name on file: nothing written
-  | { kind: 'originator_missing' }; // fix pack 5 (P22): real money, not exempt, travel-rule data not on file or routed: nothing written
+  | { kind: 'originator_missing' } // fix pack 5 (P22): real money, not exempt, travel-rule data not on file or routed: nothing written
+  | { kind: 'changed'; why: HoldRefusedWhy }; // fix pack 7 (P9): a review the locked row no longer matches: nothing written
 
 /**
  * The ONE rail-effect enqueue, shared by beginSettlement (cleared money) and
@@ -419,7 +430,13 @@ export async function releaseHold(
   integrations: PartnerIntegrations,
   audit?: StaffAuditCtx,
   partnerRelease?: { partnerId: PartnerId },
+  review?: HoldReviewInput,
 ): Promise<ReleaseResult> {
+  if (review) {
+    if (partnerRelease) throw new Error('releaseHold: review and partnerRelease are exclusive');
+    refuseUnwiredPepClear(review);
+    return releaseHoldWithReview(db, transfer.id, integrations, review);
+  }
   return db.transaction(async (tx): Promise<ReleaseResult> => {
     // Fix pack 4 (C19, critic P4): first, before any lock (transfer -> customer order unchanged).
     if (await identityMissingForRelease(tx, transfer, integrations)) return { kind: 'identity_missing' };
@@ -438,6 +455,117 @@ export async function releaseHold(
     }
     const { webhookDriven } = await enqueueRailEffect(tx, paid, integrations);
     return { kind: 'released', webhookDriven };
+  });
+}
+
+/**
+ * Fix pack 7 (P9, M5): a non-moving outcome of a review-path transaction. It is
+ * THROWN inside db.transaction (so nothing the transaction wrote commits, a T9
+ * PEP clear included) and returned by the caller outside it.
+ */
+class ReviewNotMoved<R> extends Error {
+  constructor(readonly result: R) {
+    super('review_not_moved');
+    this.name = 'ReviewNotMoved';
+  }
+}
+
+async function runReviewTx<R>(db: Db, body: (tx: Parameters<Parameters<Db['transaction']>[0]>[0]) => Promise<R>): Promise<R> {
+  try {
+    return await db.transaction(body);
+  } catch (err) {
+    if (err instanceof ReviewNotMoved) return err.result as R;
+    throw err;
+  }
+}
+
+/** P4: the locked row's fingerprint; an unbounded list (unreachable) never matches a posted one. */
+function rowFpOf(t: Pick<Transfer, 'complianceReasons'>): string | null {
+  try {
+    return rowReasonsFp(t.complianceReasons);
+  } catch {
+    return null;
+  }
+}
+
+/** The meta of a staff audit row written by the review path (P28): ids and closed enums only. */
+function reviewAuditMeta(reviewId: string, r: { step: { step: 1 | 2 } }, review: HoldReviewInput): Record<string, unknown> {
+  return { reviewId, step: r.step.step, disposition: review.disposition, holdClass: review.holdClass, actorScope: review.actorScope };
+}
+
+/**
+ * Fix pack 7 (P9 release half): releaseHold WITH a review. ONE transaction:
+ * the tenant-pinned locked read and route (lockAndRouteReview: owner re-read,
+ * row fingerprint, locked sender flags, classes, decisionRoute, nextStep,
+ * expectFinal), identity and originator on the LOCKED row, the platform sender
+ * rule (real money, locked re-read), the claim (markPaidIfInReview with NO
+ * partnerRelease, DP6: the row is locked and tenant-pinned), THEN the
+ * hold_reviews row, THEN the audit (its ctx derived from the review), then the
+ * rail effect. Every non-released outcome is thrown and returned outside the
+ * transaction (M5): a lost claim writes nothing, a failed insert rolls the
+ * claim back.
+ */
+async function releaseHoldWithReview(
+  db: Db,
+  transferId: string,
+  integrations: PartnerIntegrations,
+  review: HoldReviewInput,
+): Promise<ReleaseResult> {
+  return runReviewTx(db, async (tx): Promise<ReleaseResult> => {
+    const notMoved = (r: ReleaseResult) => new ReviewNotMoved<ReleaseResult>(r);
+    const r = await lockAndRouteReview(tx, transferId, review, 'release', integrations);
+    if (r.kind !== 'ok') throw notMoved(r);
+    const { t } = r;
+    if (await identityMissingForRelease(tx, t, integrations)) throw notMoved({ kind: 'identity_missing' });
+    if (await originatorMissingForRelease(tx, t, integrations)) throw notMoved({ kind: 'originator_missing' });
+    // T9 (P23): clearPepInTx goes HERE, after identity / originator and right before the sender rule.
+    if (await platformSenderHoldLocked(tx, t, integrations, undefined)) throw notMoved({ kind: 'sender_hold' });
+    const paid = await createTransferRepo(tx).markPaidIfInReview(t.id);
+    if (!paid) throw notMoved({ kind: 'already' });
+    const reviewId = await insertReview(tx, r, review);
+    await recordStaffTransferAudit(
+      tx,
+      { actor: review.actor, reason: review.reason, actorScope: review.actorScope },
+      'transfer.release',
+      paid,
+      { previousStatus: 'in_review', newStatus: paid.status, ...reviewAuditMeta(reviewId, r, review) },
+    );
+    // P21 hold.disposition (T23)
+    const { webhookDriven } = await enqueueRailEffect(tx, paid, integrations);
+    return { kind: 'released', webhookDriven };
+  });
+}
+
+export type RecordHoldStepResult =
+  | { kind: 'recorded'; reviewId: string; final: boolean }
+  | { kind: 'already' }
+  | { kind: 'changed'; why: HoldRefusedWhy };
+
+/**
+ * Fix pack 7 (P9): a NON-MOVING hold decision step (route 'record': a step 1
+ * under four-eyes, or a final decision of one class while another class is
+ * still open). ONE transaction: lockAndRouteReview(..., 'record'), the
+ * hold_reviews row, the `transfer.hold.review` audit row. No status change and
+ * no outbox row (T23 adds the hold.disposition event for a final row). A
+ * refusal found by the route is returned as 'changed' / 'already' with nothing
+ * written; a failed insert throws HoldReviewChangedError (rolled back).
+ */
+export async function recordHoldStep(db: Db, review: HoldReviewInput & { transferId: string }): Promise<RecordHoldStepResult> {
+  refuseUnwiredPepClear(review);
+  return runReviewTx(db, async (tx): Promise<RecordHoldStepResult> => {
+    const r = await lockAndRouteReview(tx, review.transferId, review, 'record');
+    if (r.kind === 'already' || r.kind === 'changed') throw new ReviewNotMoved<RecordHoldStepResult>(r);
+    if (r.kind !== 'ok') throw new ReviewNotMoved<RecordHoldStepResult>({ kind: 'changed', why: 'changed' });
+    const reviewId = await insertReview(tx, r, review);
+    await recordStaffTransferAudit(
+      tx,
+      { actor: review.actor, reason: review.reason, actorScope: review.actorScope },
+      'transfer.hold.review',
+      r.t,
+      { ...reviewAuditMeta(reviewId, r, review), final: r.step.final },
+    );
+    // P21 hold.disposition (T23): a final row.
+    return { kind: 'recorded', reviewId, final: r.step.final };
   });
 }
 
@@ -464,43 +592,6 @@ async function platformSenderHoldLocked(
   return senderScreeningHoldActive(await readSenderScreeningFlags(tx, transfer.partnerId, transfer.phone, { forUpdate: true }));
 }
 
-/**
- * Fix pack 4 (R03, C19, critic P4): true when a release would send a
- * real-money consumer row to the rail with no account-holder (legal) name on
- * file, WHETHER OR NOT the row carries RECIPIENT_IDENTITY_MISSING (a row held
- * before deploy, or while its rail was not yet real money). Partner-API and
- * payment-link rows are exempt in the SQL; a B2B row is never missing. No
- * reason tag and no lock: a legal name is only ever written while
- * awaiting_payment, so an in_review row cannot gain one under the release.
- * Not real money: no query. A NULL test only (no decrypt); logs nothing.
- */
-async function identityMissingForRelease(
-  tx: DbOrTx,
-  t: Pick<Transfer, 'id' | 'partnerId' | 'environment'>,
-  railIntegrations: PartnerIntegrations,
-): Promise<boolean> {
-  if (!realMoneyRail({ environment: t.environment, railProviderType: railIntegrations.payment.providerType ?? null })) return false;
-  return createTransferRepo(tx).recipientIdentityMissing(t.id, t.partnerId);
-}
-
-/**
- * Fix pack 5 (R38, P22): true when a release would send a real-money row whose
- * travel-rule originator data is not on file (or a ROUTED row, whose data
- * cannot be sent) to the rail, WHETHER OR NOT the row carries
- * ORIGINATOR_INFO_MISSING (a row held before deploy). B2B and Partner-API rows
- * are exempt (originatorInfoMissing's SQL). Not real money: no read. A read
- * error throws (the transaction rolls back, nothing released). NULL tests only
- * (no decrypt); logs nothing.
- */
-async function originatorMissingForRelease(
-  tx: DbOrTx,
-  t: Pick<Transfer, 'id' | 'partnerId' | 'phone' | 'settlementPartnerId' | 'destinationCountry' | 'amountUsd' | 'environment'>,
-  railIntegrations: PartnerIntegrations,
-): Promise<boolean> {
-  if (!realMoneyRail({ environment: t.environment, railProviderType: railIntegrations.payment.providerType ?? null })) return false;
-  return originatorInfoMissing(tx, t);
-}
-
 export type StaffRescreenReleaseResult =
   | { kind: 'released'; webhookDriven: boolean } // in_review → paid + the rail effect, after a live, fresh, clear re-screen
   | { kind: 'identity_missing' } // fix pack 4 (C19): real money, b2c, not exempt, no legal name: the re-screen's evidence stays, nothing else written
@@ -512,7 +603,8 @@ export type StaffRescreenReleaseResult =
   // platform person decides; the caller's refusal text says so).
   | { kind: 'held'; cause: 'list_not_live' | 'review' }
   | { kind: 'blocked' } // a match: blocked, notices enqueued, never paid out
-  | { kind: 'already' }; // not in_review anymore (or now blocked / rescreen-only): nothing written
+  | { kind: 'already' } // not in_review anymore (or now blocked / rescreen-only): nothing written
+  | { kind: 'changed'; why: HoldRefusedWhy }; // fix pack 7 (P9): a review the locked row no longer matches (before the evidence on a stale rowFp)
 
 /**
  * Pack 2 review F1 (A1): a STAFF release of a real-money hold whose newest
@@ -550,13 +642,22 @@ export async function releaseHoldAfterRescreen(
     railIntegrations: PartnerIntegrations;
     audit: StaffAuditCtx;
     partnerRelease?: { partnerId: PartnerId };
+    /** Fix pack 7 (P9, DP2): the decision's review record; the clear branch runs the in-tx review checks. */
+    review?: HoldReviewInput;
   },
 ): Promise<StaffRescreenReleaseResult> {
-  const { result, uncovered, audit, partnerRelease } = input;
+  const { result, uncovered, audit, partnerRelease, review } = input;
+  if (review) {
+    if (partnerRelease) throw new Error('releaseHoldAfterRescreen: review and partnerRelease are exclusive');
+    refuseUnwiredPepClear(review);
+  }
+  const pin = review ? { partnerId: review.ownerId } : partnerRelease ? { partnerId: partnerRelease.partnerId } : {};
   return db.transaction(async (tx): Promise<StaffRescreenReleaseResult> => {
     const repo = createTransferRepo(tx);
-    const t = await repo.getTransferForUpdate(transferId, partnerRelease ? { partnerId: partnerRelease.partnerId } : {});
+    const t = await repo.getTransferForUpdate(transferId, pin);
     if (!t || t.status !== 'in_review' || t.complianceStatus === 'blocked' || isRescreenOnlyHold(t)) return { kind: 'already' };
+    // Fix pack 7 (P9 step 2): a stale fingerprint refuses before the evidence row (nothing written).
+    if (review && rowFpOf(t) !== review.rowFp) return { kind: 'changed', why: 'changed' };
     const previousReasons = t.complianceReasons ?? [];
     if (result.evidence) await createAuditRepo(tx).record(sanctionsAuditEvent(t.partnerId, t.id, result.evidence));
 
@@ -606,6 +707,12 @@ export async function releaseHoldAfterRescreen(
       return { kind: 'held', cause: newReasons.includes(LIST_UNAVAILABLE_REASON) ? 'list_not_live' : 'review' };
     }
 
+    // Fix pack 7 (P9 steps 1b-4, DP2): the review's class, route and step on the
+    // already-locked row. A refusal answers with nothing more written (the
+    // screen's evidence stays: it is a true record).
+    const routed = review ? await routeLockedReview(tx, t, review, 'release', input.railIntegrations) : null;
+    if (routed && routed.kind !== 'ok') return routed;
+
     // Fix pack 4 (C19, critic C2): after the evidence, the block and the held
     // branches, right before the claim; the evidence row stays (a true record).
     if (await identityMissingForRelease(tx, t, input.railIntegrations)) return { kind: 'identity_missing' };
@@ -614,10 +721,23 @@ export async function releaseHoldAfterRescreen(
     if (await platformSenderHoldLocked(tx, t, input.railIntegrations, partnerRelease)) return { kind: 'sender_hold' };
     const paid = await repo.markPaidIfInReview(t.id, partnerRelease);
     if (!paid) return { kind: 'already' };
-    await recordStaffTransferAudit(tx, audit, 'transfer.release', paid, {
-      previousStatus: 'in_review',
-      newStatus: paid.status,
-    });
+    if (routed && review) {
+      // P9 steps 8-9: the review row AFTER the claim (a failed insert rolls it back), then the audit.
+      const reviewId = await insertReview(tx, routed, review);
+      await recordStaffTransferAudit(
+        tx,
+        { actor: review.actor, reason: review.reason, actorScope: review.actorScope },
+        'transfer.release',
+        paid,
+        { previousStatus: 'in_review', newStatus: paid.status, ...reviewAuditMeta(reviewId, routed, review) },
+      );
+      // P21 hold.disposition (T23)
+    } else {
+      await recordStaffTransferAudit(tx, audit, 'transfer.release', paid, {
+        previousStatus: 'in_review',
+        newStatus: paid.status,
+      });
+    }
     const { webhookDriven } = await enqueueRailEffect(tx, paid, input.railIntegrations);
     return { kind: 'released', webhookDriven };
   });
