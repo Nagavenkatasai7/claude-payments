@@ -264,11 +264,15 @@ describe('fix pack 2 T2: railProviderType and enqueueListNotLiveAlert', () => {
       }),
     ).rejects.toThrow('rolled-back');
     expect(await rows()).toEqual([]);
+    // The key is per Eastern day: read it before and after the mints so a run
+    // that crosses Eastern midnight still matches one of them.
+    const dayBefore = listNotLiveDedupeKey(new Date());
     await store.mintUnderSenderLock('acme', 'p', (ops) => ops.enqueueListNotLiveAlert());
     await store.mintUnderSenderLock('acme', 'p2', (ops) => ops.enqueueListNotLiveAlert());
+    const dayAfter = listNotLiveDedupeKey(new Date());
     const r = await rows();
     expect(r).toHaveLength(1);
-    expect(r[0].dedupe_key).toBe(listNotLiveDedupeKey(new Date()));
+    expect([dayBefore, dayAfter]).toContain(r[0].dedupe_key);
     expect(Object.keys(r[0].payload)).toEqual(['message']);
     expect(String(r[0].payload.message)).toContain('partner acme');
     expect(String(r[0].payload.message)).not.toContain('p2');
