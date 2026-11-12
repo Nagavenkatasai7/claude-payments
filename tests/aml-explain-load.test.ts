@@ -11,7 +11,7 @@ import type { PartnerId, Transfer } from '@/lib/types';
 // before pack 6 (no aml.hold row) keeps the legacy pair structuring +
 // first_transfer.
 
-const fault = vi.hoisted(() => ({ statsThrow: false }));
+const fault = vi.hoisted(() => ({ statsThrow: false, statsCalls: 0 }));
 const log = vi.hoisted(() => ({ warns: [] as unknown[][] }));
 
 vi.mock('@/db/repos/transfer-repo', async (orig) => {
@@ -23,6 +23,7 @@ vi.mock('@/db/repos/transfer-repo', async (orig) => {
       return {
         ...repo,
         senderAmlStats: async (...a: Parameters<typeof repo.senderAmlStats>) => {
+          fault.statsCalls += 1;
           if (fault.statsThrow) throw new TypeError('stats read failed');
           return repo.senderAmlStats(...a);
         },
@@ -47,6 +48,7 @@ beforeEach(async () => {
   await seedPartner(db, 'acme');
   await seedPartner(db, 'p2');
   fault.statsThrow = false;
+  fault.statsCalls = 0;
   log.warns = [];
 });
 
@@ -157,6 +159,49 @@ describe('loadAmlExplainContext — fix pack 6 T18 (P16)', () => {
     const ctx = await loadAmlExplainContext(db, t, 'acme');
     expect(ctx.recomputed).toBeNull();
     expect(ctx.checkFailed).toBe(false);
+  });
+
+  // Review round 1 RD1: a pay-step risk-signal hold adds AML_HOLD_REASON but
+  // writes a risk.signals row, never an aml.hold row. It is NOT a pre-pack-6
+  // hold: the legacy pair must not run (no AML rule held this row).
+  async function riskSignals(subjectId: string, held: string[], partnerId: PartnerId = 'acme') {
+    await createAuditRepo(db).record({
+      partnerId, actor: 'system:risk-signals', actorType: 'system', action: 'risk.signals', subjectId,
+      meta: { shown: ['new_account'], derived: ['new_account'], acked: true, held, warningVersion: 'v1', ackedAt: null },
+    });
+  }
+
+  it('RD1: a risk-signal hold (risk.signals held, no aml.hold row) recomputes nothing and reads no ledger', async () => {
+    const t = await heldRow({ amountUsd: 900 }); // first-ever sender, $900 >= firstUsd: the legacy pair would say first_transfer
+    await riskSignals(t.id, ['new_account']);
+    const stop = captureQueries();
+    const ctx = await loadAmlExplainContext(db, t, 'acme');
+    const queries = stop();
+    expect(ctx.recomputed).toBeNull();
+    expect(ctx.checkFailed).toBe(false);
+    expect(queries.filter((q) => /from "transfers"/i.test(q.sql))).toEqual([]);
+    expect(fault.statsCalls).toBe(0);
+    const { buildAmlExplainBundle } = await import('@/lib/aml-explain-ai');
+    for (const audience of ['platform', 'partner'] as const) {
+      const facts = buildAmlExplainBundle(t, ctx.alerts, ctx.cfg, audience, Date.now(), ctx.recomputed, ctx.purposeHold, ctx.checkFailed);
+      expect(facts.rules).toEqual([]);
+    }
+  });
+
+  it('RD1: a risk.signals row with an empty held list, or another tenant\'s, keeps the legacy pair', async () => {
+    const t = await heldRow();
+    await riskSignals(t.id, []);
+    await riskSignals(t.id, ['new_account'], 'p2');
+    const ctx = await loadAmlExplainContext(db, t, 'acme');
+    expect(ctx.recomputed?.rule).toBe('first_transfer');
+  });
+
+  it('RD1: a row with BOTH an aml.hold row and a held risk.signals row keeps the aml.hold rules', async () => {
+    const t = await heldRow();
+    await amlHold(t.id, ['first_transfer']);
+    await riskSignals(t.id, ['new_account']);
+    const ctx = await loadAmlExplainContext(db, t, 'acme');
+    expect(ctx.recomputed).toEqual({ rule: 'first_transfer', window: 'first', count: 1, sumUsd: 900 });
   });
 
   it('a recompute read error: recomputed null, logged by name, checkFailed false', async () => {

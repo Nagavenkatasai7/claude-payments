@@ -66,12 +66,22 @@ export async function loadAmlExplainContext(
   const holdRow = history.find((a) => a.action === 'aml.hold' && a.partnerId === tenant);
   const heldRules: unknown[] | null = Array.isArray(holdRow?.meta.rules) ? (holdRow.meta.rules as unknown[]) : null;
   const checkFailed = heldRules?.includes('check_failed') === true;
+  // Review round 1 RD1: a pay-step risk-signal hold (P19) reuses
+  // AML_HOLD_REASON but writes a risk.signals row (meta.held non-empty), never
+  // an aml.hold row. Such a row is NOT a pre-pack-6 hold: no AML rule held it,
+  // so nothing is recomputed (same listBySubject read, tenant-pinned). A row
+  // with an aml.hold row as well keeps that row's rules.
+  const riskHold = history.some(
+    (a) => a.action === 'risk.signals' && a.partnerId === tenant && Array.isArray(a.meta.held) && a.meta.held.length > 0,
+  );
+  const riskOnlyHold = riskHold && !holdRow;
 
   let recomputed: AmlHit | null = null;
   // Only a row the in-mint AML hold actually held: re-running the rules on a
   // sanctions or identity hold would name a rule that never held it. A
-  // check_failed hold has no rule result to recompute.
-  if (eligible && alerts.length === 0 && !purposeHold && !checkFailed && t.complianceReasons.includes(AML_HOLD_REASON)) {
+  // check_failed hold has no rule result to recompute, and a risk-signal-only
+  // hold (RD1) has none either.
+  if (eligible && alerts.length === 0 && !purposeHold && !checkFailed && !riskOnlyHold && t.complianceReasons.includes(AML_HOLD_REASON)) {
     try {
       const anchor = { at: new Date(t.createdAt), id: t.id };
       const repo = createTransferRepo(db);

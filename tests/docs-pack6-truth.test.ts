@@ -136,6 +136,24 @@ describe('pack 6 documents say what the code does', () => {
     expect(read('src/lib/compliance-config.ts')).toContain(`'${AML_HOLD_REASON}'`);
   });
 
+  it('review round 1 RG3/RD2: the spec Writers bullet says the go-live default skips India (IN), that corridor rules never apply to an India source, and that a corridor added later gets the same default; the code agrees', () => {
+    const w = paragraph(specPack6(), '- **Writers.**');
+    expect(w).toMatch(/except India \(IN\)/);
+    expect(w).toContain('Corridor rules, AML holds included, never apply to a transfer whose source country is India');
+    expect(w).toContain("reason: 'corridor_added_default'");
+    expect(w).toContain('`updatePartnerAction`');
+    const helper = read('src/lib/aml-hold-defaults.ts');
+    expect(helper).toContain("c === 'IN'");
+    expect(helper).toContain("'corridor_added_default'");
+    expect(read('src/app/admin-dashboard/partners/actions.ts')).toContain("'corridor_added_default'");
+  });
+
+  it('review round 1 RG3/RD2: go-live.mdx says the default does not apply to India (IN) and also covers a corridor added later', () => {
+    const p = paragraph(section(GO_LIVE, '### Live money on your own rail'), 'When SmartRemit turns on live money');
+    expect(p).toMatch(/except India \(IN\)/);
+    expect(p).toContain('A corridor you add later gets the same default');
+  });
+
   it('the hold-reason registry table is unchanged: exactly one AML_HOLD_REASON row (no new reason: owner Q15, Q21)', () => {
     const rows = SPEC.split('\n').filter((l) => l.startsWith('| `AML_HOLD_REASON` |'));
     expect(rows).toEqual(['| `AML_HOLD_REASON` | aml | platform | hold |']);
