@@ -390,7 +390,7 @@ describe('enqueue sites — every customer ticket creation queues a triage', () 
       const f = new FormData();
       f.set('transferId', 'T_recall');
       f.set('reason', 'not_received');
-      await expect(requestRecallAction(f)).rejects.toThrow(/REDIRECT:\/account\/support\/tk_/);
+      await expect(requestRecallAction(f)).rejects.toThrow(/REDIRECT:\/account\/receipt\/T_recall\?case=tk_/);
 
       const rows = await triageRows();
       expect(rows).toHaveLength(1);

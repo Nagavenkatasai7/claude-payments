@@ -143,6 +143,7 @@ beforeEach(async () => {
 
 describe('requestRecallAction', () => {
   it('opens a ticket for a delivered transfer inside the 24h window — SESSION partner/phone, hostile form fields ignored', async () => {
+    // Fix pack 8 (T14): a consumer transfer opens its regulatory case and comes back to the receipt.
     await store.saveTransfer(mkTransfer({ id: 'T_deliv' }));
     await expect(
       requestRecallAction(fd({
@@ -151,7 +152,7 @@ describe('requestRecallAction', () => {
         partnerId: 'default',       // hostile — must be ignored
         customerPhone: OTHER_PHONE, // hostile — must be ignored
       })),
-    ).rejects.toThrow(/REDIRECT:\/account\/support\/tk_/);
+    ).rejects.toThrow(/REDIRECT:\/account\/receipt\/T_deliv\?case=tk_/);
 
     const mine = await repo.listByCustomer(PHONE);
     expect(mine).toHaveLength(1);
@@ -164,9 +165,32 @@ describe('requestRecallAction', () => {
     expect(await repo.listByCustomer(OTHER_PHONE)).toEqual([]);
   });
 
+  it('b2b: opens a recall ticket inside the 24h window — SESSION partner/phone, hostile form fields ignored', async () => {
+    await store.saveTransfer(mkTransfer({ id: 'T_b2b', transferType: 'b2b' }));
+    await expect(
+      requestRecallAction(fd({
+        transferId: 'T_b2b',
+        reason: 'not_received',
+        partnerId: 'default',       // hostile — must be ignored
+        customerPhone: OTHER_PHONE, // hostile — must be ignored
+      })),
+    ).rejects.toThrow(/REDIRECT:\/account\/support\/tk_/);
+
+    const mine = await repo.listByCustomer(PHONE);
+    expect(mine).toHaveLength(1);
+    expect(mine[0].partnerId).toBe('p1');
+    expect(mine[0].customerPhone).toBe(PHONE);
+    expect(mine[0].kind).toBe('customer');
+    expect(mine[0].transferId).toBe('T_b2b');
+    expect(mine[0].category).toBe('refund');
+    expect(mine[0].subject).toBe('Recall request: not_received');
+    expect(mine[0].regClass).toBeUndefined();
+    expect(await repo.listByCustomer(OTHER_PHONE)).toEqual([]);
+  });
+
   it('refuses a delivered transfer whose recall window has elapsed', async () => {
     await store.saveTransfer(mkTransfer({
-      id: 'T_old',
+      id: 'T_old', transferType: 'b2b',
       deliveredAt: new Date(Date.now() - (RECALL_WINDOW_MS + 60 * 1000)).toISOString(),
     }));
     await expect(requestRecallAction(fd({ transferId: 'T_old', reason: 'not_received' })))
@@ -175,7 +199,7 @@ describe('requestRecallAction', () => {
   });
 
   it('refuses a not-yet-delivered (paid) transfer — recall is delivered-only', async () => {
-    await store.saveTransfer(mkTransfer({ id: 'T_paid', status: 'paid', deliveredAt: undefined }));
+    await store.saveTransfer(mkTransfer({ id: 'T_paid', transferType: 'b2b', status: 'paid', deliveredAt: undefined }));
     await expect(requestRecallAction(fd({ transferId: 'T_paid', reason: 'not_received' })))
       .rejects.toThrow('REDIRECT:/account/receipt/T_paid?error=ineligible');
     expect(await repo.listByCustomer(PHONE)).toEqual([]);
@@ -205,14 +229,14 @@ describe('requestRecallAction', () => {
   it('refuses a transfer with a refund already in flight (refundStatus precedence)', async () => {
     // A delivered transfer normally qualifies, but a refund in the pipeline makes
     // refundDisposition return non-recall — isRecallEligible is false.
-    await store.saveTransfer(mkTransfer({ id: 'T_ref', refundStatus: 'requested' }));
+    await store.saveTransfer(mkTransfer({ id: 'T_ref', transferType: 'b2b', refundStatus: 'requested' }));
     await expect(requestRecallAction(fd({ transferId: 'T_ref', reason: 'not_received' })))
       .rejects.toThrow('REDIRECT:/account/receipt/T_ref?error=ineligible');
     expect(await repo.listByCustomer(PHONE)).toEqual([]);
   });
 
   it('caps at 5 OPEN tickets', async () => {
-    await store.saveTransfer(mkTransfer({ id: 'T_cap' }));
+    await store.saveTransfer(mkTransfer({ id: 'T_cap', transferType: 'b2b' }));
     for (let i = 0; i < 5; i++) await seedTicket();
     await expect(requestRecallAction(fd({ transferId: 'T_cap', reason: 'not_received' })))
       .rejects.toThrow('REDIRECT:/account/receipt/T_cap?error=cap');
@@ -220,7 +244,7 @@ describe('requestRecallAction', () => {
   });
 
   it('admin kill switch off refuses outright (bounce to support landing)', async () => {
-    await store.saveTransfer(mkTransfer({ id: 'T_off' }));
+    await store.saveTransfer(mkTransfer({ id: 'T_off', transferType: 'b2b' }));
     // support_config's one writer on an existing row (Program-Fix 15 PR B).
     const { found } = await ps.updateSupportConfig('p1', (prev) => ({ ...prev, enableSupportPortal: false }));
     expect(found).toBe(true);
@@ -240,14 +264,14 @@ describe('requestRecallAction', () => {
 
 describe('requestRecallAction — step-up for portal MFA (Program-Fix 49D)', () => {
   it('not enrolled (default): unchanged — the ticket opens with no code', async () => {
-    await store.saveTransfer(mkTransfer({ id: 'T_mfa0' }));
+    await store.saveTransfer(mkTransfer({ id: 'T_mfa0', transferType: 'b2b' }));
     await expect(requestRecallAction(fd({ transferId: 'T_mfa0', reason: 'not_received' }))).rejects.toThrow(/REDIRECT:\/account\/support\/tk_/);
     expect(reserveMock).not.toHaveBeenCalled();
   });
 
   it('enrolled + no code: ?error=mfa_code and no ticket', async () => {
     mfaEnrolled = true;
-    await store.saveTransfer(mkTransfer({ id: 'T_mfa1' }));
+    await store.saveTransfer(mkTransfer({ id: 'T_mfa1', transferType: 'b2b' }));
     await expect(requestRecallAction(fd({ transferId: 'T_mfa1', reason: 'not_received' }))).rejects.toThrow(
       'REDIRECT:/account/receipt/T_mfa1?error=mfa_code',
     );
@@ -256,7 +280,7 @@ describe('requestRecallAction — step-up for portal MFA (Program-Fix 49D)', () 
 
   it('enrolled + wrong code: ?error=mfa_invalid and no ticket', async () => {
     mfaEnrolled = true;
-    await store.saveTransfer(mkTransfer({ id: 'T_mfa2' }));
+    await store.saveTransfer(mkTransfer({ id: 'T_mfa2', transferType: 'b2b' }));
     await expect(requestRecallAction(fd({ transferId: 'T_mfa2', reason: 'not_received', code: '000000' }))).rejects.toThrow(
       'REDIRECT:/account/receipt/T_mfa2?error=mfa_invalid',
     );
@@ -265,7 +289,7 @@ describe('requestRecallAction — step-up for portal MFA (Program-Fix 49D)', () 
 
   it('enrolled + right code: the ticket opens', async () => {
     mfaEnrolled = true;
-    await store.saveTransfer(mkTransfer({ id: 'T_mfa3' }));
+    await store.saveTransfer(mkTransfer({ id: 'T_mfa3', transferType: 'b2b' }));
     await expect(requestRecallAction(fd({ transferId: 'T_mfa3', reason: 'not_received', code: '246810' }))).rejects.toThrow(
       /REDIRECT:\/account\/support\/tk_/,
     );
@@ -274,7 +298,7 @@ describe('requestRecallAction — step-up for portal MFA (Program-Fix 49D)', () 
 
   it('CUSTOMER_MFA_REQUIRED on and not enrolled: ?error=mfa_required and no ticket', async () => {
     vi.stubEnv('CUSTOMER_MFA_REQUIRED', 'true');
-    await store.saveTransfer(mkTransfer({ id: 'T_mfa4' }));
+    await store.saveTransfer(mkTransfer({ id: 'T_mfa4', transferType: 'b2b' }));
     await expect(requestRecallAction(fd({ transferId: 'T_mfa4', reason: 'not_received' }))).rejects.toThrow(
       'REDIRECT:/account/receipt/T_mfa4?error=mfa_required',
     );

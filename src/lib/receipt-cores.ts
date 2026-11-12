@@ -11,8 +11,9 @@ import { isRecallEligible } from './refund-policy';
 import { logWarn } from './log';
 import type { StepUpResult } from './customer-mfa';
 import { regDueAt, type RegClass } from './reg-clocks';
-import type { ReportCode } from './error-notice';
-import { alsoReportedNote, caseClassNote } from './legal/error-notice-drafts';
+import { routeReport, type ReportCode } from './error-notice';
+import { errorNoticeFacts } from './error-notice-facts';
+import { alsoReportedNote, caseClassNote, caseNoticeLine, caseSubject } from './legal/error-notice-drafts';
 import type { Customer, Partner, PartnerId } from './types';
 
 /**
@@ -75,12 +76,14 @@ export const RECALL_REASON_VALUES = ['wrong_recipient', 'wrong_amount', 'not_rec
 export type RecallReason = (typeof RECALL_REASON_VALUES)[number];
 const RECALL_REASONS = new Set<string>(RECALL_REASON_VALUES);
 
-const REASON_LABEL: Record<string, string> = {
+const REASON_LABEL: Record<ReportCode, string> = {
   wrong_recipient: 'Sent to the wrong recipient',
   wrong_amount: 'Wrong amount sent',
   not_received: 'Recipient did not receive the money',
   unauthorized: 'I did not authorize this transfer',
   other: 'Something else is wrong',
+  complaint: 'Complaint',
+  cancellation: 'Cancellation request',
 };
 
 /** The customer's partner row (the admin-controlled support kill switch lives on it). */
@@ -94,7 +97,10 @@ function portalDisabled(partner: Partner): boolean {
 }
 
 export type RecallCoreResult =
-  | { kind: 'opened'; ticketId: string }
+  // Fix pack 8 (P2, T14): `opened` carries the case class and due date (null on the unclassed b2b /
+  // sandbox recall) and `cancellable` (DP13: inside the cancel window the case opens AND the page
+  // keeps its cancel card; false on the not_consumer path). There is no 'use_cancel' kind.
+  | { kind: 'opened'; ticketId: string; reused: boolean; regClass: RegClass | null; dueAt: string | null; cancellable: boolean }
   | { kind: 'bad_reason' }
   | { kind: 'support_off' }
   | { kind: 'ineligible' }
@@ -110,9 +116,14 @@ export interface RecallCoreOptions {
 }
 
 /**
- * Open a recall/dispute ticket for a delivered transfer inside the 24h window. Same order as the
- * legacy action: reason enum, support kill switch, ownership (404-never-403), eligibility, step-up,
- * open-ticket cap, ticket, triage.
+ * Report a problem with one of the customer's own transfers (receipt page and portal).
+ *
+ * Fix pack 8 (R44, P11, T14): reason enum (bad_reason) -> STRICT ownership (404-never-403, so
+ * `ineligible`) -> `routeReport` (P5). A consumer, non-test transfer (`case`) always opens or reuses
+ * its regulatory case through `openErrorNoticeCaseLocked` in ONE transaction: no support switch, no
+ * step-up and no open-ticket cap ever refuses it (DP9; a notice is never refused). A b2b or sandbox
+ * transfer (`not_consumer`) keeps today's order: the support kill switch, the 24h `isRecallEligible`
+ * re-check, the step-up, the cap, the ticket and the triage (byte-identical).
  */
 export async function requestRecallFor(
   customer: Owner,
@@ -123,17 +134,52 @@ export async function requestRecallFor(
 ): Promise<RecallCoreResult> {
   const reason = input.reason;
   if (!RECALL_REASONS.has(reason)) return { kind: 'bad_reason' };
-  if (portalDisabled(await customerPartner(customer))) return { kind: 'support_off' };
+  const code = reason as RecallReason;
 
   const transfer = await getStore().getTransfer(transferId);
   if (!transfer || transfer.phone !== customer.senderPhone || transfer.partnerId !== customer.partnerId) return { kind: 'ineligible' };
-  if (!isRecallEligible(transfer, Date.now())) return { kind: 'ineligible' };
+
+  const now = Date.now();
+  const reasonLabel = REASON_LABEL[code];
+  const capScope = opts.tenantScopedCap ? 'tenant' : 'phone';
+  // The facts are read on the pooled handle BEFORE the case transaction: a failed read inside it
+  // would abort the transaction (early review FB).
+  const facts = await errorNoticeFacts(getDb(), transfer, now);
+  const route = routeReport({ transfer, ...facts, code, now });
+
+  if (route.kind === 'case') {
+    const regClass = route.regClass;
+    // partnerId + customerPhone come from the caller's SESSION; transferId was re-validated above.
+    const r = await getDb().transaction((tx) =>
+      openErrorNoticeCaseLocked(tx, {
+        partnerId: customer.partnerId,
+        phone: customer.senderPhone,
+        transferId: transfer.id,
+        regClass,
+        code,
+        subject: caseSubject(code),
+        body:
+          `Recall/dispute opened from the receipt page for transfer ${transfer.id}.\n` +
+          `Reason: ${reasonLabel} (${code}).\n` +
+          caseNoticeLine({ code, dueAt: new Date(regDueAt(regClass, now)).toISOString() }),
+        capScope,
+        now,
+      }),
+    );
+    // T18: pokeWorker() after commit
+    if (r.kind === 'cap') throw new Error('requestRecallFor: a classed case cannot meet the cap'); // P8 step 4
+    // A classed case always carries a due date; the computed one is only a guard (early review FB).
+    const dueAt = r.dueAt ?? new Date(regDueAt(regClass, now)).toISOString();
+    return { kind: 'opened', ticketId: r.ticketId, reused: r.reused, regClass, dueAt, cancellable: route.cancellable };
+  }
+
+  // not_consumer (b2b or sandbox): today's recall path, unchanged.
+  if (portalDisabled(await customerPartner(customer))) return { kind: 'support_off' };
+  if (!isRecallEligible(transfer, now)) return { kind: 'ineligible' };
 
   const gate = await stepUpGate();
   if (gate !== 'ok') return { kind: 'step_up', failure: gate };
 
-  const reasonLabel = REASON_LABEL[reason] ?? reason;
-  // partnerId + customerPhone come from the caller's SESSION; transferId was re-validated above.
   const r = await openRecallTicketLocked(getDb(), {
     partnerId: customer.partnerId,
     phone: customer.senderPhone,
@@ -146,9 +192,11 @@ export async function requestRecallFor(
       `Recovery is not guaranteed — please review and follow up.`,
     // M2-14 (PR 397 L1): the portal's cap counts in SQL with the tenant in the WHERE; the legacy
     // receipt keeps counting every ticket on the phone.
-    capScope: opts.tenantScopedCap ? 'tenant' : 'phone',
+    capScope,
   });
-  return r.kind === 'cap' ? { kind: 'cap' } : { kind: 'opened', ticketId: r.ticketId };
+  return r.kind === 'cap'
+    ? { kind: 'cap' }
+    : { kind: 'opened', ticketId: r.ticketId, reused: r.reused, regClass: null, dueAt: null, cancellable: false };
 }
 
 export type RecallTicketResult = { kind: 'opened'; ticketId: string; reused: boolean } | { kind: 'cap' };

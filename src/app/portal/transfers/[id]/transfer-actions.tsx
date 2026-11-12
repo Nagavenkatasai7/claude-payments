@@ -15,9 +15,13 @@ type BoundAction = (prev: PortalTransferActionState, formData: FormData) => Prom
 function Result({ state }: { state: PortalTransferActionState }) {
   if (state?.notice) {
     return (
-      <p role="status" className="text-[14px] font-semibold text-ds-success-ink">
-        {t(state.notice)}
-      </p>
+      <>
+        <p role="status" className="text-[14px] font-semibold text-ds-success-ink">
+          {t(state.notice)}
+        </p>
+        {/* Fix pack 8 (P11): a report's case text, plain text (React escapes it; never HTML). */}
+        {state.text ? <p className="text-[14px] text-ds-ink">{state.text}</p> : null}
+      </>
     );
   }
   if (state?.error) {
@@ -72,12 +76,12 @@ export function RecallForm({
   reasons: Array<{ value: string; label: MessageKey }>;
 }) {
   return (
-    <ActionForm action={action} requestKey={requestKey} label={t('portal.detail.recallCta')} busyLabel={t('portal.detail.working')}>
-      <Field name="reason" label={t('portal.detail.recallReason')} required>
+    <ActionForm action={action} requestKey={requestKey} label={t('portal.report.submit')} busyLabel={t('portal.detail.working')}>
+      <Field name="reason" label={t('portal.report.reasonLabel')} required>
         {({ id, describedBy }) => (
           <Select id={id} name="reason" required defaultValue="" aria-describedby={describedBy}>
             <option value="" disabled>
-              {t('portal.detail.recallChoose')}
+              {t('portal.report.choose')}
             </option>
             {reasons.map((r) => (
               <option key={r.value} value={r.value}>

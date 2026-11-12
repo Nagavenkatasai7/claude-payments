@@ -19,6 +19,10 @@ import { outboxSealedCtx } from '@/lib/crypto-context';
 import { pokeWorker } from '@/lib/outbox';
 import { getRedis } from '@/lib/redis';
 import { logWarn } from '@/lib/log';
+import { getPartnerStore } from '@/lib/partner-store';
+import { resolvePartnerDisclosure } from '@/lib/partner-config';
+import { providerLineFor } from '@/lib/legal/provider-line';
+import { caseOpenedReply } from '@/lib/legal/error-notice-drafts';
 import { t, type MessageKey } from '@/lib/i18n';
 import { transferRewardOrNull } from '@/lib/rewards/read';
 
@@ -37,7 +41,8 @@ import { transferRewardOrNull } from '@/lib/rewards/read';
  * Results are fixed copy keys. No redirect() inside a try (it throws).
  */
 
-export type PortalTransferActionState = { notice?: MessageKey; error?: MessageKey } | null;
+/** `text`: the case text of a report (P11; plain text, a catalogue key cannot carry a case id). */
+export type PortalTransferActionState = { notice?: MessageKey; error?: MessageKey; text?: string } | null;
 
 const NOT_FOUND: PortalTransferActionState = { error: 'portal.transfer.not_found' };
 
@@ -124,15 +129,20 @@ export async function requestRefundPortalAction(
   return { error: 'portal.action.failed' };
 }
 
-const RECALL_COPY: Record<string, PortalTransferActionState> = {
-  opened: { notice: 'portal.recall.opened' },
-  bad_reason: { error: 'portal.recall.bad_reason' },
-  support_off: { error: 'portal.recall.support_off' },
-  ineligible: { error: 'portal.recall.ineligible' },
-  cap: { error: 'portal.recall.cap' },
+const REPORT_COPY: Record<string, PortalTransferActionState> = {
+  opened: { notice: 'portal.report.opened' },
+  bad_reason: { error: 'portal.report.bad_reason' },
+  support_off: { error: 'portal.report.support_off' },
+  ineligible: { error: 'portal.report.ineligible' },
+  cap: { error: 'portal.report.cap' },
 };
 
-/** Report a problem with a delivered transfer inside the 24h window: opens a ticket (moves no money). */
+/**
+ * Report a problem with a transfer (moves no money). Fix pack 8 (R44, P11, T14): a consumer transfer
+ * always opens or reuses its regulatory case and the state carries the case text (caseOpenedReply,
+ * surface 'page', with the owner's provider line); a b2b transfer keeps today's 24h recall ticket.
+ * The replay value is flat (`{ code, ticketId, dueAt, reused }`); the text is rebuilt on a replay.
+ */
 export async function requestRecallPortalAction(
   transferId: string,
   _prev: PortalTransferActionState,
@@ -145,20 +155,34 @@ export async function requestRecallPortalAction(
   const transfer = await getPortalTransfer(owner, id);
   if (!transfer) return NOT_FOUND;
   const reason = field(formData, 'reason').trim();
-  let code: string;
+  let res: { code?: unknown; ticketId?: unknown; dueAt?: unknown; reused?: unknown };
   try {
-    ({ code } = await once('portal-recall', ctx, formData, async () => ({
-      code: (
-        await requestRecallFor({ partnerId: owner.partnerId, senderPhone: owner.phone }, transfer.id, { reason }, async () => 'ok', {
-          tenantScopedCap: true,
-        })
-      ).kind,
-    })));
+    res = await once('portal-recall', ctx, formData, async () => {
+      const r = await requestRecallFor({ partnerId: owner.partnerId, senderPhone: owner.phone }, transfer.id, { reason }, async () => 'ok', {
+        tenantScopedCap: true,
+      });
+      return r.kind === 'opened'
+        ? { code: r.kind, ticketId: r.ticketId, dueAt: r.dueAt, reused: r.reused }
+        : { code: r.kind, ticketId: null, dueAt: null, reused: false };
+    });
   } catch (err) {
     return failed(err, 'portal.transfer.recall');
   }
   refresh(transfer.id);
-  return RECALL_COPY[code] ?? { error: 'portal.action.failed' };
+  const copy = REPORT_COPY[String(res.code)] ?? { error: 'portal.action.failed' };
+  if (res.code !== 'opened' || typeof res.ticketId !== 'string' || typeof res.dueAt !== 'string' || !Number.isFinite(Date.parse(res.dueAt))) {
+    return copy;
+  }
+  let providerLine: string | null = null;
+  try {
+    providerLine = providerLineFor(resolvePartnerDisclosure(await getPartnerStore().getPartner(owner.partnerId)));
+  } catch (err) {
+    logWarn('portal.transfer.recall', err instanceof Error ? err.name : 'error', { transferId: transfer.id });
+  }
+  return {
+    ...copy,
+    text: caseOpenedReply({ caseId: res.ticketId, dueAt: res.dueAt, providerLine, reused: res.reused === true, surface: 'page' }),
+  };
 }
 
 /** Per customer: 10 receipt emails per hour. */

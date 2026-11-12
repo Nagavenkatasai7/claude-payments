@@ -22,12 +22,12 @@ import { SendAgainForm } from '../../send/send-again-form';
 
 export const generateMetadata = () => portalMetadata('portal.detail.title', { referrer: 'no-referrer' });
 
-const RECALL_LABEL: Record<(typeof RECALL_REASON_VALUES)[number], MessageKey> = {
-  not_received: 'portal.recall.reason.not_received',
-  wrong_recipient: 'portal.recall.reason.wrong_recipient',
-  wrong_amount: 'portal.recall.reason.wrong_amount',
-  unauthorized: 'portal.recall.reason.unauthorized',
-  other: 'portal.recall.reason.other',
+const REPORT_LABEL: Record<(typeof RECALL_REASON_VALUES)[number], MessageKey> = {
+  not_received: 'portal.report.reason.not_received',
+  wrong_recipient: 'portal.report.reason.wrong_recipient',
+  wrong_amount: 'portal.report.reason.wrong_amount',
+  unauthorized: 'portal.report.reason.unauthorized',
+  other: 'portal.report.reason.other',
 };
 
 const WHEN = new Intl.DateTimeFormat('en-US', { dateStyle: 'medium', timeStyle: 'short', timeZone: 'UTC' });
@@ -82,6 +82,9 @@ export default async function TransferDetailPage({ params }: { params: Promise<{
   const key = () => newRequestKey();
   // Batch B follow-up A3: Send again starts with the customer's own last reason (their words, for them only).
   const canSendAgain = transfer.status !== 'blocked' && transfer.transferType !== 'b2b';
+  // Fix pack 8 (R44, P11, T14): a consumer transfer can always be reported (the action opens its
+  // case); a b2b transfer keeps today's 24h recall rule. The portal shows only live rows.
+  const canReport = transfer.transferType !== 'b2b' || disp.kind === 'recall_eligible';
   const lastPurposeDetail = canSendAgain ? ((await getPortalTransferPurposeDetail(owner, transfer.id)) ?? undefined) : undefined;
 
   return (
@@ -162,7 +165,7 @@ export default async function TransferDetailPage({ params }: { params: Promise<{
           </ol>
         </Card>
 
-        {disp.kind === 'cancellable' || disp.kind === 'refundable' || disp.kind === 'recall_eligible' ? (
+        {disp.kind === 'cancellable' || disp.kind === 'refundable' ? (
           <Card as="section" className="flex flex-col gap-3 p-5 sm:p-6">
             {disp.kind === 'cancellable' ? (
               <>
@@ -191,17 +194,19 @@ export default async function TransferDetailPage({ params }: { params: Promise<{
                 />
               </>
             ) : null}
-            {disp.kind === 'recall_eligible' ? (
-              <>
-                <h2 className="text-[17px] font-bold text-ds-ink">{t('portal.detail.recallTitle')}</h2>
-                <p className="text-[14px] text-ds-ink-muted">{t('portal.detail.recallBody')}</p>
-                <RecallForm
-                  action={requestRecallPortalAction.bind(null, transfer.id)}
-                  requestKey={key()}
-                  reasons={RECALL_REASON_VALUES.map((value) => ({ value, label: RECALL_LABEL[value] }))}
-                />
-              </>
-            ) : null}
+            <p className="text-[13px] text-ds-ink-muted">{t('portal.detail.stepUpNote')}</p>
+          </Card>
+        ) : null}
+
+        {canReport ? (
+          <Card as="section" className="flex flex-col gap-3 p-5 sm:p-6">
+            <h2 className="text-[17px] font-bold text-ds-ink">{t('portal.report.title')}</h2>
+            <p className="text-[14px] text-ds-ink-muted">{t('portal.report.intro')}</p>
+            <RecallForm
+              action={requestRecallPortalAction.bind(null, transfer.id)}
+              requestKey={key()}
+              reasons={RECALL_REASON_VALUES.map((value) => ({ value, label: REPORT_LABEL[value] }))}
+            />
             <p className="text-[13px] text-ds-ink-muted">{t('portal.detail.stepUpNote')}</p>
           </Card>
         ) : null}

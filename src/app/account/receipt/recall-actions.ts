@@ -47,7 +47,9 @@ export async function requestRecallAction(formData: FormData): Promise<void> {
   const back = (code: string) =>
     redirect(`/account/receipt/${encodeURIComponent(transferId)}?error=${code}`);
 
-  // The core (src/lib/receipt-cores.ts, UI redesign M2-7) runs the legacy order: the reason enum
+  // Fix pack 8 (R44, P11): a consumer transfer always opens its regulatory case (no switch, no
+  // step-up, no cap); the core calls the step-up gate ONLY on the b2b / sandbox path below.
+  // The core (src/lib/receipt-cores.ts, UI redesign M2-7) runs the legacy order there: the reason enum
   // FIRST (a forged reason fails with zero DB work), the admin support kill switch (hiding a CTA
   // never gates a POST endpoint), STRICT ownership 404-never-403, the server-side 24h eligibility
   // re-check, the Program-Fix 49D step-up, the 5-open-requests cap, the ticket (partnerId and
@@ -71,6 +73,13 @@ export async function requestRecallAction(formData: FormData): Promise<void> {
     case 'cap':
       return back('cap');
     case 'opened':
+      // Fix pack 8 (P11, P41 T14): a classed case comes back to the receipt, which shows the case
+      // text itself (caseBannerFor; the support pages may be switched off). Inside the cancel window
+      // nothing is added: the receipt's own cancel card shows by its disposition rule (DP13).
+      if (res.regClass) {
+        const id = encodeURIComponent(transferId);
+        return redirect(`/account/receipt/${id}?case=${encodeURIComponent(res.ticketId)}${res.reused ? '&added=1' : ''}`);
+      }
       return redirect(`/account/support/${res.ticketId}`);
   }
 }
