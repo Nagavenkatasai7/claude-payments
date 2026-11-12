@@ -2,7 +2,8 @@
 // rail endpoint: the closed event types, who gets events, the dedupe key, the target URL,
 // the body builder, the outbox enqueue (T21) and the delivery error the worker throws.
 // The worker case 'partner.event' (src/lib/outbox-worker.ts) builds the body at drain and
-// signs it with the existing signRailHeaders (no new signer); T22/T23 add the enqueue points.
+// signs it with the existing signRailHeaders (no new signer); T22/T23 add the enqueue points
+// (T23: enqueueHoldDispositionIfEligible, called by the decision seams in settlement.ts and dashboard-ops.ts).
 //
 // The body never carries a reason, name, phone, amount, reference or hash: the builder
 // takes T7's ScreeningView (no inputHash) and a ReviewRowLite pick (no reason), and builds
@@ -195,6 +196,26 @@ export async function enqueuePotentialMatchIfEligible(
   const owner = await createPartnerRepo(tx).getPartner(t.partnerId);
   if (!partnerEventsApply(owner, t)) return false;
   return enqueuePartnerEvent(tx, { type: 'screening.potential_match', transferId: t.id });
+}
+
+/**
+ * P21 (T23): the hold.disposition event in the caller's decision transaction, for a
+ * FINAL review row only (partner or platform scope). `owner` is the row the seam
+ * already read inside this transaction (P9 step 1b; no second read). A non-final
+ * step, a sandbox ('test') row or an owner that is not live-certified queues nothing.
+ * A failed enqueue throws (the decision rolls back). True when a new row was queued.
+ * The caller pokes (decideHold) or runs in the worker.
+ */
+export async function enqueueHoldDispositionIfEligible(
+  tx: DbOrTx,
+  t: Pick<Transfer, 'id' | 'partnerId' | 'environment'>,
+  owner: ScopeOwner | null,
+  reviewId: string,
+  final: boolean,
+): Promise<boolean> {
+  if (!final || t.environment === 'test') return false;
+  if (!partnerEventsApply(owner, t)) return false;
+  return enqueuePartnerEvent(tx, { type: 'hold.disposition', transferId: t.id, reviewId });
 }
 
 /**

@@ -216,7 +216,8 @@ describe('the release seam with a review (P9)', { retry: 0 }, () => {
       previousStatus: 'in_review', newStatus: 'paid', reviewId: expect.any(String), step: 1, disposition: 'documents_verified',
       holdClass: 'kyc', actorScope: 'platform', reason: REASON,
     });
-    expect((await outboxKeys()).slice(keysBefore.length)).toEqual([`instruct:${t.id}`]);
+    // T23 (P21): the certified owner's final review queues its hold.disposition event before the rail effect.
+    expect((await outboxKeys()).slice(keysBefore.length)).toEqual([`hold.disposition:${rel[0].meta.reviewId as string}`, `instruct:${t.id}`]);
   });
 
   it('7: a lost claim (paid by SQL after the caller read the row): already; nothing written', async () => {
@@ -290,7 +291,8 @@ describe('the release seam with a review (P9)', { retry: 0 }, () => {
       reviewId: (step as { reviewId: string }).reviewId, step: 1, final: true, disposition: 'documents_verified', holdClass: 'kyc', actorScope: 'platform',
     });
     expect((await store.getTransfer(t.id))?.status).toBe('in_review');
-    expect(await count('outbox')).toBe(outboxBefore);
+    // T23 (P21): the final record queues exactly its hold.disposition event.
+    expect((await outboxKeys()).slice(outboxBefore)).toEqual([`hold.disposition:${(step as { reviewId: string }).reviewId}`]);
 
     expect(await releaseHold(db, t, await rail(), undefined, undefined, review(t, 'sanctions_review', 'false_positive_match'))).toEqual({
       kind: 'released', webhookDriven: true,

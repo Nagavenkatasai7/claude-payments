@@ -35,6 +35,7 @@ import {
 } from './hold-queue';
 import { holdQueueApplies, partnerDecidesKyc, reviewRecordApplies, type ScopeOwner } from './partner-decision-scope';
 import { HoldReviewChangedError, insertReview, lockAndRouteReview, type HoldReviewInput } from './hold-review-tx';
+import { enqueueHoldDispositionIfEligible } from './partner-events';
 
 /**
  * Fix pack 2 T4 (R02): the refusal for a hold waiting on a fresh sanctions list
@@ -830,7 +831,8 @@ export async function rejectTransfer(
           ...(realMoney && hasSanctionsHold(classes) ? { fundsKept: true } : {}),
         },
       );
-      // P21 hold.disposition (T23)
+      // P21 (T23): the disposition event, after the audit and before the funds rule / refund branch.
+      await enqueueHoldDispositionIfEligible(tx, cancelled, r.owner, reviewId, r.step.final);
     } else {
       // Merge plan 2c (D4): a PARTNER-scoped reject claims with the partner-release predicates
       // (tenant, not blocked, sender row present with no PEP / watchlist hit) in the SAME UPDATE.

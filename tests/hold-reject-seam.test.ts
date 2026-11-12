@@ -184,7 +184,7 @@ describe('rejectTransfer without a review on a certified owner (D6)', { retry: 0
 });
 
 describe('the reject seam with a review (P9)', { retry: 0 }, () => {
-  it("6: platform, an UNCHARGED kyc row ('customer_not_verified'): cancelled, ONE review row, ONE audit row, no outbox", async () => {
+  it("6: platform, an UNCHARGED kyc row ('customer_not_verified'): cancelled, ONE review row, ONE audit row, only the hold.disposition event (T23)", async () => {
     await delegated();
     const t = await heldRowFor(db, 'acme', 'kyc');
     const outboxBefore = await count('outbox');
@@ -203,7 +203,9 @@ describe('the reject seam with a review (P9)', { retry: 0 }, () => {
       previousStatus: 'in_review', newStatus: 'cancelled', refundStatus: 'none', reviewId: expect.any(String), step: 1,
       disposition: 'customer_not_verified', holdClass: 'kyc', actorScope: 'platform', reason: REASON,
     });
-    expect(await count('outbox')).toBe(outboxBefore);
+    expect((await outboxRows()).slice(outboxBefore)).toEqual([
+      { kind: 'partner.event', dedupe_key: `hold.disposition:${rej[0].meta.reviewId as string}` },
+    ]);
   });
 
   it('7: platform, a CHARGED row (fundingRef set, mock rail): cancelled, refund pending, exactly one funding.refund, one review row', async () => {
@@ -214,9 +216,13 @@ describe('the reject seam with a review (P9)', { retry: 0 }, () => {
     const after = await store.getTransfer(t.id);
     expect(after?.status).toBe('cancelled');
     expect(after?.refundStatus).toBe('pending');
-    expect((await outboxRows()).slice(before)).toEqual([{ kind: 'funding.refund', dedupe_key: `refund:${t.id}` }]);
+    const rej = await audits(t.id, 'transfer.reject');
+    expect((await outboxRows()).slice(before)).toEqual([
+      { kind: 'partner.event', dedupe_key: `hold.disposition:${rej[0].meta.reviewId as string}` },
+      { kind: 'funding.refund', dedupe_key: `refund:${t.id}` },
+    ]);
     expect(await reviewRows(t.id)).toHaveLength(1);
-    expect((await audits(t.id, 'transfer.reject'))[0].meta).toMatchObject({ refundStatus: 'pending', holdClass: 'kyc' });
+    expect(rej[0].meta).toMatchObject({ refundStatus: 'pending', holdClass: 'kyc' });
   });
 
   it('8: queue owner, four-eyes on, partner kyc reject: final at step 1, cancelled', async () => {
