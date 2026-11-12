@@ -7,6 +7,8 @@ import { CANCEL_WINDOW_MS } from '@/lib/refund-policy';
 import { SANCTIONS_FUNDS_RULE } from '@/lib/sanctions/notices';
 import { buildSenderCancelMessage } from '@/lib/legal/cancel-drafts';
 import { isSandbox } from '@/lib/settlement';
+import { realMoneyFor } from '@/lib/live-gate';
+import { isPartnerPulled } from '@/lib/funding-method';
 import type { PartnerId, Transfer } from '@/lib/types';
 
 // sender-cancel — Program-Fix 15 PR C: the consumer sender's 30-minute
@@ -61,7 +63,7 @@ type LockedClaim =
   | { kind: 'ineligible' }
   | { kind: 'window_passed' }
   | { kind: 'escalate'; transfer: Transfer; reason: EscalateReason; msSinceCharge: number | null }
-  | { kind: 'cancelled'; prior: Transfer; updated: Transfer; msSinceCharge: number };
+  | { kind: 'cancelled'; prior: Transfer; updated: Transfer; msSinceCharge: number; fundsKept?: true };
 
 const RAIL_ROW_DONE_NOTE = 'sender_cancel';
 
@@ -69,6 +71,12 @@ const RAIL_ROW_DONE_NOTE = 'sender_cancel';
  * Steps 1–4 above, on the caller's TRANSACTION handle. Pure decision + the
  * guarded writes; the effects (refund, confirmation, audit, alert) are the
  * caller's (cancelWithinWindow), in the same transaction.
+ *
+ * Fix pack 7 T16 (D7, P14): on real money (`realMoneyFor`) a row blocked by sanctions screening
+ * cancels with its refund state kept (`keepRefundWhenBlocked`); `fundsKept` tells the caller, which
+ * sends the no-refund confirmation and the `sendercancelfunds:<id>` funds-rule alert. The exit: the
+ * partner returns the funds on its own processor or rail once its compliance officer approves, and
+ * staff record it with `recordRefundOutsideAction` (T34, `sanctionsReturnApproved` + `approvalRef`).
  */
 export async function cancelPaidBySenderLocked(tx: DbOrTx, partnerId: PartnerId, id: string): Promise<LockedClaim> {
   const repo = createTransferRepo(tx);
@@ -114,9 +122,18 @@ export async function cancelPaidBySenderLocked(tx: DbOrTx, partnerId: PartnerId,
     // Unreachable under the locks; never cancel what we could not stop.
     throw new Error('sender cancel: rail rows changed under the lock');
   }
-  const { prior, updated } = await repo.failPaidFromRail(id, 'sender cancelled within 30 min of payment (Reg E)');
+  // Fix pack 7 T16 (P14, D7; C2, M2, P7, R9): a row blocked by sanctions screening on real money
+  // cancels with its refund state KEPT (no automatic refund); `t` is the locked pre-read.
+  const keep = t.complianceStatus === 'blocked' && (await realMoneyFor(tx, t));
+  const { prior, updated } = await repo.failPaidFromRail(
+    id,
+    'sender cancelled within 30 min of payment (Reg E)',
+    keep ? { keepRefundWhenBlocked: true } : {},
+  );
   if (!prior || !updated) throw new Error('sender cancel: the locked paid row did not flip');
-  return { kind: 'cancelled', prior, updated, msSinceCharge: age };
+  // fundsKept: the rule withheld a refund this flip would otherwise have queued.
+  const kept = keep && (updated.fundingRef != null || isPartnerPulled(updated.fundingMethod));
+  return { kind: 'cancelled', prior, updated, msSinceCharge: age, ...(kept ? { fundsKept: true as const } : {}) };
 }
 
 function escalationAlert(t: Transfer, reason: EscalateReason): string {
@@ -205,8 +222,10 @@ export async function cancelWithinWindow(
             'ops.alert',
             {
               // Review S5 (inventory): a sanctions-blocked row: no "return the payment".
-              message:
-                updated.complianceStatus === 'blocked'
+              message: claim.fundsKept
+                ? `⚠️ SmartRemit ops: the sender cancelled transfer ${updated.id} (partner ${updated.partnerId}) within 30 minutes of payment (Reg E). ` +
+                  `It is blocked by sanctions screening, so it was cancelled and NOT refunded: ${SANCTIONS_FUNDS_RULE}.`
+                : updated.complianceStatus === 'blocked'
                   ? `⚠️ SmartRemit ops: the sender cancelled transfer ${updated.id} (partner ${updated.partnerId}) within 30 minutes of payment (Reg E). ` +
                     `No refund was queued here (funds not captured by SmartRemit). It is blocked by sanctions screening: ${SANCTIONS_FUNDS_RULE}.`
                   : `⚠️ SmartRemit ops: the sender cancelled transfer ${updated.id} (partner ${updated.partnerId}) within 30 minutes of payment (Reg E). ` +

@@ -140,6 +140,16 @@ function bounded(fp: string): string {
 }
 
 /**
+ * Fix pack 7 T16 (P4, P14; C4, M8, P3, R1): does the row carry a SANCTIONS hold?
+ * sanctions_review, sender_watchlist (incl. the synthetic class from a later
+ * stamp and unreadable flags, fail closed) and blocked. A PEP-only sender
+ * (sender_pep) is NOT one. The funds rule (D7) keys on this on real money.
+ */
+export function hasSanctionsHold(classes: readonly ClassifiedClass[]): boolean {
+  return classes.some((c) => c.holdClass === 'sanctions_review' || c.holdClass === 'sender_watchlist' || c.holdClass === 'blocked');
+}
+
+/**
  * P4: the whole row's reasons fingerprint (the value the decision dialog
  * posts). No hash: reasons are code constants. String entries only, unique,
  * sorted, escaped (`%` -> `%25`, `|` -> `%7C`, the identity for every registry

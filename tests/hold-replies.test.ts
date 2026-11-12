@@ -17,6 +17,7 @@ import {
   type FixedReplyKind,
 } from '@/lib/hold-replies';
 import { REDACTION_NOTICES } from '@/lib/inbound-redact';
+import { buildRejectContactMessage } from '@/lib/payment';
 
 // R30 (no tipping-off): hold-replies.ts is the ONLY source of the text a
 // customer sees when a transfer is held, cannot go ahead, needs more details or
@@ -107,6 +108,22 @@ describe('hold-replies: the R49 redaction notice passes the same check', () => {
       expect(offences(text), `${lang}: ${text}`).toEqual([]);
     });
   }
+});
+
+// Fix pack 7 T16 (P14, M9): the neutral message after a reject that keeps the
+// funds joins the same check. Its two parameters (the transfer id and the
+// charge) are the only figures; it never says "refund".
+describe('hold-replies: the reject contact message (pack 7 T16) passes the same check', () => {
+  it('buildRejectContactMessage has no banned word, no "refund", and no figure outside its id and charge', () => {
+    const t = {
+      id: 'tx_abc', totalChargeUsd: 205, totalChargeSource: 205, sourceCurrency: 'USD',
+    } as unknown as Parameters<typeof buildRejectContactMessage>[0];
+    const body = buildRejectContactMessage(t);
+    expect(body.startsWith('Your transfer tx_abc could not be completed. Our team will contact you shortly about your ')).toBe(true);
+    expect(body.toLowerCase()).not.toContain('refund');
+    const skeleton = body.replace('tx_abc', '').replace(/about your .*\.$/, 'about your.');
+    expect(offences(skeleton), body).toEqual([]);
+  });
 });
 
 // R43: the HELP keyword reaches a person, and the case-opened replies live in

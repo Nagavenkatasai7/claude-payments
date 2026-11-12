@@ -520,22 +520,34 @@ export function createTransferRepo(
     async failPaidFromRail(
       id: string,
       note: string,
+      // Fix pack 7 T16 (P14, D7): true keeps the refund state of a sanctions-BLOCKED row (the row
+      // still cancels); the caller passes it only on real money. Without it the SQL is unchanged.
+      opts: { keepRefundWhenBlocked?: boolean } = {},
     ): Promise<{ prior: Transfer | null; updated: Transfer | null }> {
       const locked = await db.select().from(transfers).where(eq(transfers.id, id)).limit(1).for('update');
       const prior = locked[0] ? toDomain(locked[0]) : null;
       if (!prior || prior.status !== 'paid') return { prior, updated: null };
+      const refundStatus = opts.keepRefundWhenBlocked
+        ? sql`CASE
+            WHEN ${transfers.refundStatus} IN ('none', 'requested')
+              AND (${transfers.fundingRef} IS NOT NULL OR ${transfers.fundingMethod} IN ('ach_pull', 'bank_pull'))
+              AND ${transfers.complianceStatus} <> 'blocked'
+              THEN 'pending'
+            ELSE ${transfers.refundStatus}
+          END`
+        : sql`CASE
+            WHEN ${transfers.refundStatus} IN ('none', 'requested')
+              AND (${transfers.fundingRef} IS NOT NULL OR ${transfers.fundingMethod} IN ('ach_pull', 'bank_pull'))
+              THEN 'pending'
+            ELSE ${transfers.refundStatus}
+          END`;
       const rows = await db
         .update(transfers)
         .set({
           status: 'cancelled',
           // APPENDED, never clobbered: a rail must not erase a staff note.
           adminNote: sql`CASE WHEN COALESCE(${transfers.adminNote}, '') = '' THEN ${note} ELSE ${transfers.adminNote} || ' | ' || ${note} END`,
-          refundStatus: sql`CASE
-            WHEN ${transfers.refundStatus} IN ('none', 'requested')
-              AND (${transfers.fundingRef} IS NOT NULL OR ${transfers.fundingMethod} IN ('ach_pull', 'bank_pull'))
-              THEN 'pending'
-            ELSE ${transfers.refundStatus}
-          END`,
+          refundStatus,
         })
         .where(and(eq(transfers.id, id), eq(transfers.status, 'paid')))
         .returning();

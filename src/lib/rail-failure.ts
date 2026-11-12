@@ -5,6 +5,7 @@ import { pokeWorker } from '@/lib/outbox';
 import { scrub } from '@/lib/log';
 import { isPartnerPulled } from '@/lib/funding-method';
 import { SANCTIONS_FUNDS_RULE } from '@/lib/sanctions/notices';
+import { realMoneyFor } from '@/lib/live-gate';
 import { buildRailFailureMessage, type RailFailureNoticeVariant } from '@/lib/payment';
 import type { RailFailure } from '@/lib/providers/payment-provider';
 import type { RefundStatus, Transfer } from '@/lib/types';
@@ -49,6 +50,14 @@ function who(t: Transfer): string {
   );
 }
 
+/**
+ * Fix pack 7 T16 (D7, P14): on real money (live-gate `realMoneyFor`), a PAID row blocked by
+ * sanctions screening is cancelled with its refund state KEPT (`keepRefundWhenBlocked`): no
+ * funding.refund, the customer gets the `contact` notice, and `railfail:<id>` says the funds rule.
+ * The exit (P14 "Named exits"): the partner returns the funds on its own processor or rail once its
+ * compliance officer approves, and staff record it with `recordRefundOutsideAction` (T34) with
+ * `sanctionsReturnApproved` and the partner's `approvalRef`. Mock, simulator and sandbox: unchanged.
+ */
 export async function handleRailFailure(
   db: Db,
   transferId: string,
@@ -59,7 +68,12 @@ export async function handleRailFailure(
   const outcome = await db.transaction(async (tx): Promise<RailFailureOutcome> => {
     const repo = createTransferRepo(tx);
     const outbox = createOutboxRepo(tx);
-    const { prior, updated } = await repo.failPaidFromRail(transferId, note);
+    // Fix pack 7 T16 (P14, D7): a PAID row blocked by sanctions screening on real money keeps its
+    // refund state (cancelled, no automatic refund): the partner's compliance officer decides about
+    // the funds. The pre-read is LOCKED, so a concurrent block cannot slip in between.
+    const pre = await repo.getTransferForUpdate(transferId);
+    const keep = pre?.status === 'paid' && pre.complianceStatus === 'blocked' && (await realMoneyFor(tx, pre));
+    const { prior, updated } = await repo.failPaidFromRail(transferId, note, keep ? { keepRefundWhenBlocked: true } : {});
     if (!prior || prior.status === 'cancelled') return { kind: 'noop', refundStarted: false };
 
     if (!updated) {
@@ -104,6 +118,9 @@ export async function handleRailFailure(
         updated.complianceStatus === 'blocked'
           ? `the prior refund FAILED; the transfer is blocked by sanctions screening, so ${SANCTIONS_FUNDS_RULE}`
           : 'the prior refund FAILED — retry it from Refunds';
+    } else if (keep && (updated.fundingRef || pulled)) {
+      // T16 (P14): the funds are kept on purpose; "funds were NOT captured" would be false here.
+      path = `${pulled ? 'the partner-pulled debit was NOT reversed' : 'the captured charge was NOT refunded'}: the transfer is blocked by sanctions screening, so ${SANCTIONS_FUNDS_RULE}`;
     } else {
       // none / requested and NOT refundable: no charge was captured here.
       // Review S6 (Y1): a sanctions-blocked row (healPaidRowScreen keeps it

@@ -8,7 +8,9 @@ import { paylinkDedupeKey, resendEligibility } from './partner-transfer-ops';
 import { createTransferRepo } from '@/db/repos/transfer-repo';
 import { createOutboxRepo } from '@/db/repos/outbox-repo';
 import { createIntegrationsRepo } from '@/db/repos/integrations-repo';
-import { releaseHold, releaseHoldAfterRescreen, recordStaffTransferAudit, type StaffAuditCtx } from './settlement';
+import { isSandbox, releaseHold, releaseHoldAfterRescreen, recordStaffTransferAudit, type StaffAuditCtx } from './settlement';
+import { buildRejectContactMessage } from './payment';
+import { SANCTIONS_FUNDS_RULE } from './sanctions/notices';
 export type { StaffAuditCtx } from './settlement';
 import type { Db } from '@/db/client';
 import type { Store } from './store';
@@ -28,8 +30,8 @@ import { warmSanctionsList } from './providers/sanctions-provider';
 import { screenHeldOnFile } from './list-hold-rescreen';
 import { createPartnerRepo } from '@/db/repos/partner-repo';
 import {
-  allowedDispositions, classifyHold, openHoldClasses, rowReasonsFp, type DecisionRefusal, type HoldClass, type HoldDisposition,
-  type ReviewRowLite,
+  allowedDispositions, classifyHold, hasSanctionsHold, openHoldClasses, rowReasonsFp, type ClassifiedClass, type DecisionRefusal,
+  type HoldClass, type HoldDisposition, type ReviewRowLite,
 } from './hold-queue';
 import { holdQueueApplies, partnerDecidesKyc, reviewRecordApplies, type ScopeOwner } from './partner-decision-scope';
 import { HoldReviewChangedError, insertReview, lockAndRouteReview, type HoldReviewInput } from './hold-review-tx';
@@ -740,6 +742,16 @@ export async function releaseTransfer(
  * the claim then re-checks, atomically, the tenant, a non-blocked row and the sender's customer
  * row (present, no PEP / watchlist hit), and the audit meta carries actorScope 'partner'. Omitted
  * (platform and legacy callers) ⇒ unchanged.
+ *
+ * Fix pack 7 T16 (D7, P14): on real money (`realMoneyFor`, every non-'test' row: one rail read) a
+ * reject of a row that carries a SANCTIONS hold class (`hasSanctionsHold`: sanctions_review,
+ * sender_watchlist, blocked; classes from the sender flags read under the lock, fail closed) KEEPS
+ * the funds: the row cancels, the refund status is left as it is (none, or requested after a
+ * sender-cancel escalation), no funding.refund; the audit meta says `fundsKept: true`, ONE
+ * `rejectfunds:<id>` ops alert and ONE neutral `rejectmsg:<id>` customer message are queued. A
+ * PEP-only sender is not a sanctions hold and refunds as today. The exit (P14 "Named exits"): the
+ * partner returns the funds on its own processor or rail once its compliance officer approves, and
+ * staff record it with `recordRefundOutsideAction` (T34, `sanctionsReturnApproved` + `approvalRef`).
  */
 export async function rejectTransfer(
   store: Store,
@@ -779,6 +791,10 @@ export async function rejectTransfer(
   // can never leave a cancelled, charged, UNREFUNDED transfer.
   const refunding = await db.transaction(async (tx) => {
     const repo = createTransferRepo(tx);
+    // Fix pack 7 T16 (P14): real money BEFORE every claim (reads only; a 'test' row reads nothing).
+    const realMoney = await realMoneyFor(tx, transfer);
+    // The classes for the funds rule, from the claimed (locked) row; on real money only.
+    let classes: readonly ClassifiedClass[] = [];
     let cancelled: Transfer | null;
     if (review) {
       // Fix pack 7 (P9 steps 1-4): the tenant-pinned locked read, the owner re-read, the row
@@ -790,6 +806,8 @@ export async function rejectTransfer(
       // P9 step 7: the claim on the locked, tenant-pinned row (never the partner claim, DP6).
       cancelled = await repo.updateIfStatus(id, 'in_review', { status: 'cancelled', adminNote: 'rejected in review' });
       if (!cancelled) throw new Error('Cannot reject: transfer is not in_review (it moved concurrently)');
+      // T16 (P14): the review path reuses the flags lockAndRouteReview read under the lock.
+      if (realMoney) classes = fundsRuleClasses(cancelled, r.flags);
       // P9 step 8: the review row AFTER the claim (a refused insert throws: the claim rolls back).
       const reviewId = await insertReview(tx, r, review);
       // P9 step 9: the audit ctx is DERIVED from the review, so the two rows can never differ.
@@ -801,16 +819,16 @@ export async function rejectTransfer(
         {
           previousStatus: 'in_review',
           newStatus: 'cancelled',
-          refundStatus: cancelled.fundingRef ? 'pending' : 'none',
+          refundStatus: rejectRefundStatus(cancelled, realMoney && hasSanctionsHold(classes)),
           reviewId,
           step: r.step.step,
           disposition: review.disposition,
           holdClass: r.cls.holdClass,
           actorScope: review.actorScope,
+          ...(realMoney && hasSanctionsHold(classes) ? { fundsKept: true } : {}),
         },
       );
       // P21 hold.disposition (T23)
-      // P14 funds rule (T16)
     } else {
       // Merge plan 2c (D4): a PARTNER-scoped reject claims with the partner-release predicates
       // (tenant, not blocked, sender row present with no PEP / watchlist hit) in the SAME UPDATE.
@@ -824,17 +842,52 @@ export async function rejectTransfer(
             : 'Cannot reject: transfer is not in_review (it moved concurrently)',
         );
       }
+      // T16 (P14): the sender flags under the lock, AFTER the claim (the claim holds the transfer
+      // row lock: transfer -> customer order). A failed read is null: fail closed (a synthetic
+      // sender_watchlist class keeps the funds). No customer row in the owner tenant (a partner-API
+      // sender) has no stamp to read: undefined, so only a SENDER_SCREENING reason makes a sender class.
+      if (realMoney) {
+        const flags = await readSenderScreeningFlags(tx, cancelled.partnerId, cancelled.phone, { forUpdate: true }).then(
+          (f) => f ?? undefined,
+          () => null,
+        );
+        classes = fundsRuleClasses(cancelled, flags);
+      }
     }
+    const fundsKept = realMoney && hasSanctionsHold(classes);
     // Program-Fix 28: the audit row BEFORE the uncharged early return, so both
     // branches record the decision in this transaction (the review path wrote its own above).
     if (audit && !review) {
       await recordStaffTransferAudit(tx, audit, 'transfer.reject', cancelled, {
         previousStatus: 'in_review',
         newStatus: 'cancelled',
-        refundStatus: cancelled.fundingRef ? 'pending' : 'none',
+        refundStatus: rejectRefundStatus(cancelled, fundsKept),
         ...(partnerReject ? { actorScope: 'partner' } : {}),
+        ...(fundsKept ? { fundsKept: true } : {}),
       });
     }
+    if (fundsKept) {
+      // T16 (P14, D7): the funds are kept; ops and the customer are told, once each.
+      const outbox = createOutboxRepo(tx);
+      await outbox.enqueue(
+        'ops.alert',
+        {
+          message:
+            `⚠️ SmartRemit ops: transfer ${id} (partner ${cancelled.partnerId}) was rejected while a sanctions screening hold was on it. ` +
+            `It is cancelled and NOT refunded: ${SANCTIONS_FUNDS_RULE}. The partner blocks or returns the funds on its own processor or rail; ` +
+            `once the partner's compliance officer has approved a return and the money is back with the sender, record it with "Record refund made outside SmartRemit".`,
+        },
+        { dedupeKey: `rejectfunds:${id}` },
+      );
+      await outbox.enqueue(
+        'whatsapp.text',
+        // M9, P6: essential (survives STOP); neutral, no refund promised, no check named.
+        { to: cancelled.phone, body: buildRejectContactMessage(cancelled), partnerId: cancelled.partnerId, category: 'essential', ...(isSandbox(cancelled) ? { sandbox: true } : {}) },
+        { dedupeKey: `rejectmsg:${id}` },
+      );
+      return true; // the poke below runs
+    }
+    // T32: card / partner-collected variants (P27)
     if (!cancelled.fundingRef) return false; // uncharged legacy row: cancel-only
     await repo.updateRefund(id, { refundStatus: 'pending' });
     await createOutboxRepo(tx).enqueue(
@@ -846,6 +899,17 @@ export async function rejectTransfer(
   });
   if (!refunding) return;
   pokeWorker(); // fast path — the per-minute cron drains it regardless
+}
+
+/** T16 (P14): the classes the funds rule reads; the owner argument only changes deciders. */
+function fundsRuleClasses(t: Transfer, flags: Parameters<typeof classifyHold>[1]): readonly ClassifiedClass[] {
+  return classifyHold(t.complianceReasons, flags, { queue: false, partnerDecidesKyc: false }, { blocked: t.complianceStatus === 'blocked' });
+}
+
+/** T16 (P14, M1): the reject audit's refundStatus: the real status when the funds are kept. */
+function rejectRefundStatus(t: Transfer, fundsKept: boolean): string {
+  if (fundsKept) return t.refundStatus ?? 'none';
+  return t.fundingRef ? 'pending' : 'none';
 }
 
 /**

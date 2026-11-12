@@ -470,13 +470,19 @@ export async function reconcileSweep(db: Db, now: Date = new Date(), opts: Recon
   // Review S6 (Y3): a sanctions-blocked row (e.g. the change-ticket ledger
   // edit after a fundblocked:<id> freeze) is never told to refund: the
   // compliance officer decides about the funds. Same key, alert only.
-  for (const t of await transfers.findCancelledCharged()) {
+  // Fix pack 7 T16 (P14, C1, M3): a reject that kept the funds under a sanctions hold (D7) is
+  // marked by its rejectfunds:<id> outbox row (ONE read for the batch); it is never told to refund.
+  const cancelledCharged = await transfers.findCancelledCharged();
+  const kept = await outbox.existingDedupeKeys(cancelledCharged.map((t) => `rejectfunds:${t.id}`));
+  for (const t of cancelledCharged) {
     await outbox.enqueue(
       'ops.alert',
       {
         message:
           t.complianceStatus === 'blocked'
             ? `⚠️ SmartRemit ops: transfer ${t.id} (partner ${t.partnerId}) is CANCELLED, was CHARGED (${t.fundingRef}) and is blocked by sanctions screening; ${SANCTIONS_FUNDS_RULE}.`
+            : kept.has(`rejectfunds:${t.id}`)
+            ? `⚠️ SmartRemit ops: transfer ${t.id} (partner ${t.partnerId}) is CANCELLED, was CHARGED (${t.fundingRef}) and was rejected while a sanctions screening hold was on it; ${SANCTIONS_FUNDS_RULE}.`
             : `⚠️ SmartRemit ops: transfer ${t.id} (partner ${t.partnerId}) is CANCELLED but was CHARGED (${t.fundingRef}) and has no refund in flight — refund it by hand.`,
       },
       { dedupeKey: `cancelcharged:${t.id}` },
