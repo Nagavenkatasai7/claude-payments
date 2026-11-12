@@ -2,6 +2,7 @@ import type { CountryCode, Partner } from './types';
 import { AML_DEFAULTS, AML_HOLD_RULES, type AmlConfig, type AmlHoldRule } from './aml-rules';
 import type { FixedReplyKind } from './hold-replies';
 import { RISK_SIGNALS, RISK_SIGNALS_OFF, type RiskSignal, type RiskSignalConfig } from './risk-signals';
+import { reviewRecordApplies, type ScopeOwner } from './partner-decision-scope';
 
 // Canonical screening constants — single source of truth.
 // compliance.ts re-exports these for backward compatibility.
@@ -155,6 +156,9 @@ export function isRecipientIdentityHold(t: { complianceReasons?: readonly string
   return (t.complianceReasons ?? []).includes(RECIPIENT_IDENTITY_MISSING_REASON);
 }
 
+/** The owner fields the legacy partner hold rule reads (a full Partner, or just { kycMode } in pure tests). */
+export type LegacyHoldOwner = { kycMode?: string | null; id?: string; status?: string; liveControls?: unknown };
+
 /**
  * SPEC §3.3 + D7: a partner admin may release ONLY a delegated partner's
  * KYC-class hold. Fails CLOSED: an unknown KYC mode, a missing partner, a
@@ -171,12 +175,20 @@ export function isRecipientIdentityHold(t: { complianceReasons?: readonly string
  * KYC-class. REQUIRED, and a missing row or failed lookup (null / undefined)
  * ⇒ false. Fix pack 2 review F2: `sender` carries the stamp times too, and a
  * stamped, uncleared hold refuses like a boolean hit (isScreeningCustomerHold).
+ *
+ * Fix pack 7 (P11, DP5): this legacy one-step path (no review record, the release with no
+ * step-up) is CLOSED for every live-certified partner, whatever its posture
+ * (reviewRecordApplies). A certified queue partner decides in the hold queue (decideHoldAction);
+ * a certified delegated partner's holds are decided by SmartRemit with a recorded review. An
+ * owner without id / status / liveControls reads as not certified, so every partner that is not
+ * certified (all of them today) gets today's answer.
  */
 export function isPartnerReleasableHold(
   t: { status: string; complianceStatus?: string | null; complianceReasons?: readonly string[] | null },
-  owner: { kycMode?: string | null } | null | undefined,
+  owner: LegacyHoldOwner | null | undefined,
   sender: CustomerScreeningFlags | null | undefined,
 ): boolean {
+  if (owner && reviewRecordApplies(owner as ScopeOwner)) return false;
   if (!owner || owner.kycMode !== 'delegated') return false;
   if (!sender || isScreeningCustomerHold(sender)) return false;
   if (t.status !== 'in_review' || t.complianceStatus === 'blocked') return false;

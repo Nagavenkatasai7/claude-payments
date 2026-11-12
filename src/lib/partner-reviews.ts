@@ -1,4 +1,4 @@
-import { isPartnerReleasableHold, isScreeningCustomerHold, type CustomerScreeningFlags } from '@/lib/compliance-config';
+import { isPartnerReleasableHold, isScreeningCustomerHold, type CustomerScreeningFlags, type LegacyHoldOwner } from '@/lib/compliance-config';
 import type { MessageKey } from '@/lib/i18n';
 import type { AmlRule } from '@/lib/aml-rules';
 import type { Customer, PartnerId } from '@/lib/types';
@@ -71,7 +71,7 @@ export function partnerKycDecision(
  */
 export function partnerMayRejectHold(
   t: { status: string; complianceStatus?: string | null; complianceReasons?: readonly string[] | null },
-  owner: { kycMode?: string | null } | null | undefined,
+  owner: LegacyHoldOwner | null | undefined,
   sender: CustomerScreeningFlags | null | undefined,
 ): boolean {
   return isPartnerReleasableHold(t, owner, sender);
