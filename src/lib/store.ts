@@ -271,6 +271,19 @@ function trimHistory(messages: ChatMessage[]): ChatMessage[] {
   return trimmed;
 }
 
+/**
+ * Pack 6 (P19): THE firstSeenAt rule, shared by the tier subject (capSubject, the mint's
+ * p.subject) and R48's new_account signal at draft time (store.firstSeenAt): the tenant's
+ * customers row, else the tenant's first live transfer (any status), else now. Pure.
+ */
+export function firstSeenAtOf(
+  rowFirstSeenAt: string | null | undefined,
+  firstTransferAt: string | null | undefined,
+  now: Date,
+): string {
+  return rowFirstSeenAt ?? firstTransferAt ?? now.toISOString();
+}
+
 // `db` is the ROOT handle (never a tx): mintUnderSenderLock opens its own
 // transaction with an isolation level, which only PgDatabase.transaction takes.
 export function createStore(redis: RedisLike, db: Db) {
@@ -285,6 +298,17 @@ export function createStore(redis: RedisLike, db: Db) {
   // the phone's OLDEST customers row (see legacy-tenant.ts). Built once.
   const customersRepo = createCustomerRepo(db, (p, ph) => transfersRepo.firstTransferAt(p, ph));
   const legacyTenantOf = legacyTenantResolver(customersRepo);
+
+  /**
+   * Pack 6 (P19): the customers row and the firstSeenAt by firstSeenAtOf, read once for
+   * capSubject and store.firstSeenAt. Lazy: the transfer read runs only when the row has
+   * no value (the statements capSubject always ran). Tenant-scoped on both reads.
+   */
+  async function subjectRowAndFirstSeen(partnerId: PartnerId, phone: string, now: Date) {
+    const row = await customersRepo.getCustomer(partnerId, phone);
+    const ft = row?.firstSeenAt != null ? null : await transfersRepo.firstTransferAt(partnerId, phone);
+    return { row, firstSeenAt: firstSeenAtOf(row?.firstSeenAt, ft, now) };
+  }
 
   /**
    * R49: the sealed thread for (tenant, thread phone), or null when there is
@@ -546,7 +570,8 @@ export function createStore(redis: RedisLike, db: Db) {
      * it: firstSeenAt from the tenant's customers row, else the tenant's first
      * transfer, else now (a brand-new sender is T0). kycStatus is the caller's
      * attestation (input.senderKycStatus) — the same value the KYC backstop
-     * already trusts. Tenant-scoped on both reads.
+     * already trusts. Tenant-scoped on both reads. Pack 6 (P19): the rule is
+     * firstSeenAtOf (one rule with store.firstSeenAt, R48's draft-time read).
      */
     async capSubject(
       partnerId: PartnerId,
@@ -554,12 +579,17 @@ export function createStore(redis: RedisLike, db: Db) {
       kycStatus: KycStatus,
       now: Date = new Date(),
     ): Promise<CapSubject & { sendLimitOverride?: SendLimitOverride }> {
-      const row = await customersRepo.getCustomer(partnerId, phone);
-      const firstSeenAt =
-        row?.firstSeenAt ?? (await transfersRepo.firstTransferAt(partnerId, phone)) ?? now.toISOString();
+      const { row, firstSeenAt } = await subjectRowAndFirstSeen(partnerId, phone, now);
       // Program fix 16b: the customer's raise rides along (same row, no extra
       // query on the hot path) so createTransfer resolves the effective limits.
       return { firstSeenAt, kycStatus, sendLimitOverride: row?.sendLimitOverride };
+    },
+    /**
+     * Pack 6 (P19): the sender's firstSeenAt by the ONE rule (draft time, root handle).
+     * Throws on a read error (the caller treats it as unknown).
+     */
+    async firstSeenAt(partnerId: PartnerId, phone: string, now: Date = new Date()): Promise<string> {
+      return (await subjectRowAndFirstSeen(partnerId, phone, now)).firstSeenAt;
     },
     /**
      * ONE locked mint per (partner, phone). Opens a READ COMMITTED transaction
