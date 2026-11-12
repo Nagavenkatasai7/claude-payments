@@ -91,15 +91,20 @@ export type ReviewWant = 'release' | 'reject' | 'record';
 /**
  * P9 step 6 (T9): the PEP-clear rule on a routed review, checked BEFORE anything
  * is written. A partner's final releasing sender_pep step needs `pepClear`
- * (without it: 'disposition'); `pepClear` on any other review is a programming
- * error (throws). Returns null when the review may go on.
+ * (without it: 'disposition'). F1 (early review EA1/EB1): `pepClear` on a
+ * partner sender_pep releasing step that is NOT final (four-eyes step 1; the
+ * cycle changed between the plan and the lock) answers 'changed' like every
+ * other changed-under-lock case; callers drop pepClear on a planned non-final
+ * step. `pepClear` on any other class, scope or a disposition that does not
+ * release is a programming error (throws). Returns null when the review may go on.
  */
 export function pepClearRefusal(r: Pick<RoutedReview, 'cls' | 'step'>, review: HoldReviewInput): HoldRefusedWhy | null {
-  const partnerPepRelease =
-    r.cls.holdClass === 'sender_pep' && review.actorScope === 'partner' && dispositionReleases(review.disposition) && r.step.final;
+  const partnerPepReleaseStep =
+    r.cls.holdClass === 'sender_pep' && review.actorScope === 'partner' && dispositionReleases(review.disposition);
+  const partnerPepRelease = partnerPepReleaseStep && r.step.final;
   if (review.pepClear) {
-    if (!partnerPepRelease) throw new Error('hold review: pepClear is for a final partner sender_pep release only');
-    return null;
+    if (!partnerPepReleaseStep) throw new Error('hold review: pepClear is for a final partner sender_pep release only');
+    return partnerPepRelease ? null : 'changed';
   }
   return partnerPepRelease ? 'disposition' : null;
 }

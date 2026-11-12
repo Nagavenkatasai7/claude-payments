@@ -346,6 +346,17 @@ describe('decideHold (P13, the shared core)', { retry: 0 }, () => {
     noMoneyPath();
   });
 
+  it('10c (F1): four-eyes: a partner sender_pep release WITH pepClear plans a non-final record (no throw, no money path)', async () => {
+    await certifiedQueuePartner(db, { fourEyes: true });
+    const t = await heldRowFor(db, 'acme', 'sender_pep');
+    const f = (await readSenderScreeningFlags(db, 'acme', t.phone))!;
+    const pepClear = { reviewedFlaggedAt: f.screeningFlaggedAt!.toISOString() };
+    const i = input(t, 'sender_pep', 'pep_accepted_with_edd', { actor: 'co-a', actorScope: 'partner', expectFinal: false, pepClear });
+    const plan = await planHoldDecision(db, store, i);
+    expect(plan).toMatchObject({ route: { kind: 'record' }, step: { step: 1, final: false }, stepUp: false });
+    noMoneyPath();
+  });
+
   it('11: the re-exports are the same objects', async () => {
     expect(parseHoldReason('Checked the documents on file.')).toEqual({ ok: true, reason: 'Checked the documents on file.' });
     expect(HoldReviewChangedError).toBe((await import('@/lib/hold-review-tx')).HoldReviewChangedError);

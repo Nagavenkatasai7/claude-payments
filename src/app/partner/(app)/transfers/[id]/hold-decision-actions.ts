@@ -188,6 +188,9 @@ export async function decideHoldAction(
     return fail('partner.common.failed');
   }
   review.expectFinal = plan.step.final; // R6: the locked step must be the planned one
+  // F1 (early review EA1/EB1): the PEP clear rides only on the FINAL step; a four-eyes
+  // step 1 is recorded with no clear (the second user's final step clears).
+  if (!plan.step.final) delete review.pepClear;
 
   // 8. The forced step-up, on a final step only.
   if (plan.stepUp) {

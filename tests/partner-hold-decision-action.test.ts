@@ -440,6 +440,51 @@ describe('decideHoldAction: the inputs (P10 6)', { retry: 0 }, () => {
   });
 });
 
+describe('decideHoldAction: four-eyes sender_pep release (F1, early review EA1/EB1)', { retry: 0 }, () => {
+  const pepClears = () =>
+    q<{ meta: Record<string, unknown> }>(sql`SELECT meta FROM audit_events WHERE action = 'customer.screening_hold.clear' ORDER BY id`);
+  const clearedAt = async (phone: string) =>
+    (await q<{ at: string | Date | null }>(sql`SELECT screening_cleared_at AS at FROM customers WHERE partner_id = 'acme' AND phone = ${phone}`))[0].at;
+  async function pepRow() {
+    await queue({ fourEyes: true });
+    const t = await heldRowFor(db, 'acme', 'sender_pep');
+    const f = await q<{ at: string | Date }>(sql`SELECT screening_flagged_at AS at FROM customers WHERE partner_id = 'acme' AND phone = ${t.phone}`);
+    return { t, at: new Date(f[0].at).toISOString() };
+  }
+  const pepForm = (t: Transfer, at: string, code: string | null) =>
+    form(t, { holdClass: 'sender_pep', disposition: 'pep_accepted_with_edd', screeningFlaggedAt: at, code });
+
+  it('co-a step 1 is recorded WITHOUT the PEP clear; co-b step 2 (with the step-up) clears, audits the clear and releases', async () => {
+    const { t, at } = await pepRow();
+    const before = await clearedAt(t.phone);
+    expect(await decide(t.id, pepForm(t, at, null))).toEqual({ ok: true, outcome: 'awaiting_second' });
+    expect((await reviewRows(t.id)).map((r) => [r.hold_class, r.step, r.final, r.actor])).toEqual([['sender_pep', 1, false, 'co-a']]);
+    expect(await statusOf(t.id)).toBe('in_review');
+    expect(await clearedAt(t.phone)).toEqual(before);
+    expect(await pepClears()).toEqual([]);
+    expect(await outboxKinds()).not.toContain('settlement.instruct');
+
+    await signIn('co-b');
+    expect(isStepUpRequired(await decide(t.id, pepForm(t, at, null)))).toBe(true);
+    expect(await reviewRows(t.id)).toHaveLength(1);
+    expect(await decide(t.id, pepForm(t, at, mfa.code))).toEqual({ ok: true, outcome: 'released' });
+    expect((await reviewRows(t.id)).map((r) => [r.step, r.final, r.actor])).toEqual([[1, false, 'co-a'], [2, true, 'co-b']]);
+    expect(await statusOf(t.id)).toBe('paid');
+    expect(await clearedAt(t.phone)).not.toBeNull();
+    const clears = await pepClears();
+    expect(clears).toHaveLength(1);
+    expect(clears[0].meta).toMatchObject({ via: 'hold_review', transferId: t.id, actorScope: 'partner', pepHit: true });
+  });
+
+  it('co-a may not be step 2 too (sameActor, nothing written, no clear)', async () => {
+    const { t, at } = await pepRow();
+    expect(await decide(t.id, pepForm(t, at, null))).toEqual({ ok: true, outcome: 'awaiting_second' });
+    await refuses(t.id, pepForm(t, at, mfa.code), err('partner.holdDecision.sameActor'));
+    expect(await pepClears()).toEqual([]);
+    expect(await statusOf(t.id)).toBe('in_review');
+  });
+});
+
 describe('decideHoldAction: the plan refusals, before any step-up (P10 7)', { retry: 0 }, () => {
   it('a stale rowFp -> changed', async () => {
     await queue();

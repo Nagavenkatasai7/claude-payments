@@ -220,7 +220,11 @@ export async function planHoldDecision(
   if (route.kind !== 'record' && !step.final) return refuse('changed');
   // The locked path's checks that need no lock, so the action shows the right copy before a step-up:
   // the PEP-clear rule (P9 step 6) and the partner reject sender stance (P9 step 4).
-  const pepRefused = pepClearRefusal({ cls, step }, { ...i, expectFinal: step.final });
+  // F1 (early review EA1/EB1): the PEP-clear rule only on a FINAL step; a non-final step
+  // (four-eyes step 1) never carries the clear, so a planned step 1 never refuses for it.
+  const { pepClear: _dropped, ...withoutClear } = i;
+  void _dropped;
+  const pepRefused = pepClearRefusal({ cls, step }, { ...(step.final ? i : withoutClear), expectFinal: step.final });
   if (pepRefused) return refuse(pepRefused);
   if (
     route.kind === 'reject' &&
