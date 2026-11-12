@@ -189,6 +189,36 @@ describe('corridor-register: corridorRowHash', () => {
   });
 });
 
+describe('corridor-register: golden pc1 digest (early review FD1)', () => {
+  // Literal values on purpose: the input of a hash is not a time window.
+  // tests/partner-corridor-repo.test.ts saves the same row and pins the same digest.
+  const GOLDEN: CorridorRow = {
+    partnerId: 'pa',
+    destinationCountry: 'IN',
+    status: 'active',
+    rulePack: 'IN-MTSS-v1',
+    purposeCodeMap: { family_support: 'P1301', education: 'P1302' },
+    attestationRef: 'att/2026.pdf',
+    attestationSha256: 'a'.repeat(64),
+    recipientNotices: true,
+    travelDobFromUsd: 900.5,
+    travelFullFromUsd: 2500,
+    reattestDue: '2027-06-30',
+    recordedBy: 'golden-admin',
+    recordedAt: '2026-03-01T12:00:00.000Z',
+    attestedBy: null,
+    attestedAt: null,
+    attestedHash: null,
+  };
+  // A change of this value means every stored attestation stops matching:
+  // bump the version prefix (lm1 / pc1) and re-attest.
+  const GOLDEN_PC1 = 'pc1:0454ebdd5fdeb9743e305e81b3a3b7ab6d17681bce5517c7ee915c47e8be2e95';
+
+  it('pins the canonical form of a fixed row', () => {
+    expect(corridorRowHash(GOLDEN)).toBe(GOLDEN_PC1);
+  });
+});
+
 describe('corridor-register: corridorActive', () => {
   it('is true only for an active, attested, current row', () => {
     expect(corridorActive(row(), now)).toBe(true);

@@ -136,6 +136,15 @@ describe('drizzle/0042 migration file', () => {
     }
   });
 
+  it('the header names the ACCESS EXCLUSIVE window of ADD COLUMN, not "reads go on" (early review FA1)', () => {
+    const header = body.split('\n').filter((l) => l.startsWith('--') && !l.startsWith('-->')).join(' ');
+    expect(header).toContain('ACCESS EXCLUSIVE');
+    expect(header).not.toContain('reads go on');
+    for (const s of ['customers', 'tickets', 'transfers', 'COMMIT', 'lock_timeout', 'deadlock']) {
+      expect(header, s).toContain(s);
+    }
+  });
+
   it('the journal carries it at idx 42, after 0041', () => {
     const journal = JSON.parse(readFileSync(join(DRIZZLE, 'meta/_journal.json'), 'utf8')) as {
       entries: Array<{ idx: number; when: number; tag: string }>;

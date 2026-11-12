@@ -233,4 +233,30 @@ describe('partner corridor repo (P24)', () => {
     ).rejects.toThrow('rollback');
     expect(await count(db)).toBe(0);
   });
+
+  it('a saved row read back keeps the golden pc1 digest (early review FD1)', async () => {
+    // The same literal row as tests/corridor-register.test.ts's golden test. Numeric
+    // and date columns come back from Postgres as strings: the mapping must not
+    // change the hash. A change of this value means every stored attestation stops
+    // matching: bump the version prefix (lm1 / pc1) and re-attest.
+    const GOLDEN_PC1 = 'pc1:0454ebdd5fdeb9743e305e81b3a3b7ab6d17681bce5517c7ee915c47e8be2e95';
+    const repo = createPartnerCorridorRepo(db);
+    const golden: CorridorInput = {
+      destinationCountry: 'IN',
+      status: 'active',
+      rulePack: 'IN-MTSS-v1',
+      purposeCodeMap: { family_support: 'P1301', education: 'P1302' },
+      attestationRef: 'att/2026.pdf',
+      attestationSha256: 'a'.repeat(64),
+      recipientNotices: true,
+      travelDobFromUsd: 900.5,
+      travelFullFromUsd: 2500,
+      reattestDue: '2027-06-30',
+    };
+    const { row } = await repo.upsertRecorded(PA, 'IN', golden, 'golden-admin');
+    expect(corridorRowHash(row)).toBe(GOLDEN_PC1);
+    const readBack = await repo.get(PA, 'IN');
+    expect(corridorRowHash(readBack!)).toBe(GOLDEN_PC1);
+    expect((await repo.listForPartner(PA)).map(corridorRowHash)).toEqual([GOLDEN_PC1]);
+  });
 });

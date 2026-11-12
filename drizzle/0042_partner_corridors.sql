@@ -18,12 +18,21 @@
 -- SAFE FOR THE SERVING PACK 7 BUILD: that build never names partner_corridors;
 -- drizzle selects explicit column lists, so it never selects the new nullable
 -- columns, and its inserts and whole-row upserts never name them (they stay
--- NULL). No existing row is rewritten. Each plain CREATE INDEX takes a
--- SHARE lock on tickets or transfers for the build of the index (writes wait,
--- reads go on), held until COMMIT of drizzle-kit migrate's ONE transaction;
--- lock_timeout 5s bounds only the wait to acquire it (the migration fails fast
--- instead of queueing behind a long query). A concurrent index build cannot
--- run inside that transaction, so none is used.
+-- NULL). No existing row is rewritten.
+-- LOCKS: every statement runs in drizzle-kit migrate's ONE transaction, so each
+-- lock is held until its COMMIT. Each ALTER TABLE ... ADD COLUMN takes an
+-- ACCESS EXCLUSIVE lock on customers, tickets and transfers: from that table's
+-- first ALTER to the end of the migration (the index builds included) both
+-- reads and writes of that table wait. The plain CREATE INDEX statements also
+-- take a SHARE lock, which adds nothing to the ACCESS EXCLUSIVE lock already
+-- held on tickets and transfers. On today's small tables this window is a short
+-- moment. lock_timeout 5s bounds every lock wait (the migration fails fast
+-- instead of queueing behind a long query); a lock timeout or a deadlock
+-- (an app transaction holding one of these tables while it waits on another)
+-- fails the build, which is safe: the previous build keeps serving and the
+-- deploy is run again. transfers, the busiest table, comes last so that its
+-- window is the shortest. A concurrent index build cannot run inside that
+-- transaction, so none is used.
 --
 -- Rollback (comments only; the columns may stay, an older build never names them):
 --   DROP INDEX IF EXISTS transfers_partner_rcpt_digits;

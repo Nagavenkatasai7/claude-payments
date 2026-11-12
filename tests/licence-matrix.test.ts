@@ -210,6 +210,29 @@ describe('licence-matrix: licenceMatrixHash and matrixAttested', () => {
   });
 });
 
+describe('licence-matrix: golden lm1 digest (early review FD1)', () => {
+  // Literal values on purpose: the input of a hash is not a time window.
+  const GOLDEN: LicenceMatrix = {
+    version: 1,
+    states: [
+      { code: 'NY', licenceRef: 'NY-MT-1', effectiveFrom: '2026-01-15', expiresAt: '2027-01-14' },
+      { code: 'NJ', licenceRef: 'NJ-MT-2', effectiveFrom: '2026-02-01', expiresAt: '2027-01-31' },
+    ],
+    origins: [{ country: 'US', effectiveFrom: '2026-01-15', expiresAt: '2027-12-31' }],
+    evidenceRef: 'ev/2026-01.pdf',
+    recordedBy: 'golden-admin',
+    recordedAt: '2026-03-01T12:00:00.000Z',
+  };
+  // A change of this value means every stored attestation stops matching:
+  // bump the version prefix (lm1 / pc1) and re-attest.
+  const GOLDEN_LM1 = 'lm1:a4b6e93b224b3be0011a180dd7ab7bf92ced0953c3108f06690927391b31c366';
+
+  it('pins the canonical form of a fixed matrix', () => {
+    expect(licenceMatrixHash(GOLDEN)).toBe(GOLDEN_LM1);
+    expect(licenceMatrixHash({ ...GOLDEN, attestation: { by: 'p-admin', at: '2026-03-02T09:00:00.000Z', hash: GOLDEN_LM1 } })).toBe(GOLDEN_LM1);
+  });
+});
+
 describe('licence-matrix: licenceMatrixReady', () => {
   const now = new Date();
   it('needs the attestation, an active origin and, for a US origin, an active state', () => {
