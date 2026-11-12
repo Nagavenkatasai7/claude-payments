@@ -5,7 +5,8 @@ import { approveDisclosureForTest, certifyPartnerForTest } from './helpers-live'
 import { testEvidence } from './helpers-pay-evidence';
 import { createTransferRepo } from '@/db/repos/transfer-repo';
 import { createPartnerRepo } from '@/db/repos/partner-repo';
-import { createCustomerRepo } from '@/db/repos/customer-repo';
+import { createCustomerRepo, recordEsignConsent, withdrawEsignConsent } from '@/db/repos/customer-repo';
+import { readEsignConsentNeeded } from '@/lib/esign';
 import { auditSubjectId } from '@/lib/customer-ref';
 import { ESIGN_CONSENT_VERSION } from '@/lib/legal/esign-consent';
 import { commitPaymentEvidence } from '@/lib/payment-evidence';
@@ -424,6 +425,20 @@ describe('the E-SIGN consent write (pack 6 P6)', () => {
     expect(acme?.esign_withdrawn_at).toBeNull();
     const beta = await customerRow('beta');
     expect(beta).toMatchObject({ esign_consent_version: null, esign_consented_at: null, esign_withdrawn_at: null });
+  });
+
+  // Final check X1: a portal withdrawal stamped after the evidence time `now` (it committed while
+  // the evidence transaction waited) survives the consent write; the payment's evidence still commits.
+  it('a withdrawal newer than the evidence time is kept: written, the consent row is audited, and the next payment asks again', async () => {
+    const now = Date.now();
+    expect(await recordEsignConsent(db, 'acme', SENDER, V, new Date(now - 60_000))).toBe(true);
+    expect(await withdrawEsignConsent(db, 'acme', SENDER, new Date(now + 300))).toBe(V);
+    expect(await commitPaymentEvidence(db, fixture(), testEvidence({ routeId: 'tr_ev1', esignVersion: V }), disclosure, now)).toEqual({ kind: 'written' });
+    const row = await customerRow('acme');
+    expect(ms(row?.esign_consented_at)).toBe(now);
+    expect(ms(row?.esign_withdrawn_at)).toBe(now + 300);
+    expect(await readEsignConsentNeeded(db, 'acme', SENDER)).toBe(true);
+    expect((await allRows()).filter((r) => r.action === 'customer.consent.esign')).toHaveLength(1);
   });
 
   it("a link evidence (auth.surface 'link') writes surface 'link'", async () => {

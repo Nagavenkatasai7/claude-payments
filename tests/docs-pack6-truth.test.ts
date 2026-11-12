@@ -204,7 +204,38 @@ describe('pack 6 documents say what the code does', () => {
   it('review round 1 RG3/RD2: go-live.mdx says the default does not apply to India (IN) and also covers a corridor added later', () => {
     const p = paragraph(section(GO_LIVE, '### Live money on your own rail'), 'When SmartRemit turns on live money');
     expect(p).toMatch(/except India \(IN\)/);
-    expect(p).toContain('A corridor you add later gets the same default');
+    // Final check U7: a partner cannot add a corridor; only SmartRemit's partner save writes the countries.
+    expect(p).toContain('A corridor SmartRemit adds to your account later gets the same default when it is added.');
+    expect(p).not.toContain('A corridor you add later');
+  });
+
+  it('final check T1: the PR6 paragraph says what this build does serving without 0040 (503 at the E-SIGN gate, before the code); the code agrees', () => {
+    const p = paragraph(ROLLBACK, PR6);
+    expect(p).toContain('serving without 0040');
+    expect(p).toContain('`MIGRATE_ON_BUILD_SKIP=1`');
+    expect(p).toContain('503');
+    expect(p).toContain('ACH debit');
+    expect(p).toContain('Prod migrations behind');
+    // The gate turns a failed consent read into 503, ACH debit is exempt on the transfer route only,
+    // and the gate runs before the code is checked on both routes.
+    expect(read('src/lib/pay-esign-gate.ts')).toContain("return { kind: 'unavailable' };");
+    for (const [file, gate] of [
+      ['src/app/api/pay/[transferId]/route.ts', "exempt: payMethod === 'ach_pull'"],
+      ['src/app/api/pay/l/[token]/route.ts', 'exempt: false'],
+    ] as const) {
+      const src = read(file);
+      const at = src.indexOf(gate);
+      expect(at, file).toBeGreaterThan(0);
+      expect(src.indexOf("if (esign.kind === 'unavailable') return payTemporarilyUnavailable();", at), file).toBeGreaterThan(at);
+      expect(src.indexOf('.verify(', at), file).toBeGreaterThan(at);
+    }
+  });
+
+  it('final check U6: the roll-forward step covers a country a certified partner gained while the older build served', () => {
+    const p = paragraph(ROLLBACK, PR6);
+    expect(p).toContain('gained a country while the older build served');
+    // The added-corridor default runs only inside the platform partner save (never after the fact).
+    expect(read('src/app/admin-dashboard/partners/actions.ts')).toContain("'corridor_added_default'");
   });
 
   it('the hold-reason registry table is unchanged: exactly one AML_HOLD_REASON row (no new reason: owner Q15, Q21)', () => {
@@ -214,9 +245,14 @@ describe('pack 6 documents say what the code does', () => {
 
   it('go-live.mdx names AML holds before payout, the three rules in plain words and the Settings page with two-step verification; the pack 3 sentences stay', () => {
     const s = section(GO_LIVE, '### Live money on your own rail');
-    for (const x of ['AML holds before payout', 'structuring', 'a first transfer', 'a first transfer to a new recipient', 'Settings page', 'two-step verification', 'waits for review before payout']) {
+    for (const x of ['AML holds before payout', 'structuring', 'a large first transfer', 'a large transfer to a new recipient', 'Settings page', 'two-step verification', 'waits for review before payout']) {
       expect(s, x).toContain(x);
     }
+    // Truth check TC-T3: the two amount rules hold a LARGE send only (aml-rules.ts firstUsd), and the
+    // new-recipient rule is a later send, not a first one.
+    expect(s).not.toContain('a first transfer to a new recipient');
+    expect(read('src/content/docs/changelog.mdx')).toContain('for structuring, a large first transfer, or a large transfer to a new recipient.');
+    expect(read('src/content/docs/changelog.mdx')).not.toContain('a first transfer to a new recipient');
     expect(s).not.toMatch(/\bcertified\b/i);
     // pack 3 pins (tests/docs-pack3-truth.test.ts), re-asserted.
     expect(s).toContain('Going live with your own settlement rail needs a second SmartRemit approval after go-live.');
@@ -260,5 +296,38 @@ describe('pack 6 documents say what the code does', () => {
     const files = readdirSync(dir).filter((f) => f.endsWith('.mdx'));
     expect(files.length).toBeGreaterThan(0);
     for (const f of files) expect(readFileSync(join(dir, f), 'utf8'), f).not.toMatch(/\bcertified\b/i);
+  });
+
+  it('truth check TC-T1: the docs say staff record a withdrawal of the electronic records consent, and the code agrees', () => {
+    const STAFF =
+      "When a customer asks you to withdraw the consent to electronic records, record it on the customer's page (Customers, then the customer, then Electronic records, then Record withdrawal). After that, the next card or bank-transfer payment on the pay page asks the customer again. ACH debit and bill payments are not asked.";
+    const funding = section(read('src/content/docs/funding.mdx'), "## Who collects the sender's money");
+    expect(funding).toContain(STAFF);
+    expect(funding).not.toMatch(/\btest(ing)?\b/i);
+    const nov = section(CHANGELOG, '## 2026-11');
+    expect(nov).toContain('or by your staff on the customer\'s page (Electronic records, then Record withdrawal)');
+    // ROLLBACK.md, PR6 paragraph: an older build has no such action; the recorded withdrawal stays.
+    expect(paragraph(ROLLBACK, PR6)).toContain(
+      'A build older than this pack has no action to record a withdrawal for the customer; a withdrawal already recorded stays on the customer record and is honoured again after the roll-forward.',
+    );
+    // The consent file's header names the staff route (comment only).
+    expect(read('src/lib/legal/esign-consent.ts')).toContain('recordStaffEsignWithdrawal');
+    // The code agrees: the partner page block and form, the strings the docs name.
+    const en = read('src/lib/i18n/catalogues/en.ts');
+    expect(en).toContain("'partner.customers.esign.title': 'Electronic records'");
+    expect(en).toContain("'partner.customers.esign.submit': 'Record withdrawal'");
+    // Truth check 2 P6T2-1: no staff text and no public page says "the next pay-page payment asks
+    // again" without its condition: an ACH debit payment skips the consent gate (pay-esign-gate.ts).
+    const SUB =
+      'After a withdrawal, the next card or bank-transfer payment on the pay page asks the customer again. ACH debit and bill payments are not asked.';
+    const card = read('src/app/admin-dashboard/customers/[ref]/esign-card.tsx');
+    expect(en).toContain(`'partner.customers.esign.sub': '${SUB}'`);
+    expect(card).toContain(`<CardDescription>${SUB}</CardDescription>`);
+    for (const text of [funding, en, card]) expect(text).not.toContain('The next pay-page payment asks the customer again.');
+    expect(read('src/lib/pay-esign-gate.ts')).toContain("if (i.exempt) return { kind: 'not_needed' };");
+    expect(read('src/app/api/pay/[transferId]/route.ts')).toContain("exempt: payMethod === 'ach_pull'");
+    expect(read('src/app/partner/(app)/customers/[ref]/page.tsx')).toContain('<EsignConsentBlock ');
+    expect(read('src/app/admin-dashboard/customers/[ref]/page.tsx')).toContain('<EsignConsentCard ');
+    expect(read('src/app/partner/(app)/customers/[ref]/esign-actions.ts')).toContain('recordStaffEsignWithdrawal(');
   });
 });

@@ -10,7 +10,11 @@
 //
 // Pure and client-safe: no imports. The withdrawal route must be true on EVERY
 // tenant: the default tenant and partners without a portal have no Profile, so
-// the text never says "Profile" alone.
+// the text never says "Profile" alone. The provider route ("contact the provider
+// named on your receipt") is recorded by staff on the customer's page (partner
+// workspace and admin dashboard, "Electronic records", "Record withdrawal";
+// src/lib/esign-staff-withdraw.ts recordStaffEsignWithdrawal), so the next
+// pay-page payment asks again on that route too.
 
 export const ESIGN_CONSENT_VERSION = 'esign-2026-11.1-draft' as const;
 
