@@ -39,7 +39,11 @@ import { pokeWorker } from '@/lib/outbox';
 import { capabilityOpen, liveMoneyRefusal, realMoneyRail } from './live-gate';
 import { sanctionsBlockUnrecordedKey } from './sanctions/notices';
 import { getDb, type Db } from '@/db/client';
-import { openRecallTicketLocked } from './receipt-cores';
+import { openErrorNoticeCaseLocked, openRecallTicketLocked } from './receipt-cores';
+import { isReportCode, routeReport, type ReportCode } from './error-notice';
+import { errorNoticeFacts } from './error-notice-facts';
+import { regDueAt } from './reg-clocks';
+import { caseNoticeLine, caseOpenedReply, caseSubject } from './legal/error-notice-drafts';
 import { refundDisposition } from './refund-policy';
 import { cancelWithinWindow, type SenderCancelResult } from './sender-cancel';
 import { CANCEL_REPLY_HINT } from './legal/cancel-drafts';
@@ -897,7 +901,7 @@ export const toolSchemas: ChatTool[] = [
     function: {
       name: 'request_refund',
       description:
-        "Request a refund when the customer asks for their money back. transfer_id is OPTIONAL — omit it and we resolve the customer's most recent refund-relevant transfer automatically. For a transfer the customer has PAID for but that has NOT been delivered yet, this flags it for our team to review (it never moves money itself, and approval is not guaranteed). EXCEPTION — within 30 minutes of payment the transfer can be CANCELLED for a full refund: the tool first returns error_code 'confirm_cancel' with the transfer_id; confirm with the customer that they want to cancel THAT transfer, then call again with that transfer_id and confirm: true (this can cancel the transfer for good). If the money was ALREADY DELIVERED but within the last 24 hours, this returns error_code 'use_recall' — call open_recall_dispute instead to open a recall case.",
+        "Request a refund when the customer asks for their money back. transfer_id is OPTIONAL — omit it and we resolve the customer's most recent refund-relevant transfer automatically. For a transfer the customer has PAID for but that has NOT been delivered yet, this flags it for our team to review (it never moves money itself, and approval is not guaranteed). EXCEPTION — within 30 minutes of payment the transfer can be CANCELLED for a full refund: the tool first returns error_code 'confirm_cancel' with the transfer_id; confirm with the customer that they want to cancel THAT transfer, then call again with that transfer_id and confirm: true (this can cancel the transfer for good). If the money was ALREADY DELIVERED, this returns error_code 'use_recall' — call open_recall_dispute with the reason.",
       parameters: {
         type: 'object',
         properties: {
@@ -920,14 +924,14 @@ export const toolSchemas: ChatTool[] = [
     function: {
       name: 'open_recall_dispute',
       description:
-        "Open a recall/dispute case for money that was ALREADY DELIVERED within the last 24 hours (wrong recipient, wrong amount, money not received, or an unauthorized transfer). transfer_id is OPTIONAL — omit it to use the customer's most recent delivered-within-the-window transfer. This opens a support case our team works; recovery is NOT guaranteed once funds are delivered. Do NOT use this for transfers that have not been delivered yet — use request_refund for those.",
+        "Report a problem with a transfer (any time): wrong recipient, wrong amount, money not received, a transfer the customer did not make, or anything else. Pass transfer_id; ask the customer which transfer if they have several (with no transfer_id and several recent transfers it answers which_transfer). It opens a case with a reference and a date; relay its reply_to_customer verbatim. Within 30 minutes of payment it also returns cancel_possible: offer the cancel, and call request_refund with confirm: true only after a clear yes.",
       parameters: {
         type: 'object',
         properties: {
           transfer_id: {
             type: 'string',
             description:
-              "Optional. The specific delivered transfer to dispute. Omit to use the customer's most recent delivered-within-the-window transfer.",
+              "The transfer the problem is about. Omit only when the customer has one recent transfer.",
           },
           reason: {
             type: 'string',
@@ -1293,9 +1297,9 @@ export interface ToolContext {
   // updateRefund). Absent ⇒ a repo over the shared Pool (getDb()) is created
   // lazily on the request_refund success path; tests inject one bound to PGlite.
   transferRepo?: Pick<ReturnType<typeof createTransferRepo>, 'updateRefund'>;
-  // Recall-dispute seam: the support-ticket repo (createTicket + listByCustomer)
-  // open_recall_dispute writes to. Absent ⇒ a repo over the shared Pool (getDb())
-  // is created lazily; tests inject one bound to PGlite.
+  // Support-ticket seam: the ticket repo dispute_bill writes to (open_recall_dispute
+  // uses recallDb). Absent ⇒ a repo over the shared Pool (getDb()) is created
+  // lazily; tests inject one bound to PGlite.
   ticketRepo?: Pick<ReturnType<typeof createTicketRepo>, 'createTicket' | 'listByCustomer' | 'findOpenHumanHelpCase'>;
   // Triage-enqueue seam: the outbox repo the recall-dispute path enqueues the
   // out-of-band 'ticket.triage' effect on. Absent ⇒ a repo over the shared Pool
@@ -1306,9 +1310,8 @@ export interface ToolContext {
   // (sender-cancel.ts cancelWithinWindow, via 'bot'). Absent ⇒ it runs over the
   // shared Pool (getDb()); tests inject one bound to PGlite.
   senderCancel?: (partnerId: PartnerId, transferId: string) => Promise<SenderCancelResult>;
-  // M2-14 (PR 397 L2) seam: the database open_recall_dispute's locked one-recall-per-transfer
-  // transaction runs on (receipt-cores openRecallTicketLocked). Absent ⇒ getDb() — unless a
-  // ticketRepo is injected without it (a repo-only unit seam), which keeps the plain repo path.
+  // M2-14 (PR 397 L2) seam: the database open_recall_dispute's locked case transaction runs on
+  // (receipt-cores openErrorNoticeCaseLocked / openRecallTicketLocked). Absent ⇒ getDb().
   recallDb?: Db;
   // R43 seam: the database request_human_help's one-transaction case write runs on
   // (help-case.ts openHelpCaseAndPoke). Absent ⇒ getDb(); tests bind PGlite.
@@ -2730,10 +2733,13 @@ async function requestRefundTool(
           'the money was already delivered but is within the 24h recall window — call open_recall_dispute with the reason',
       };
     case 'recall_window_passed':
+      // Fix pack 8 (P11): a delivered transfer is never answered "recovery is no longer possible";
+      // a reported problem opens a case with a date through open_recall_dispute.
       return {
-        error_code: 'recall_window_passed',
+        error_code: 'use_recall',
+        transfer_id: transfer.id,
         reply_hint:
-          'delivered over 24h ago — recovery is no longer possible; apologize kindly',
+          'delivered earlier — if the customer reports a problem with it, call open_recall_dispute with the reason; it opens a case with a date',
       };
     case 'awaiting_payment':
       return {
@@ -2881,44 +2887,112 @@ const RECALL_REASON_LABEL: Record<string, string> = {
 };
 
 /**
- * open_recall_dispute — opens a recall/dispute support case for money that was
- * ALREADY DELIVERED within the 24h recall window (refund-policy.ts). It NEVER
- * moves money: it creates a customer support ticket (kind 'customer', category
- * 'refund') linked to the transfer for a human to work; recovery is not
- * guaranteed once funds are delivered.
+ * open_recall_dispute — the customer reports a problem with a transfer. It NEVER
+ * moves money: it opens (or reuses) a customer support ticket (kind 'customer',
+ * category 'refund') linked to the transfer for a human to work.
  *
- * transfer_id is OPTIONAL: when absent we resolve the customer's most recent
- * delivered-within-the-window transfer. The disposition guard ensures we ONLY
- * open a case when the transfer is recall_eligible; everything else returns the
- * matching error_code (use_request_refund when it's still pre-delivery).
+ * Fix pack 8 (R44, P11): the target is the given transfer (strict ownership), or
+ * without an id the only transfer of the lookback (`which_transfer` when there are
+ * several). A consumer transfer always opens its regulatory case (routeReport, P5)
+ * with a reference, a due date and the fixed reply of P10, whatever its state and
+ * on every channel (DP9); inside the cancel window the answer also offers the
+ * cancel (DP13). A b2b or sandbox transfer keeps today's 24-hour recall case.
  *
- * Customer-safe surface: error / error_code+(message|reply_hint) /
- * opened+case_id+reply_hint.
+ * Customer-safe surface: error / error_code+(message|reply_hint|transfer_ids) /
+ * opened+case_id(+due_date+reply_to_customer)(+refund_possible)(+cancel_possible+reply_hint).
  */
 async function openRecallDisputeTool(
   args: Record<string, unknown>,
   ctx: ToolContext,
 ): Promise<ToolResult> {
-  const reason = asEnum(
+  const parsed = asEnum(
     ['wrong_recipient', 'wrong_amount', 'not_received', 'unauthorized', 'other'] as const,
     args.reason,
   ) ?? 'other'; // fail-safe to 'other' rather than refusing — the team still triages
+  // The writer does no runtime check of the code (early review FB2): map it to a closed ReportCode.
+  const reason: ReportCode = isReportCode(parsed) ? parsed : 'other';
 
   const now = Date.now();
-  const { transfer, notFound } = await resolveRefundTarget(args, ctx, 'recall_eligible', now);
-  if (notFound) return { error: 'Transfer not found.' };
-  if (!transfer) {
+  let target: import('./types').Transfer | null;
+  if (normalizeTransferId(args.transfer_id) !== '') {
+    // STRICT ownership, 404-never-403 (resolveRefundTarget, unchanged).
+    const owned = await resolveRefundTarget(args, ctx, 'recall_eligible', now);
+    if (owned.notFound) return { error: 'Transfer not found.' };
+    target = owned.transfer;
+  } else {
+    // Critic P7: without an id, only an unambiguous target is used; several recent transfers
+    // -> ask which one, and open nothing.
+    const recent = await ctx.store.listTransfersByPhone(ctx.partnerId, ctx.phone, REFUND_LOOKBACK);
+    if (recent.length >= 2) {
+      return {
+        error_code: 'which_transfer',
+        transfer_ids: recent.slice(0, 5).map((t) => t.id),
+        reply_hint: 'ask which transfer they mean',
+      };
+    }
+    target = recent[0] ?? null;
+  }
+  if (!target) {
     return {
       error_code: 'no_transfer_found',
       message:
         "We couldn't find a recent delivered transfer to dispute. If you have a transfer id, please share it.",
     };
   }
+  const transfer = target;
 
+  const db = ctx.recallDb ?? getDb();
+  const amount = formatRecallAmount(transfer);
+  const who = (transfer.recipientName ?? '').trim() || 'the recipient';
+  const reasonLabel = RECALL_REASON_LABEL[reason] ?? RECALL_REASON_LABEL.other;
+  const bodyLine = `Customer requests a recall of ${amount} sent to ${who} (transfer ${transfer.id}). Reason: ${reasonLabel}.`;
+
+  // Fix pack 8 (R44, P5/P11): every report on a consumer transfer opens (or reuses) its regulatory
+  // case. The facts are read on the pooled handle BEFORE the case transaction (a failed read inside
+  // it would abort the transaction; early review FB).
+  const facts = await errorNoticeFacts(db, transfer, now);
+  const route = routeReport({ transfer, ...facts, code: reason, now });
+  if (route.kind === 'case') {
+    // DP9: no step-up, no support_off and no open-ticket cap ever refuse a classed case.
+    const regClass = route.regClass;
+    const r = await db.transaction((tx) =>
+      openErrorNoticeCaseLocked(tx, {
+        partnerId: transfer.partnerId,
+        phone: ctx.phone,
+        transferId: transfer.id,
+        regClass,
+        code: reason,
+        subject: caseSubject(reason),
+        body: `${bodyLine}\n${caseNoticeLine({ code: reason, dueAt: new Date(regDueAt(regClass, now)).toISOString() })}`,
+        capScope: 'tenant',
+        now,
+      }),
+    );
+    if (r.kind === 'cap') throw new Error('open_recall_dispute: a classed case cannot meet the cap'); // P8 step 4
+    pokeWorker();
+    // A classed case always has a due date; the computed one is only a guard (early review FB).
+    const dueAt = r.dueAt ?? new Date(regDueAt(regClass, now)).toISOString();
+    return {
+      opened: true,
+      case_id: r.ticketId,
+      due_date: dueAt.slice(0, 10),
+      reply_to_customer: caseOpenedReply({
+        caseId: r.ticketId,
+        dueAt,
+        providerLine: ctx.providerLine ?? null,
+        reused: r.reused,
+        surface: 'chat',
+      }),
+      ...(route.refundPossible ? { refund_possible: true } : {}),
+      // DP13: inside the cancel window the case opens AND the cancel is offered; the bot cancels
+      // through request_refund only after a clear yes.
+      ...(route.cancellable ? { cancel_possible: true, reply_hint: CANCEL_REPLY_HINT.confirm } : {}),
+    };
+  }
+
+  // not_consumer (b2b or sandbox, DP10): today's 24-hour recall case, no class, the cap applies.
   const disp = refundDisposition(transfer, now);
   if (disp.kind !== 'recall_eligible') {
-    // Not in the recall window — route the customer to the right path or
-    // explain the state, never opening a case we can't justify.
     switch (disp.kind) {
       case 'refundable':
       case 'cancellable':
@@ -2928,12 +3002,6 @@ async function openRecallDisputeTool(
           reply_hint:
             'this transfer has not been delivered yet — call request_refund to flag it for our team instead',
         };
-      case 'recall_window_passed':
-        return {
-          error_code: 'recall_window_passed',
-          reply_hint:
-            'delivered over 24h ago — recovery is no longer possible; apologize kindly',
-        };
       case 'awaiting_payment':
         return {
           error_code: 'not_paid_yet',
@@ -2941,13 +3009,10 @@ async function openRecallDisputeTool(
             "no money has been taken for this transfer yet — there's nothing to recall; they can just not pay or cancel",
         };
       default:
-        // already_requested / in_progress / completed / under_review / blocked /
-        // cancelled — a recall case adds nothing; explain via request_refund's
-        // wording path instead of opening a duplicate.
         return {
           error_code: 'not_recall_eligible',
           reply_hint:
-            "this transfer is not within the recall window — explain its current state; if they want more help, offer to open a case with a person (request_human_help)",
+            "this transfer can't be pulled back from here — if they want more help, offer to open a case with a person (request_human_help)",
         };
     }
   }
@@ -2955,9 +3020,8 @@ async function openRecallDisputeTool(
   const stepUpRefusal = await webStepUpRefusal(ctx, transfer.id);
   if (stepUpRefusal) return stepUpRefusal;
 
-  // M2-14 (PR 403 L3): on the web (account and portal chat) the partner's support switch applies,
-  // exactly as the receipt and portal recall actions apply it (receipt-cores portalDisabled). The
-  // WhatsApp bot is unchanged.
+  // M2-14 (PR 403 L3): on the web (account and portal chat) the partner's support switch applies to
+  // an unclassed recall, exactly as the receipt and portal recall actions apply it.
   if (ctx.channel === 'web') {
     const partner = (await ctx.partnerStore.getPartner(ctx.partnerId)) ?? (await ctx.partnerStore.ensureDefaultPartner());
     if (partner.supportConfig?.enableSupportPortal === false) {
@@ -2968,73 +3032,29 @@ async function openRecallDisputeTool(
     }
   }
 
-  const amount = formatRecallAmount(transfer);
-  const who = (transfer.recipientName ?? '').trim() || 'the recipient';
-  const reasonLabel = RECALL_REASON_LABEL[reason];
-  const subject = `Recall request: ${reason}`;
-  const body = `Customer requests a recall of ${amount} sent to ${who} (transfer ${transfer.id}). Reason: ${reasonLabel}.`;
-  let ticket: { id: string };
-  if (ctx.recallDb || !ctx.ticketRepo) {
-    // M2-14 (PR 397 L2): the SAME locked path as the receipt/portal recall: one open recall per
-    // transfer (a second call reuses the open case), the tenant-scoped cap, and the triage row
-    // committed with the ticket.
-    const r = await openRecallTicketLocked(ctx.recallDb ?? getDb(), {
-      partnerId: transfer.partnerId,
-      phone: ctx.phone,
-      transferId: transfer.id,
-      subject,
-      body,
-      capScope: 'tenant',
-    });
-    if (r.kind === 'cap') {
-      return {
-        error_code: 'too_many_open_cases',
-        reply_hint:
-          'the customer already has several open cases — ask them to follow up on an existing one rather than opening another',
-      };
-    }
-    ticket = { id: r.ticketId };
-  } else {
-    // recall_eligible — open the case. Respect the per-customer open-case cap.
-    const repo = ctx.ticketRepo ?? createTicketRepo(getDb());
-    // Count only THIS tenant's cases (fix 1 review): another partner's open tickets
-    // for the same phone must neither block this customer nor leak through the cap.
-    const mine = (await repo.listByCustomer(ctx.phone)).filter((t) => t.partnerId === ctx.partnerId);
-    if (mine.filter((t) => OPEN_STATUSES.has(t.status)).length >= MAX_OPEN_TICKETS) {
-      return {
-        error_code: 'too_many_open_cases',
-        reply_hint:
-          'the customer already has several open cases — ask them to follow up on an existing one rather than opening another',
-      };
-    }
-
-    const created = await repo.createTicket({
-      id: `tk_${newTransferId()}`,
-      partnerId: transfer.partnerId,
-      kind: 'customer',
-      customerPhone: ctx.phone,
-      transferId: transfer.id,
-      subject,
-      body,
-      category: 'refund',
-    });
-
-    // Out-of-band AI triage: a durable 'ticket.triage' outbox row the worker
-    // drains (NEVER an inline model call — this tool runs in the agent turn and
-    // must stay fast). Deduped on the ticket id; setTriage is idempotent, so
-    // re-confirming over the pre-filled 'refund' category is safe.
-    await (ctx.outboxRepo ?? createOutboxRepo(getDb())).enqueue(
-      'ticket.triage',
-      { ticketId: created.id },
-      { dedupeKey: `triage:${created.id}` },
-    );
-    ticket = created;
+  // M2-14 (PR 397 L2): the SAME locked path as the receipt/portal recall: one open recall per
+  // transfer (a second call reuses the open case), the tenant-scoped cap, and the triage row
+  // committed with the ticket.
+  const r = await openRecallTicketLocked(db, {
+    partnerId: transfer.partnerId,
+    phone: ctx.phone,
+    transferId: transfer.id,
+    subject: caseSubject(reason),
+    body: bodyLine,
+    capScope: 'tenant',
+  });
+  if (r.kind === 'cap') {
+    return {
+      error_code: 'too_many_open_cases',
+      reply_hint:
+        'the customer already has several open cases — ask them to follow up on an existing one rather than opening another',
+    };
   }
   pokeWorker();
 
   return {
     opened: true,
-    case_id: ticket.id,
+    case_id: r.ticketId,
     reply_hint:
       'a recall case is open and our team will look into it — recovery is not guaranteed once funds are delivered; we will follow up',
   };
@@ -3079,7 +3099,20 @@ async function requestHumanHelpTool(args: Record<string, unknown>, ctx: ToolCont
     source: 'tool',
     summary: typeof args.summary === 'string' ? args.summary : undefined,
   });
-  return { case_id: opened.caseId, reply_hint: helpReplyHint(ctx, opened.caseId) };
+  const result: ToolResult = { case_id: opened.caseId, reply_hint: helpReplyHint(ctx, opened.caseId) };
+  // Fix pack 8 (P11): only a case THIS call created with a class, or stamped with its first class,
+  // adds the case text; a classless or an already classed case keeps today's reply.
+  if (opened.caseCreatedOrStamped && opened.dueAt) {
+    result.due_date = opened.dueAt.slice(0, 10);
+    result.reply_to_customer = caseOpenedReply({
+      caseId: opened.caseId,
+      dueAt: opened.dueAt,
+      providerLine: ctx.providerLine ?? null,
+      reused: !opened.created,
+      surface: 'chat',
+    });
+  }
+  return result;
 }
 
 // Source-currency amount for the recall case body (mirrors recent-transfers'
@@ -3299,7 +3332,7 @@ async function cancelBillTool(
                 'This bill already settled — I opened a recall case for our team to look into. Recovery is not guaranteed once funds are delivered.',
             };
           }
-          if (recall.error_code === 'recall_window_passed') {
+          if (recall.error_code === 'not_recall_eligible') {
             return {
               cancelled: false,
               reply_hint:

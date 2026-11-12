@@ -449,7 +449,8 @@ describe('enqueue sites — every customer ticket creation queues a triage', () 
         partnerStore: ps,
         transferRepo: createTransferRepo(db),
         ticketRepo: repo,
-        outboxRepo: createOutboxRepo(db), // PGlite-bound seam — assert the enqueue here
+        outboxRepo: createOutboxRepo(db),
+        recallDb: db, // pack 8 T13: the case writer's transaction runs here (the repo-only path is gone)
       };
 
       const r = await executeTool('open_recall_dispute', { transfer_id: 'T_tool', reason: 'wrong_recipient' }, ctx as never);
