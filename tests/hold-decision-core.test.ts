@@ -186,6 +186,24 @@ describe('planHoldDecision (P13, the unlocked pre-route)', { retry: 0 }, () => {
 
     for (const id of [s.id, l.id, d.id, m.id, k.id]) expect(await count('hold_reviews', id)).toBe(0);
   });
+
+  it('2b (F3, early review EA2/EC2): a sandbox (test) row refuses a PARTNER scope with not_yours; the PLATFORM scope plans as before', async () => {
+    await certifiedQueuePartner(db);
+    const k = await heldRowFor(db, 'acme', 'kyc', { id: 'plan_test_kyc' });
+    const m = await setReasons((await heldRowFor(db, 'acme', 'kyc', { id: 'plan_test_mix' })).id, [LARGE_AMOUNT_REASON, POSSIBLE_MATCH_REASON]);
+    // Pinned on the live rows first: the partner plans a release, the platform plans a record.
+    expect(await planHoldDecision(db, store, partnerInput(k, 'co-a'))).toMatchObject({ route: { kind: 'release' } });
+    const plat = input(m, 'sanctions_review', 'false_positive_match');
+    const livePlat = await planHoldDecision(db, store, plat);
+    expect(livePlat).toMatchObject({ route: { kind: 'record' }, step: { step: 1, final: true } });
+
+    await db.execute(sql`UPDATE transfers SET environment = 'test' WHERE id IN (${k.id}, ${m.id})`);
+    expect(await why(planHoldDecision(db, store, partnerInput(k, 'co-a')))).toBe('not_yours');
+    expect(await why(planHoldDecision(db, store, partnerInput(m, 'co-a')))).toBe('not_yours');
+    expect(await planHoldDecision(db, store, plat)).toEqual(livePlat);
+    for (const id of [k.id, m.id]) expect(await count('hold_reviews', id)).toBe(0);
+    noMoneyPath();
+  });
 });
 
 describe('decideHold (P13, the shared core)', { retry: 0 }, () => {

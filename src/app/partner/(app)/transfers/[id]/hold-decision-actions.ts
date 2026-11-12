@@ -143,6 +143,8 @@ export async function decideHoldAction(
   if (!isTransferId(id)) return notFound;
   const transfer = await createTransferRepo(getDb()).getOwnedTransfer(ctx.partnerId, id);
   if (!transfer || transfer.partnerId !== ctx.partnerId) return notFound;
+  // F3 (early review EA2/EC2): the queue is for LIVE rows only; SmartRemit decides sandbox holds.
+  if (transfer.environment === 'test') return fail('partner.holdDecision.notAllowed');
 
   // 6. The inputs.
   const invalid = fail('partner.holdDecision.invalid');

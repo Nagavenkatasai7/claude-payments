@@ -186,7 +186,15 @@ async function loadHoldBlock(
     if (queue && !test) {
       const stored = await createHoldReviewRepo(getDb()).listForTransfer(ctx.partnerId, transfer.id);
       const reviews = stored.map(toReviewRowLite).filter((r): r is ReviewRowLite => r !== null);
+      // F3 (early review EC1): a blocked or list_wait class locks every partner decision (decisionRoute
+      // steps 1 and 4); the partner-decided classes then show the note the queue page shows, not a form.
+      const waitsList = classes.some((c) => c.holdClass === 'list_wait');
+      const partnerLocked = waitsList || classes.some((c) => c.holdClass === 'blocked');
       for (const c of classes) {
+        if (c.decider === 'partner' && partnerLocked) {
+          items.push({ kind: 'note', holdClass: c.holdClass, key: waitsList ? 'partner.holdDecision.waitsList' : 'partner.holdDecision.notYours' });
+          continue;
+        }
         if (c.decider !== 'partner') {
           const key: MessageKey =
             c.holdClass === 'list_wait' ? 'partner.holdDecision.waitsList' : c.holdClass === 'data_missing' && c.decider === 'nobody' ? 'partner.holdDecision.waitsData' : 'partner.holdDecision.notYours';

@@ -581,6 +581,28 @@ describe('the PEP clear in the release seam (T9)', { retry: 0 }, () => {
   });
 });
 
+describe('sandbox rows in the locked route (F3, early review EA2/EC2)', { retry: 0 }, () => {
+  it('a PARTNER review on a test row -> changed not_yours, nothing written; a PLATFORM review on a test row is recorded as before', async () => {
+    await certifiedQueuePartner(db, { fourEyes: true });
+    const k = await heldRowFor(db, 'acme', 'kyc', { id: 'sbx_kyc' });
+    const m = await setReasons((await heldRowFor(db, 'acme', 'kyc', { id: 'sbx_mix' })).id, [LARGE_AMOUNT_REASON, POSSIBLE_MATCH_REASON]);
+    await db.execute(sql`UPDATE transfers SET environment = 'test' WHERE id IN (${k.id}, ${m.id})`);
+
+    const before = await snapshot(k.id);
+    expect(await recordHoldStep(db, { ...partnerReview(k, 'co-a', false), transferId: k.id })).toEqual({ kind: 'changed', why: 'not_yours' });
+    expect(await snapshot(k.id)).toEqual(before);
+    expect(await releaseHold(db, k, await rail(), undefined, undefined, partnerReview(k, 'co-a', true))).toEqual({ kind: 'changed', why: 'not_yours' });
+    await expect(releaseTransfer(store, db, k.id, { actor: 'co-a', reason: REASON }, undefined, partnerReview(k, 'co-a', true))).rejects.toBeInstanceOf(
+      HoldReviewChangedError,
+    );
+    expect(await snapshot(k.id)).toEqual(before);
+
+    const plat = review(m, 'sanctions_review', 'false_positive_match');
+    expect(await recordHoldStep(db, { ...plat, transferId: m.id })).toMatchObject({ kind: 'recorded', final: true });
+    expect(await count('hold_reviews', m.id)).toBe(1);
+  });
+});
+
 describe('releaseHoldAfterRescreen with a review (DP2)', { retry: 0 }, () => {
   it('14a: 40 h old screen, list live, clear: released, the review row written with the release', async () => {
     primeOfacSource({ checkedAgoMs: H });

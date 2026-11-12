@@ -106,7 +106,7 @@ import { auditEvents } from '@/db/schema';
 import { staffMfaKeys } from '@/lib/staff-mfa-store';
 import { sanctionsAuditEvent, type ScreeningEvidence } from '@/lib/sanctions/evidence';
 import { allowedDispositions, classReasonsFp, rowReasonsFp, type HoldDisposition } from '@/lib/hold-queue';
-import { AML_HOLD_REASON, LARGE_AMOUNT_REASON, POSSIBLE_MATCH_REASON } from '@/lib/compliance-config';
+import { AML_HOLD_REASON, LARGE_AMOUNT_REASON, LIST_UNAVAILABLE_REASON, POSSIBLE_MATCH_REASON } from '@/lib/compliance-config';
 import { PURPOSE_RISK_LABELS } from '@/lib/purpose-detail';
 import { t as tr } from '@/lib/i18n';
 
@@ -358,6 +358,37 @@ describe('queue partner, qualified compliance user', () => {
     await asUser('co-a');
     const m = await detail(row.id);
     expect(dialogCount(m)).toBe(0);
+  });
+});
+
+describe('locked rows: a blocked or list_wait class (F3, early review EC1)', () => {
+  /** The note paragraph of one class ('' when absent). */
+  function noteOf(markup: string, cls: string): string {
+    const i = markup.indexOf(`data-testid="partner-hold-decision-note" data-class="${cls}"`);
+    if (i < 0) return '';
+    return markup.slice(i, markup.indexOf('</p>', i));
+  }
+
+  it('(a) a held kyc row with complianceStatus blocked: no dialog; the kyc class reads "SmartRemit decides"', async () => {
+    const pid = await queuePartner();
+    const row = await heldRowFor(db, pid, 'kyc');
+    await db.execute(sql`UPDATE transfers SET compliance_status = 'blocked' WHERE id = ${row.id}`);
+    await asUser('co-a');
+    const m = await detail(row.id);
+    expect(dialogCount(m)).toBe(0);
+    expect(noteOf(m, 'kyc')).toContain(html(tr('partner.holdDecision.notYours')));
+    expect(noteOf(m, 'blocked')).toContain(html(tr('partner.holdDecision.notYours')));
+  });
+
+  it('(b) a held kyc row that also carries LIST_UNAVAILABLE: no dialog; the kyc class reads "waits for the list"', async () => {
+    const pid = await queuePartner();
+    const row = await heldRowFor(db, pid, 'kyc');
+    await setReasons(row.id, [LARGE_AMOUNT_REASON, LIST_UNAVAILABLE_REASON]);
+    await asUser('co-a');
+    const m = await detail(row.id);
+    expect(dialogCount(m)).toBe(0);
+    expect(noteOf(m, 'kyc')).toContain(html(tr('partner.holdDecision.waitsList')));
+    expect(noteOf(m, 'list_wait')).toContain(html(tr('partner.holdDecision.waitsList')));
   });
 });
 

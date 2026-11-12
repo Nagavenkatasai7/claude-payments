@@ -160,6 +160,8 @@ export async function planHoldDecision(
   };
   const t = await store.getTransfer(i.transferId);
   if (!t || t.partnerId !== i.ownerId || t.status !== 'in_review') return refuse('changed');
+  // F3 (defence in depth): a partner never decides a sandbox row (the queue is live only); platform scope unchanged.
+  if (i.actorScope === 'partner' && t.environment === 'test') return refuse('not_yours');
   let rowFp: string;
   try {
     rowFp = rowReasonsFp(t.complianceReasons);

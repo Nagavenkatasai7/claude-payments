@@ -167,6 +167,8 @@ export async function routeLockedReview(
     throw new Error('hold review: actor and reason are required');
   }
   if (t.partnerId !== review.ownerId || t.status !== 'in_review') return { kind: 'already' };
+  // F3 (defence in depth): a partner never decides a sandbox row (the queue is live only); platform scope unchanged.
+  if (review.actorScope === 'partner' && t.environment === 'test') return changed('not_yours');
 
   // 1b. the owner, re-read in this transaction.
   let owner: Partner | null;

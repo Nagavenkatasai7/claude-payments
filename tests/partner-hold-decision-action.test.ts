@@ -527,6 +527,18 @@ describe('decideHoldAction: the plan refusals, before any step-up (P10 7)', { re
   });
 });
 
+describe('decideHoldAction: sandbox rows (F3, early review EA2/EC2)', { retry: 0 }, () => {
+  it('a held kyc test row of a certified queue partner -> notAllowed, no step-up, no hold_reviews row, still in_review', async () => {
+    await queue();
+    const t = await heldRowFor(db, 'acme', 'kyc');
+    await db.execute(sql`UPDATE transfers SET environment = 'test' WHERE id = ${t.id}`);
+    await markFresh();
+    await refuses(t.id, form(t), err('partner.holdDecision.notAllowed'));
+    expect(await n(sql`SELECT count(*)::int AS n FROM hold_reviews`)).toBe(0);
+    expect(await statusOf(t.id)).toBe('in_review');
+  });
+});
+
 describe('decideHoldAction: the step-up and the decision (P10 8-10)', { retry: 0 }, () => {
   it('fourEyes false, a final release: the step-up is asked even on a fresh session; with the code: released in one transaction', async () => {
     await queue();
