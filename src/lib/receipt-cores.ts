@@ -1,5 +1,6 @@
 import { sql } from 'drizzle-orm';
-import { getDb, type Db } from '@/db/client';
+import { getDb, type Db, type DbOrTx } from '@/db/client';
+import { createAuditRepo } from '@/db/repos/aux-repos';
 import { createTransferRepo } from '@/db/repos/transfer-repo';
 import { createTicketRepo } from '@/db/repos/ticket-repo';
 import { newTransferId } from './id';
@@ -9,7 +10,10 @@ import { getStore } from './store';
 import { isRecallEligible } from './refund-policy';
 import { logWarn } from './log';
 import type { StepUpResult } from './customer-mfa';
-import type { Customer, Partner } from './types';
+import { regDueAt, type RegClass } from './reg-clocks';
+import type { ReportCode } from './error-notice';
+import { alsoReportedNote, caseClassNote } from './legal/error-notice-drafts';
+import type { Customer, Partner, PartnerId } from './types';
 
 /**
  * receipt-cores — the refund-request and recall cores shared by the legacy /account receipt and the
@@ -155,35 +159,136 @@ export type RecallTicketResult = { kind: 'opened'; ticketId: string; reused: boo
  * so two tabs, two request keys or a chat racing the portal can't both insert: the second gets the
  * first open ticket back (`reused`). The lock is not a ledger row lock. The subject MUST start with
  * "Recall request:" (findOpenRecallForTransfer matches that prefix). The triage row commits with it.
+ *
+ * Fix pack 8 (P8, T11): a thin wrapper over `openErrorNoticeCaseLocked` with `regClass: null`
+ * (today's lock key, reuse, cap and triage, unchanged); the callers move to the case writer in
+ * T13/T14.
  */
 export async function openRecallTicketLocked(
   db: Db,
   input: { partnerId: string; phone: string; transferId: string; subject: string; body: string; capScope: 'tenant' | 'phone' },
 ): Promise<RecallTicketResult> {
-  return db.transaction(async (tx) => {
-    await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${`recall:${input.partnerId}:${input.transferId}`}))`);
-    const repo = createTicketRepo(tx);
-    const existing = await repo.findOpenRecallForTransfer(input.partnerId, input.phone, input.transferId);
-    if (existing) return { kind: 'opened', ticketId: existing.id, reused: true } as const;
+  const r = await db.transaction((tx) =>
+    openErrorNoticeCaseLocked(tx, { ...input, regClass: null, code: 'other', now: Date.now() }),
+  );
+  return r.kind === 'cap' ? { kind: 'cap' } : { kind: 'opened', ticketId: r.ticketId, reused: r.reused };
+}
 
-    const openCount =
-      input.capScope === 'tenant'
-        ? await repo.countOpenByCustomerInTenant(input.partnerId, input.phone)
-        : (await repo.listByCustomer(input.phone)).filter((t) => OPEN_STATUSES.has(t.status)).length;
-    if (openCount >= MAX_OPEN_TICKETS) return { kind: 'cap' } as const;
+export interface ErrorNoticeCaseInput {
+  partnerId: PartnerId;
+  phone: string;
+  transferId: string;
+  regClass: RegClass | null;
+  code: ReportCode;
+  subject: string;
+  body: string;
+  capScope: 'tenant' | 'phone';
+  now: number;
+}
 
-    const ticket = await repo.createTicket({
-      id: `tk_${newTransferId()}`,
-      partnerId: input.partnerId,
-      kind: 'customer',
-      customerPhone: input.phone,
-      transferId: input.transferId,
-      subject: input.subject,
-      body: input.body,
-      category: 'refund',
+export type ErrorNoticeCaseResult =
+  | { kind: 'opened'; ticketId: string; reused: boolean; regClass: RegClass | null; dueAt: string | null; classStamped: boolean }
+  | { kind: 'cap' };
+
+/**
+ * Fix pack 8 (R44, P8): open or reuse the case of ONE transfer, in the CALLER's transaction.
+ *
+ * `tx` MUST be a transaction: the advisory lock is transaction-scoped (`pg_advisory_xact_lock`) and
+ * is what keeps one open case per transfer (and class); there is no unique index (0042).
+ *
+ * - `regClass` set: a regulatory case (urgent, a first notice and a due date from reg-clocks, never
+ *   refused by the open-ticket cap). One open case per transfer and class: a repeat report reuses it
+ *   (its class and due date never change) and adds ONE internal `Also reported: <code>.` note. An
+ *   open UNCLASSED recall ticket on the transfer is stamped instead, with its own `createdAt` as the
+ *   first notice (the customer's earlier report). A case of ANOTHER class is never reused.
+ * - `regClass` null: today's recall ticket (the `recall:` lock key, reuse, cap; no class).
+ *
+ * The subject and body are the caller's; the class goes only in an INTERNAL system note
+ * (`Class: <class>.`), written once when a case is created or stamped. The audit row carries enum
+ * codes, ids and dates only (never the phone or the customer's words).
+ */
+export async function openErrorNoticeCaseLocked(tx: DbOrTx, i: ErrorNoticeCaseInput): Promise<ErrorNoticeCaseResult> {
+  const { partnerId, phone, transferId, regClass, code } = i;
+  const lockKey = regClass ? `regcase:${partnerId}:${transferId}:${regClass}` : `recall:${partnerId}:${transferId}`;
+  await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${lockKey}))`);
+  const repo = createTicketRepo(tx);
+
+  const addNote = async (ticketId: string) => {
+    const note = alsoReportedNote(code);
+    const msgs = await repo.listMessages(ticketId, { includeInternal: true });
+    if (msgs.some((m) => m.actorType === 'system' && m.body === note)) return;
+    await repo.appendMessage({ ticketId, actorType: 'system', actorId: 'system', internal: true, body: note });
+  };
+  const classNoteAndAudit = async (cls: RegClass, ticketId: string, dueAt: string, reused: boolean) => {
+    await repo.appendMessage({ ticketId, actorType: 'system', actorId: 'system', internal: true, body: caseClassNote(cls) });
+    await createAuditRepo(tx).record({
+      partnerId,
+      actor: 'system',
+      actorType: 'system',
+      action: 'ticket.reg_case.open',
+      subjectId: ticketId,
+      meta: { regClass: cls, code, transferId, dueAt, reused, stamped: true },
     });
-    // Out-of-band AI triage (durable outbox, drained by the worker); never an inline model call.
-    await enqueueTriage(tx, ticket.id);
-    return { kind: 'opened', ticketId: ticket.id, reused: false } as const;
+  };
+
+  if (regClass) {
+    const found = await repo.findOpenRegCase(partnerId, transferId, regClass);
+    if (found) {
+      await addNote(found.id);
+      return { kind: 'opened', ticketId: found.id, reused: true, regClass, dueAt: found.dueAt ?? null, classStamped: false };
+    }
+  }
+
+  const open = await repo.findOpenRecallForTransfer(partnerId, phone, transferId);
+  if (open && regClass === null) {
+    return { kind: 'opened', ticketId: open.id, reused: true, regClass: open.regClass ?? null, dueAt: open.dueAt ?? null, classStamped: false };
+  }
+  if (open && regClass && !open.regClass) {
+    const firstNoticeMs = Date.parse(open.createdAt);
+    const dueAt = new Date(regDueAt(regClass, firstNoticeMs));
+    const stamped = await repo.stampRegClass(open.id, partnerId, { regClass, firstNoticeAt: new Date(firstNoticeMs), dueAt });
+    if (stamped) {
+      await addNote(open.id);
+      await classNoteAndAudit(regClass, open.id, dueAt.toISOString(), true);
+      // P13 case event (T18): enqueueCaseEventIfEligible(tx, ticket) when classStamped
+      return { kind: 'opened', ticketId: open.id, reused: true, regClass, dueAt: dueAt.toISOString(), classStamped: true };
+    }
+    // A concurrent report won the stamp (another class takes another lock key): re-read.
+    const reread = await repo.getTicket(open.id);
+    if (reread && reread.regClass === regClass) {
+      return { kind: 'opened', ticketId: open.id, reused: true, regClass, dueAt: reread.dueAt ?? null, classStamped: false };
+    }
+    // Another class: fall through and create a case of this class.
+  }
+  // An open recall that already has ANOTHER class is never reused: fall through to create.
+
+  if (regClass === null) {
+    // The cap applies only to an unclassed ticket; a regulatory case is never refused by it.
+    const openCount =
+      i.capScope === 'tenant'
+        ? await repo.countOpenByCustomerInTenant(partnerId, phone)
+        : (await repo.listByCustomer(phone)).filter((t) => OPEN_STATUSES.has(t.status)).length;
+    if (openCount >= MAX_OPEN_TICKETS) return { kind: 'cap' };
+  }
+
+  const dueAt = regClass ? new Date(regDueAt(regClass, i.now)) : null;
+  const ticket = await repo.createTicket({
+    id: `tk_${newTransferId()}`,
+    partnerId,
+    kind: 'customer',
+    customerPhone: phone,
+    transferId,
+    subject: i.subject,
+    body: i.body,
+    category: 'refund',
+    ...(regClass && dueAt ? { regClass, firstNoticeAt: new Date(i.now), dueAt } : {}),
   });
+  // Out-of-band AI triage (durable outbox, drained by the worker); never an inline model call.
+  await enqueueTriage(tx, ticket.id);
+  if (regClass && dueAt) {
+    await classNoteAndAudit(regClass, ticket.id, dueAt.toISOString(), false);
+    // P13 case event (T18): enqueueCaseEventIfEligible(tx, ticket) when classStamped
+    return { kind: 'opened', ticketId: ticket.id, reused: false, regClass, dueAt: dueAt.toISOString(), classStamped: true };
+  }
+  return { kind: 'opened', ticketId: ticket.id, reused: false, regClass: null, dueAt: null, classStamped: false };
 }
