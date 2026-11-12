@@ -1498,8 +1498,16 @@ export const EVAL_CASES: EvalCase[] = [
       const hinglishAt = lines.map((l, i) => (ROMAN_HINDI.test(l) ? i : -1)).filter((i) => i >= 0);
       const body = hinglishAt[0] === 0 ? lines.slice(1) : lines;
       // F4-D1: the confirmation question is not the quote lead line ("Shall I go ahead with this
-      // quote?"); on the question's own line only the text before the question sentence counts.
-      const leadText = (l: string) => (l === question ? l.replace(/[^.!?]*\?\s*$/, '') : l);
+      // quote?"); on the question's own line only the text before the question CLAUSE counts:
+      // from the last question opener to the end (R2-D1: "Here is your quote, shall I go ahead?"
+      // keeps its lead), or, with no opener, the whole last question sentence.
+      const QUESTION_OPENER = /\b(?:shall|should|can|could|may|would you like|do you want|want me to|ready to)\b/gi;
+      const leadText = (l: string) => {
+        if (l !== question) return l;
+        const openers = [...l.matchAll(QUESTION_OPENER)];
+        const last = openers[openers.length - 1];
+        return last?.index !== undefined ? l.slice(0, last.index) : l.replace(/[^.!?]*\?\s*$/, '');
+      };
       const quoteLead = body.find((l) => /\b(?:quote|here(?:'s| is| are)|details|summary|breakdown)\b/i.test(leadText(l)));
       return fail(
         hinglishAt.some((i) => i !== 0) && 'a Hinglish line is not the first line',

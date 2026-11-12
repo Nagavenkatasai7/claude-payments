@@ -361,6 +361,10 @@ describe('cases 60 and 61 check the lead-in line their titles promise (review ro
     expect(await failuresOf(61, 'Here is your quote. Shall I go ahead?')).toEqual([]);
     expect(await failuresOf(61, 'Aapka quote neeche hai, aage ka hissa English mein hai.\nHere is your quote.\nShall I go ahead?')).toEqual([]);
   });
+  it('case 61 passes when the English quote lead and the question share one sentence joined by a comma (review round 2 R2-D1)', async () => {
+    expect(await failuresOf(61, 'Here is your quote, shall I go ahead?')).toEqual([]);
+    expect(await failuresOf(61, 'Aapka quote neeche hai, aage ka hissa English mein hai.\nHere is your quote, shall I go ahead?')).toEqual([]);
+  });
 });
 
 describe('the recorded cases prove their own checks', () => {

@@ -7,6 +7,8 @@ import {
   withdrawEsignConsent,
 } from '@/db/repos/customer-repo';
 import type { Db, DbOrTx } from '@/db/client';
+import { esignConsentNeeded } from '@/lib/esign';
+import { ESIGN_CONSENT_VERSION } from '@/lib/legal/esign-consent';
 import { captureQueries, freshDb, seedPartner } from './helpers-db';
 
 // Fix pack 6 T1 (P2): the customer's E-SIGN consent columns. READ-ONLY on Customer;
@@ -77,6 +79,32 @@ describe('customer E-SIGN consent repo (P2)', () => {
     const again = minutesAgo(2);
     expect(await recordEsignConsent(db, 'default', PHONE, 'esign-test-v2', again)).toBe(true);
     expect(await readEsignConsent(db, 'default', PHONE)).toEqual({ version: 'esign-test-v2', consentedAt: again, withdrawnAt: null });
+  });
+
+  // Final check X1: a pay-page consent's `at` is taken before its evidence transaction opens,
+  // so a portal withdrawal stamped AFTER `at` can commit first. The consent write keeps it.
+  it('recordEsignConsent keeps a withdrawal that is newer than its own time (consent still needed)', async () => {
+    await repo.ensureCustomer('default', PHONE);
+    const t0 = Date.now();
+    await recordEsignConsent(db, 'default', PHONE, ESIGN_CONSENT_VERSION, new Date(t0 - 60_000));
+    const withdrawnAt = new Date(t0 + 300);
+    expect(await withdrawEsignConsent(db, 'default', PHONE, withdrawnAt)).toBe(ESIGN_CONSENT_VERSION);
+    expect(await recordEsignConsent(db, 'default', PHONE, ESIGN_CONSENT_VERSION, new Date(t0))).toBe(true);
+    const s = await readEsignConsent(db, 'default', PHONE);
+    expect(s).toEqual({ version: ESIGN_CONSENT_VERSION, consentedAt: new Date(t0), withdrawnAt });
+    expect(esignConsentNeeded(s)).toBe(true);
+  });
+
+  it('recordEsignConsent at a time after the withdrawal clears it (consent not needed)', async () => {
+    await repo.ensureCustomer('default', PHONE);
+    const t0 = Date.now();
+    await recordEsignConsent(db, 'default', PHONE, ESIGN_CONSENT_VERSION, new Date(t0 - 60_000));
+    await withdrawEsignConsent(db, 'default', PHONE, new Date(t0 + 300));
+    const later = new Date(t0 + 1_000);
+    expect(await recordEsignConsent(db, 'default', PHONE, ESIGN_CONSENT_VERSION, later)).toBe(true);
+    const s = await readEsignConsent(db, 'default', PHONE);
+    expect(s).toEqual({ version: ESIGN_CONSENT_VERSION, consentedAt: later, withdrawnAt: null });
+    expect(esignConsentNeeded(s)).toBe(false);
   });
 
   it('withdrawEsignConsent returns the version and stamps withdrawn_at, never earlier than consented_at', async () => {

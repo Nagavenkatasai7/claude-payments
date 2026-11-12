@@ -798,8 +798,11 @@ export async function readEsignConsent(
 
 /**
  * One of the two ONLY writers of the consent columns: records `version` as given at `at` and
- * clears any withdrawal (a re-consent). true = the row was updated; false = this tenant has no row
- * for the phone (nothing written). drizzle update().set().where().returning({...}):
+ * clears a withdrawal that is not newer than `at` (a re-consent). A withdrawal stamped AFTER `at`
+ * is kept (final check X1: the pay page takes `at` before its evidence transaction opens, so a
+ * portal withdrawal can commit in between); esignConsentNeeded then still asks next time, since
+ * withdrawn_at >= consented_at counts as withdrawn. true = the row was updated; false = this
+ * tenant has no row for the phone (nothing written). drizzle update().set().where().returning({...}):
  * node_modules/drizzle-orm/pg-core/query-builders/update.d.ts:157-166.
  */
 export async function recordEsignConsent(
@@ -811,7 +814,12 @@ export async function recordEsignConsent(
 ): Promise<boolean> {
   const rows = await db
     .update(customers)
-    .set({ esignConsentVersion: version, esignConsentedAt: at, esignWithdrawnAt: null, updatedAt: at })
+    .set({
+      esignConsentVersion: version,
+      esignConsentedAt: at,
+      esignWithdrawnAt: sql`CASE WHEN ${customers.esignWithdrawnAt} > ${at.toISOString()}::timestamptz THEN ${customers.esignWithdrawnAt} ELSE NULL END`,
+      updatedAt: at,
+    })
     .where(and(eq(customers.partnerId, partnerId), eq(customers.phone, phone)))
     .returning({ phone: customers.phone });
   return rows.length > 0;
