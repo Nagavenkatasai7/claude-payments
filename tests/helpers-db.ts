@@ -69,6 +69,7 @@ const ALL_TABLES = [
   'partner_rates',
   'ticket_messages',
   'tickets',
+  'hold_reviews', // fix pack 7 (0041): FK child of transfers and partners; append-only, TRUNCATE allowed
   'transfers',
   'schedules',
   'beneficiaries',

@@ -102,6 +102,19 @@ describe('createRailMessageRepo.append', () => {
     expect(() => decryptField(blob, provider, ctx.railMessage('0b7c2f7e-1a2b-4c3d-8e9f-001122334455', 1, 'settle'))).toThrow();
   });
 
+  // Fix pack 7 (P20): kind 'event' (a signed partner compliance event, CHECK widened in 0041).
+  it("append stores an outbound 'event' row that opens only under its own kind", async () => {
+    const repo = createRailMessageRepo(db, provider);
+    const { id } = await repo.append({
+      partnerId: 'pa', railPartnerId: 'pa', transferId: 't1', direction: RAIL_OUT, kind: 'event', body: BODY, signatureHeader: HEADER,
+    });
+    const [raw] = await rows();
+    expect(raw.kind).toBe('event');
+    const blob = String(raw.body_enc);
+    expect(decryptField(blob, provider, ctx.railMessage(id, 1, 'event'))).toBe(BODY);
+    expect(() => decryptField(blob, provider, ctx.railMessage(id, 1, 'settle'))).toThrow();
+  });
+
   it('outbound: one row per call, a fresh uuid each time', async () => {
     const repo = createRailMessageRepo(db, provider);
     const i = { partnerId: 'pa', railPartnerId: 'pa', transferId: 't1', direction: RAIL_OUT, kind: 'settle' as const, body: BODY, signatureHeader: HEADER };
@@ -227,6 +240,7 @@ describe('createRailMessageRepo.lastSettleOutAt (review round 1 RC2)', () => {
     const base = { partnerId: 'pa', railPartnerId: 'pa', transferId: 't1', direction: RAIL_OUT, kind: 'settle' as const, body: BODY, signatureHeader: HEADER };
     await repo.append(base);
     await repo.append({ ...base, kind: 'reverse' });
+    await repo.append({ ...base, kind: 'event' }); // fix pack 7 (P20): an event never counts as a settle
     await repo.append({ ...base, direction: RAIL_IN, kind: 'callback' });
     await repo.append({ ...base, railPartnerId: 'pb' });
     await repo.append({ ...base, partnerId: 'pb' });

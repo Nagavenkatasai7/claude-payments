@@ -306,6 +306,8 @@ export const customers = pgTable(
     // it (compliance-config.ts senderScreeningHoldActive).
     screeningFlaggedAt: timestamp('screening_flagged_at', { withTimezone: true }),
     screeningClearedAt: timestamp('screening_cleared_at', { withTimezone: true }),
+    // fix pack 7 (R2): last WATCHLIST stamp; written only by stampScreeningFlagged(kind 'watchlist'), never by a whole-row save
+    screeningWatchlistAt: timestamp('screening_watchlist_at', { withTimezone: true }),
     sourceOfFunds: text('source_of_funds'),
     occupation: text('occupation'),
     eddCapturedAt: timestamp('edd_captured_at', { withTimezone: true }),
@@ -1063,7 +1065,7 @@ export const railMessages = pgTable(
     railPartnerId: text('rail_partner_id').references(() => partners.id),
     transferId: text('transfer_id'),
     direction: smallint('direction').notNull(), // 1 out, 2 in
-    kind: text('kind').notNull(), // 'settle' | 'reverse' | 'callback'
+    kind: text('kind').notNull(), // 'settle' | 'reverse' | 'callback' | 'event' (fix pack 7: a signed partner compliance event)
     bodyEnc: text('body_enc').notNull(), // ENCRYPTED (exact bytes sent or received, ctx.railMessage, T8)
     bodySha256: text('body_sha256').notNull(), // lowercase hex sha256 of the exact UTF-8 bytes
     signatureHeader: text('signature_header'), // the x-smartremit-signature value sent/received
@@ -1071,10 +1073,42 @@ export const railMessages = pgTable(
   },
   (t) => [
     check('rail_messages_direction', sql`${t.direction} IN (1, 2)`),
-    check('rail_messages_kind', sql`${t.kind} IN ('settle','reverse','callback')`),
+    check('rail_messages_kind', sql`${t.kind} IN ('settle','reverse','callback','event')`),
     check('rail_messages_sha', sql`${t.bodySha256} ~ '^[0-9a-f]{64}$'`),
     index('rail_messages_transfer').on(t.transferId, t.createdAt),
     index('rail_messages_partner_created').on(t.partnerId, t.createdAt.desc()),
+  ],
+);
+
+// ── Fix pack 7 (0041, R05): hold decisions ─────────────────────────────────
+// APPEND-ONLY in the database (trigger hold_reviews_append_only: no UPDATE, no DELETE;
+// TRUNCATE allowed for freshDb). partner_id = the transfer OWNER, never the settlement
+// partner. hold_class and disposition are validated in code (hold-queue.ts), not by a CHECK.
+// reason: the bounded decision reason (plaintext like audit meta reasons; never logged,
+// never in an event or alert). evidence: ids, versions, scores, enums only.
+export const holdReviews = pgTable(
+  'hold_reviews',
+  {
+    id: uuid('id').primaryKey(),
+    transferId: text('transfer_id').notNull().references(() => transfers.id),
+    partnerId: text('partner_id').notNull().references(() => partners.id),
+    holdClass: text('hold_class').notNull(),
+    reasonsFp: text('reasons_fp').notNull(),
+    step: smallint('step').notNull(),
+    final: boolean('final').notNull(),
+    disposition: text('disposition').notNull(),
+    reason: text('reason').notNull(),
+    evidence: jsonb('evidence').notNull().default(sql`'{}'::jsonb`),
+    actor: text('actor').notNull(),
+    actorScope: text('actor_scope').notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check('hold_reviews_step', sql`${t.step} IN (1, 2)`),
+    check('hold_reviews_actor_scope', sql`${t.actorScope} IN ('partner','platform')`),
+    uniqueIndex('hold_reviews_cycle_step').on(t.transferId, t.holdClass, t.reasonsFp, t.step),
+    uniqueIndex('hold_reviews_cycle_actor').on(t.transferId, t.holdClass, t.reasonsFp, t.actor),
+    index('hold_reviews_partner_queue').on(t.partnerId, t.transferId, t.createdAt),
   ],
 );
 

@@ -80,7 +80,8 @@ const V1_EXEMPT_PURPOSES: ReadonlySet<CryptoPurpose> = new Set<CryptoPurpose>(['
 /** Fix pack 5 (P3/P4): rail_messages.direction, 1 out (we POSTed it), 2 in (a callback). Declared here so lib never imports a repo. */
 export type RailMessageDirection = 1 | 2;
 /** Fix pack 5 (P3/P4): rail_messages.kind (CHECK rail_messages_kind). */
-export type RailMessageKind = 'settle' | 'reverse' | 'callback';
+// fix pack 7 (P20): 'event' = a signed partner compliance event (outbox-worker recordRailEvent, T21)
+export type RailMessageKind = 'settle' | 'reverse' | 'callback' | 'event';
 
 const s = (v: unknown): string => (typeof v === 'string' ? v : String(v ?? ''));
 
