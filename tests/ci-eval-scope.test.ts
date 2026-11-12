@@ -35,6 +35,7 @@ describe('isEvalScopePath', () => {
     'src/lib/untrusted-text.ts',
     'src/lib/tool-context.ts',
     'src/lib/hold-replies.ts',
+    'src/lib/hold-replies-text.ts',
     'src/lib/model-visible-result.ts',
     'src/lib/inbound-redact.ts',
     'src/lib/ai-provenance.ts',

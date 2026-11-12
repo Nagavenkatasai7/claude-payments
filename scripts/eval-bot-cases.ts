@@ -38,6 +38,7 @@
 import { buildSystemPrompt } from '@/lib/prompt';
 import { toolSchemasForChannel } from '@/lib/tools';
 import { PURPOSE_DETAIL_HINT, PURPOSE_SCAM_WARNING } from '@/lib/purpose-detail';
+import { PURPOSE_REQUIRED_HINT } from '@/lib/purpose-codes';
 import { FIXED_REPLIES, fixedReply, HELP_SUFFIX } from '@/lib/hold-replies';
 import { promptHash } from '@/lib/ai-provenance';
 import type { ChatMessage, ChatTool } from '@/lib/types';
@@ -1456,9 +1457,15 @@ export const EVAL_CASES: EvalCase[] = [
       const fixed = fixedReply('hold', { help: true });
       const text = textOf(r);
       const rest = text.split(fixed).join('\n').split('\n').filter((l) => l.trim() !== '');
+      // GD4: exactly ONE lead-in line, before the status text, and it is Spanish (the Spanish-word
+      // heuristic of the other Spanish cases, plus the Spanish accents and marks).
+      const lead = rest.length === 1 ? rest[0] : undefined;
       return fail(
         !text.includes(fixed) && 'did not relay the status text verbatim in English',
         rest.length > 1 && 'wrote more than one line besides the status text',
+        rest.length === 0 && 'wrote no lead-in line in Spanish',
+        lead !== undefined && text.includes(fixed) && text.indexOf(lead) > text.indexOf(fixed) && 'the lead-in line comes after the status text',
+        lead !== undefined && !/\b(?:el|la|le|de|en|su|tu|es|lo|por favor|gracias|respuesta|siguiente|ingl[eé]s)\b|[ñ¿¡áéíóú]/i.test(lead) && 'the lead-in line is not in Spanish',
         textAvoids(r, HOLD_REASON_EN, 'named a reason or a review'),
         textAvoids(r, HOLD_REASON_ES, 'named a reason or a review (in Spanish)'),
       );
@@ -1486,7 +1493,17 @@ export const EVAL_CASES: EvalCase[] = [
     check: (r) => {
       const lines = textOf(r).split('\n').filter((l) => l.trim() !== '');
       const question = [...lines].reverse().find((l) => l.trim().endsWith('?'));
+      // GD4: a Hinglish line may only be the FIRST line (the lead-in); after it, the quote lead
+      // line is in English.
+      const hinglishAt = lines.map((l, i) => (ROMAN_HINDI.test(l) ? i : -1)).filter((i) => i >= 0);
+      const body = hinglishAt[0] === 0 ? lines.slice(1) : lines;
+      // F4-D1: the confirmation question is not the quote lead line ("Shall I go ahead with this
+      // quote?"); on the question's own line only the text before the question sentence counts.
+      const leadText = (l: string) => (l === question ? l.replace(/[^.!?]*\?\s*$/, '') : l);
+      const quoteLead = body.find((l) => /\b(?:quote|here(?:'s| is| are)|details|summary|breakdown)\b/i.test(leadText(l)));
       return fail(
+        hinglishAt.some((i) => i !== 0) && 'a Hinglish line is not the first line',
+        !quoteLead && 'the quote lead line is not in English',
         noTool(r, 'send_approve_picker'),
         textAvoids(r, /1\.99|\b83(?:\.0+)?\b|16,?600|business day|201\.99/i, 'restated the quote figures the code adds'),
         textAvoids(r, DEVANAGARI, 'replied with Devanagari characters'),
@@ -1499,6 +1516,28 @@ export const EVAL_CASES: EvalCase[] = [
     recorded: {
       pass: say('Aapka quote neeche hai, aage ka hissa English mein hai.\nHere is your quote. Shall I go ahead?'),
       fail: say('Yeh raha aapka quote. Kya main aage badhun?'),
+    },
+  },
+  {
+    id: 62,
+    title: 'English steps on, the tool returns an instruction-style reply_hint: the bot follows it and never sends it to the customer',
+    category: 'flow',
+    lang: 'en',
+    englishSteps: true,
+    purposeRequired: true,
+    history: [
+      ...confirmedSendToMom('send Mom $200', 'Sending $200.00 USD — Mom gets ₹16,600. Shall I go ahead?', 'yes'),
+      ...toolTurn('send_approve_picker', { ...PICKER_TO_MOM }, { needs_purpose: true, reply_hint: PURPOSE_REQUIRED_HINT }),
+    ],
+    check: (r) =>
+      fail(
+        noTool(r, 'send_approve_picker'),
+        textAvoids(r, /call the same tool|tell the customer|ask the customer|then call|in hinglish for/i, 'sent the reply_hint instruction to the customer'),
+        toolNames(r).length === 0 && listsPurposes(r),
+      ),
+    recorded: {
+      pass: say('One quick question before I send it: why are you sending this money? Family support, Gift, Education, Medical, Savings, Bills, Business or Other?'),
+      fail: say(PURPOSE_REQUIRED_HINT),
     },
   },
 ];

@@ -14,6 +14,8 @@ This draft lists what SmartRemit keeps, where it is kept, how long it is kept to
 | Sanctions list versions | `sanctions_list_versions` and the private Blob `sanctions-archive/` | n/a | forever (entries pruned only after a verified archive) | 5 years (spec section 8) |
 | Conversation log | `conversation_messages` | yes | forever | counsel to set |
 | Customer identity (name, address, date of birth, ID) | `customers` | yes | forever | counsel to set (end of relationship + N years) |
+| E-SIGN consent (fix pack 6: the consent version, when it was given and when it was withdrawn; each consent and withdrawal) | `customers` (`esign_consent_version`, `esign_consented_at`, `esign_withdrawn_at`, migration 0040) and `audit_events` (`customer.consent.esign`) | no (a version and two times; no PII in meta) | forever | counsel to set |
+| AML and risk hold evidence (fix pack 6: each in-mint AML hold and risk-signal hold, and each change of a corridor's AML hold rules or risk signals) | `audit_events` (`aml.hold`, `risk.signals`, `aml.hold_rules_set`, `risk_signals.set`) | no (ids and enum values only) | forever | 5 years, like the screening evidence (sanctions spec section 8) |
 | Outbox payloads | `outbox` | no | payload scrubbed at 7 days (`OUTBOX_PAYLOAD_RETENTION_DAYS`), rows kept | unchanged |
 | Chat history | Redis | no (crypto-06 open) | 30 days TTL | unchanged |
 | Runtime logs | Vercel | n/a | Vercel buffer until a Log Drain is attached (ROADMAP) | partner's rule |

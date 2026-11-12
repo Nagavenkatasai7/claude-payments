@@ -1,4 +1,4 @@
-import { FIXED_REPLIES } from '../../hold-replies';
+import { FIXED_REPLIES } from '../../hold-replies-text';
 
 // The en catalogue: the source of truth for keys. To add a language, add <locale>.ts with the SAME
 // keys and register it in ./index.ts (one line); tests/i18n.test.ts fails otherwise.

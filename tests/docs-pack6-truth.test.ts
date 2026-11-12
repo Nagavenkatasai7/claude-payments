@@ -99,6 +99,59 @@ describe('pack 6 documents say what the code does', () => {
     expect(dataAt).toBeGreaterThan(pr6At + paragraph(ROLLBACK, PR6).length);
   });
 
+  it('review round 2 GE1: the PR6 paragraph has a roll-forward step that re-saves the AML switch of every corridor switched while the older build served, with the query and the audit action that list them; the code agrees', () => {
+    const p = paragraph(ROLLBACK, PR6);
+    expect(p).toContain('After the roll-forward');
+    expect(p).toContain('re-save the AML holds switch on `/admin-dashboard/compliance`');
+    expect(p).toContain("SELECT partner_id, meta->>'country' AS country, at FROM audit_events WHERE action = 'aml.holds_set' AND at > '<rollback time>'");
+    expect(p).toContain('`amlHolds` next to an empty `amlHoldRules` holds nothing');
+    expect(p).toContain('go-live default');
+    // The two builds differ as the step says: the pack 6 switch drops an empty list on ON and deletes both keys on OFF.
+    const actions = read('src/app/admin-dashboard/compliance/actions.ts');
+    expect(actions).toContain("action: 'aml.holds_set'");
+    expect(actions).toContain('delete entry.amlHoldRules;');
+    expect(read('src/lib/transfer-create.ts')).toContain('amlHolds: p.rules.amlHolds && p.rules.amlHoldRules.length > 0');
+  });
+
+  it('review round 2 GE2: RECORDS-RETENTION.md names the E-SIGN consent and the AML and risk hold evidence pack 6 adds', () => {
+    const doc = read('docs/RECORDS-RETENTION.md');
+    const rows = doc.split('\n').filter((l) => l.startsWith('| '));
+    const consent = rows.find((l) => l.startsWith('| E-SIGN consent'));
+    expect(consent, 'E-SIGN consent row').toBeDefined();
+    for (const x of ['`esign_consent_version`', '`esign_consented_at`', '`esign_withdrawn_at`', '`customer.consent.esign`', 'counsel to set']) {
+      expect(consent!, x).toContain(x);
+    }
+    const holds = rows.find((l) => l.startsWith('| AML and risk hold evidence'));
+    expect(holds, 'AML and risk hold evidence row').toBeDefined();
+    for (const x of ['`aml.hold`', '`risk.signals`', '`aml.hold_rules_set`', '`risk_signals.set`', 'ids and enum values only', '5 years']) {
+      expect(holds!, x).toContain(x);
+    }
+    // Same column count as the table header.
+    const cols = (l: string) => l.split(' | ').length;
+    expect(cols(consent!)).toBe(cols(rows[0]));
+    expect(cols(holds!)).toBe(cols(rows[0]));
+  });
+
+  it('review round 2 GE3: the changelog names the two limits (ACH debit and bill payments are not asked; payment-link payments get no receipt link)', () => {
+    const nov = section(CHANGELOG, '## 2026-11');
+    expect(nov).toContain('before they pay by card or bank transfer (ACH debit and bill payments are not asked)');
+    expect(nov).toContain('The WhatsApp payment message of a transfer paid on its pay page links the receipt (payment-link payments do not get the link)');
+    expect(nov).not.toContain('The WhatsApp payment message links the receipt');
+    // The code agrees: ACH debit is exempt on the transfer pay route; a payment-link transfer gets no receipt link.
+    expect(read('src/app/api/pay/[transferId]/route.ts')).toContain("exempt: payMethod === 'ach_pull'");
+    expect(read('src/lib/settlement.ts')).toContain('isPaymentLinkTransfer(t.id)) ? null : payUrlFor(t.id)');
+  });
+
+  it('review round 2 GE4: the spec says a value that is not a list gives all three rules and a list with no known rule name holds nothing', () => {
+    const rules = paragraph(specPack6(), '- **The rules.**');
+    expect(rules).not.toContain('(or a malformed one)');
+    expect(rules).toContain('a stored value that is not a list');
+    expect(rules).toContain('an empty list, or a list with no known rule name, means no rule holds');
+    const cfg = read('src/lib/compliance-config.ts');
+    expect(cfg).toContain('if (!Array.isArray(stored)) return AML_HOLD_RULES;');
+    expect(cfg).toContain('AML_HOLD_RULES.filter((r) => list.includes(r))');
+  });
+
   it('sanctions spec pack 6 section names the gate, every rule, check_failed, the alert, the prior-send rule, addHoldReason, the writers, the go-live default, risk.signals and the reason; the code agrees', () => {
     const s = specPack6();
     for (const x of [

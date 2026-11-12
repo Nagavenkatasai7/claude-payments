@@ -108,13 +108,19 @@ function runtimeSpecifiers(file: string): string[] {
   return out;
 }
 
-/** Every chain from `start` that ends in a node built-in, as "a.ts -> b.ts -> node:url". */
-function nodeChains(start: string): string[] {
+/**
+ * Every chain from `start` that ends in a node built-in, as "a.ts -> b.ts -> node:url".
+ * With `stopAtUseServer`, a 'use server' module is not walked: Next replaces it in a
+ * client bundle with references to its server functions
+ * (node_modules/next/dist/docs/01-app/03-api-reference/01-directives/use-server.md).
+ */
+function nodeChains(start: string, stopAtUseServer = false): string[] {
   const bad: string[] = [];
   const seen = new Set<string>();
   const walk = (file: string, chain: string[]): void => {
     if (seen.has(file)) return;
     seen.add(file);
+    if (stopAtUseServer && chain.length > 1 && hasFileDirective(file, 'use server')) return;
     for (const spec of runtimeSpecifiers(file)) {
       if (isNodeBuiltin(spec)) {
         bad.push([...chain, spec].join(' -> '));
@@ -138,15 +144,20 @@ function walkFiles(dir: string, out: string[] = []): string[] {
   return out;
 }
 
-function isUseClient(file: string): boolean {
+/** True when the file starts with the given directive ('use client' or 'use server'). */
+function hasFileDirective(file: string, directive: 'use client' | 'use server'): boolean {
   const sf = ts.createSourceFile(file, readFileSync(file, 'utf8'), ts.ScriptTarget.Latest, false);
   const first = sf.statements[0];
   return (
     !!first &&
     ts.isExpressionStatement(first) &&
     ts.isStringLiteral(first.expression) &&
-    first.expression.text === 'use client'
+    first.expression.text === directive
   );
+}
+
+function isUseClient(file: string): boolean {
+  return hasFileDirective(file, 'use client');
 }
 
 describe('client-reachable modules never reach node:* (P0 rule 13)', { retry: 0 }, () => {
@@ -168,6 +179,43 @@ describe('client-reachable modules never reach node:* (P0 rule 13)', { retry: 0 
   it('the walker sees through a multi-hop chain (untrusted-text reaches node:url)', () => {
     expect(nodeChains('src/lib/purpose-detail.ts').some((c) => c.endsWith('node:url'))).toBe(true);
     expect(nodeChains('src/lib/legal/provider-line.ts').some((c) => c.endsWith('node:url'))).toBe(true);
+  });
+});
+
+// Fix pack 6 review round 2 (H2): the walk ALSO starts from the client entry
+// points themselves, so a chain through a module that is not a root above (for
+// example @/lib/i18n -> catalogues/en.ts -> hold-replies.ts -> untrusted-text.ts
+// -> node:url) is caught. A 'use server' module ends the walk (see nodeChains).
+const CLIENT_ENTRY_POINTS: readonly string[] = [
+  'src/app/pay/[transferId]/pay-form.tsx',
+  'src/app/pay/l/[token]/link-pay-form.tsx',
+  'src/app/partner/(app)/settings/settings-forms.tsx',
+  'src/app/partner/(app)/transfers/[id]/aml-explain.tsx',
+  'src/app/admin-dashboard/compliance/aml-explain.tsx',
+  'src/app/admin-dashboard/compliance/risk-signals-form.tsx',
+  'src/app/portal/profile/profile-forms.tsx',
+];
+
+describe("the client entry points never reach node:* (P0 rule 13, H2)", { retry: 0 }, () => {
+  it('each listed entry point is a use client file', () => {
+    for (const f of CLIENT_ENTRY_POINTS) expect(isUseClient(join(ROOT, f)), f).toBe(true);
+  });
+
+  it.each(CLIENT_ENTRY_POINTS)('%s has no runtime import chain to a node built-in', (entry) => {
+    const chains = nodeChains(entry, true);
+    expect(chains, `client entry point reaches node:*:\n  ${chains.join('\n  ')}`).toEqual([]);
+  });
+
+  it("the walk stops at a 'use server' module (whose server code does reach node:*)", () => {
+    // Without the stop, a client file that imports its actions.ts would walk the server code.
+    const withActions = CLIENT_ENTRY_POINTS.filter((f) =>
+      runtimeSpecifiers(join(ROOT, f)).some((s) => {
+        const t = resolveLocal(join(ROOT, f), s);
+        return !!t && hasFileDirective(t, 'use server');
+      }),
+    );
+    expect(withActions.length).toBeGreaterThan(0);
+    for (const f of withActions) expect(nodeChains(f, false).length, f).toBeGreaterThan(0);
   });
 });
 

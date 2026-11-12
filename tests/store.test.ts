@@ -264,18 +264,26 @@ describe('fix pack 2 T2: railProviderType and enqueueListNotLiveAlert', () => {
       }),
     ).rejects.toThrow('rolled-back');
     expect(await rows()).toEqual([]);
-    // The key is per Eastern day: read it before and after the mints so a run
-    // that crosses Eastern midnight still matches one of them.
-    const dayBefore = listNotLiveDedupeKey(new Date());
-    await store.mintUnderSenderLock('acme', 'p', (ops) => ops.enqueueListNotLiveAlert());
-    await store.mintUnderSenderLock('acme', 'p2', (ops) => ops.enqueueListNotLiveAlert());
-    const dayAfter = listNotLiveDedupeKey(new Date());
-    const r = await rows();
-    expect(r).toHaveLength(1);
-    expect([dayBefore, dayAfter]).toContain(r[0].dedupe_key);
-    expect(Object.keys(r[0].payload)).toEqual(['message']);
-    expect(String(r[0].payload.message)).toContain('partner acme');
-    expect(String(r[0].payload.message)).not.toContain('p2');
+    // The key is per Eastern day. Review round 2 R1-D1: freeze Date (freshDb()
+    // already ran in beforeEach) at a time derived from the real clock, moved
+    // back 20 minutes when it is within 10 minutes before an Eastern midnight,
+    // so the two mints can never fall on two Eastern days.
+    const { easternDay } = await import('@/lib/sanctions/list-loader');
+    let at = Date.now();
+    if (easternDay(at + 10 * 60_000) !== easternDay(at)) at -= 20 * 60_000;
+    vi.useFakeTimers({ now: at, toFake: ['Date'] });
+    try {
+      await store.mintUnderSenderLock('acme', 'p', (ops) => ops.enqueueListNotLiveAlert());
+      await store.mintUnderSenderLock('acme', 'p2', (ops) => ops.enqueueListNotLiveAlert());
+      const r = await rows();
+      expect(r).toHaveLength(1);
+      expect(r[0].dedupe_key).toBe(listNotLiveDedupeKey(new Date(at)));
+      expect(Object.keys(r[0].payload)).toEqual(['message']);
+      expect(String(r[0].payload.message)).toContain('partner acme');
+      expect(String(r[0].payload.message)).not.toContain('p2');
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 
