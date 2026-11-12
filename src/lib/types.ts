@@ -920,6 +920,7 @@ export interface CorridorComplianceRule {
   aml?: { band?: number; count?: number; aggUsd?: number; firstUsd?: number; senders?: number };
   amlHolds?: boolean;          // PR B: per partner × corridor hold switch; only literal true = ON (never demo — aml-hold.ts)
   amlHoldRules?: string[];     // pack 6 (P13): the in-mint rules that hold when amlHolds is on (closed list, validated on read); absent = all three
+  riskSignals?: { enabled?: boolean; amountUsd?: number; newAccountHours?: number; hold?: string[] };   // pack 6 (P18): written only by the platform (T23); validated on read; absent = off
 }
 
 // ── Destination-interest lead (non-India payout requests) ─────────────────────

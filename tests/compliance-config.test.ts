@@ -6,6 +6,7 @@ import {
   resolveAmlHoldRules,
 } from '@/lib/compliance-config';
 import { WATCHLIST, LARGE_AMOUNT_USD, VELOCITY_LIMIT } from '@/lib/compliance';
+import { RISK_SIGNALS_OFF } from '@/lib/risk-signals';
 import type { Partner } from '@/lib/types';
 
 function partner(corridorCompliance?: Partner['corridorCompliance']): Partner {
@@ -180,5 +181,82 @@ describe('resolveCorridorRules - amlHoldRules (pack 6 P13)', () => {
     expect(resolveAmlHoldRules(true, undefined)).toEqual(ALL);
     expect(resolveAmlHoldRules(true, 'x')).toEqual(ALL);
     expect(resolveAmlHoldRules(true, ['new_beneficiary', 'first_transfer'])).toEqual(['first_transfer', 'new_beneficiary']);
+  });
+});
+
+describe('resolveCorridorRules - riskSignals (pack 6 P18)', () => {
+  const sigOf = (riskSignals: unknown, extra: Record<string, unknown> = {}) =>
+    resolveCorridorRules(partner({ GB: { ...extra, riskSignals } as never }), 'GB').riskSignals;
+
+  it('GLOBAL_DEFAULTS.riskSignals is RISK_SIGNALS_OFF (the same object)', () => {
+    expect(GLOBAL_DEFAULTS.riskSignals).toBe(RISK_SIGNALS_OFF);
+  });
+  it('fast path still returns the shared GLOBAL_DEFAULTS object', () => {
+    expect(resolveCorridorRules(null, 'US')).toBe(GLOBAL_DEFAULTS);
+    expect(resolveCorridorRules(partner({ GB: { riskSignals: { enabled: true } } }), 'US')).toBe(GLOBAL_DEFAULTS);
+    expect(resolveCorridorRules(partner({ IN: { riskSignals: { enabled: true } } }), 'IN')).toBe(GLOBAL_DEFAULTS);
+  });
+  it('a corridor override without riskSignals resolves to the shared RISK_SIGNALS_OFF', () => {
+    const r = resolveCorridorRules(partner({ GB: { largeAmountUsd: 2000, amlHolds: true } }), 'GB');
+    expect(r).not.toBe(GLOBAL_DEFAULTS);
+    expect(r.riskSignals).toBe(RISK_SIGNALS_OFF);
+  });
+  it('{ enabled: true } alone -> enabled with amountUsd 500, newAccountHours 72, hold []', () => {
+    expect(sigOf({ enabled: true })).toEqual({ enabled: true, amountUsd: 500, newAccountHours: 72, hold: [] });
+  });
+  it("full valid -> { enabled: true, amountUsd: 750, newAccountHours: 24, hold: ['first_to_recipient','chat_cue'] }", () => {
+    expect(sigOf({ enabled: true, amountUsd: 750, newAccountHours: 24, hold: ['chat_cue', 'first_to_recipient', 'chat_cue'] }))
+      .toEqual({ enabled: true, amountUsd: 750, newAccountHours: 24, hold: ['first_to_recipient', 'chat_cue'] });
+  });
+  it('enabled only for a literal true', () => {
+    for (const v of ['true', 1, 'yes', null]) {
+      expect(sigOf({ enabled: v }).enabled).toBe(false);
+    }
+  });
+  it('untrusted numbers fall back', () => {
+    for (const v of [0, -5, NaN, Infinity, '500']) {
+      expect(sigOf({ enabled: true, amountUsd: v }).amountUsd).toBe(500);
+    }
+    for (const v of [1.5, 0, -1, '72']) {
+      expect(sigOf({ enabled: true, newAccountHours: v }).newAccountHours).toBe(72);
+    }
+  });
+  it('untrusted hold: unknown names, non-strings, a non-array value -> filtered / []; never throws', () => {
+    expect(sigOf({ enabled: true, hold: ['bogus', 7, null, {}, 'new_account', 'FIRST_TRANSFER'] }).hold).toEqual(['new_account']);
+    for (const bad of ['chat_cue', { chat_cue: true }, 5, null]) {
+      expect(sigOf({ enabled: true, hold: bad }).hold).toEqual([]);
+    }
+  });
+  it("a non-object riskSignals ('on', 5, [], null) -> RISK_SIGNALS_OFF", () => {
+    for (const bad of ['on', 5, [], null, true]) {
+      expect(sigOf(bad)).toBe(RISK_SIGNALS_OFF);
+    }
+  });
+  it('enabled false keeps the stored, valid thresholds', () => {
+    expect(sigOf({ enabled: false, amountUsd: 1200, newAccountHours: 48, hold: ['first_transfer'] }))
+      .toEqual({ enabled: false, amountUsd: 1200, newAccountHours: 48, hold: ['first_transfer'] });
+  });
+  it('the resolved config and its hold array are frozen and never the stored jsonb array', () => {
+    const hold = ['new_account'];
+    const r = sigOf({ enabled: true, hold });
+    expect(Object.isFrozen(r)).toBe(true);
+    expect(Object.isFrozen(r.hold)).toBe(true);
+    expect(r.hold).not.toBe(hold);
+    hold.push('chat_cue');
+    expect(r.hold).toEqual(['new_account']);
+  });
+  it('riskSignals does not change any other resolved field', () => {
+    const base = { amlHolds: true, amlHoldRules: ['structuring'], largeAmountUsd: 1500, aml: { count: 5 } };
+    const without = resolveCorridorRules(partner({ GB: base }), 'GB');
+    const withKey = resolveCorridorRules(partner({ GB: { ...base, riskSignals: { enabled: true, amountUsd: 100, hold: ['chat_cue'] } } }), 'GB');
+    const { riskSignals: a, ...restWithout } = without;
+    const { riskSignals: b, ...restWith } = withKey;
+    expect(restWith).toEqual(restWithout);
+    expect(a).toBe(RISK_SIGNALS_OFF);
+    expect(b.enabled).toBe(true);
+    expect(withKey.aml).toEqual(without.aml);
+    expect(withKey.amlHolds).toBe(true);
+    expect(withKey.amlHoldRules).toEqual(['structuring']);
+    expect(withKey.largeAmountUsd).toBe(1500);
   });
 });

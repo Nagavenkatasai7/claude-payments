@@ -268,6 +268,15 @@ describe('setAmlHoldRulesAction: input', () => {
     expect(resolveCorridorRules(p, 'US').amlHolds).toBe(false);
     expect(resolveCorridorRules(p, 'US').amlHoldRules).toEqual([]);
   });
+
+  it('a stored riskSignals entry survives an AML rule save byte for byte (pack 6 P18)', async () => {
+    const riskSignals = { enabled: true, amountUsd: 750, newAccountHours: 24, hold: ['chat_cue'] };
+    await db.update(partners).set({ corridorCompliance: { US: { velocityLimit: 7, riskSignals } } }).where(eq(partners.id, 'pa'));
+    expect(await save(form('US', ['structuring']))).toEqual({ ok: true });
+    expect(await cc('pa')).toEqual({ US: { velocityLimit: 7, riskSignals, amlHolds: true, amlHoldRules: ['structuring'] } });
+    const p = await createPartnerStore(db).getPartner('pa');
+    expect(resolveCorridorRules(p, 'US').riskSignals).toEqual({ enabled: true, amountUsd: 750, newAccountHours: 24, hold: ['chat_cue'] });
+  });
 });
 
 describe('setAmlHoldRulesAction: audit, notice and poke', () => {

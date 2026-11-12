@@ -1,6 +1,7 @@
 import type { CountryCode, Partner } from './types';
 import { AML_DEFAULTS, AML_HOLD_RULES, type AmlConfig, type AmlHoldRule } from './aml-rules';
 import type { FixedReplyKind } from './hold-replies';
+import { RISK_SIGNALS, RISK_SIGNALS_OFF, type RiskSignal, type RiskSignalConfig } from './risk-signals';
 
 // Canonical screening constants — single source of truth.
 // compliance.ts re-exports these for backward compatibility.
@@ -291,6 +292,10 @@ export interface ResolvedCorridorRules {
   // unless amlHolds; canonical order, frozen (resolveAmlHoldRules). The mint
   // holds only on these (T17).
   amlHoldRules: readonly AmlHoldRule[];
+  // Fix pack 6 (P18): this corridor's risk-signal setting. OFF by default (the
+  // shared RISK_SIGNALS_OFF); the readers (T25 mint, T26a draft) call
+  // riskSignalsApply before reading anything else of it.
+  riskSignals: RiskSignalConfig;
 }
 
 // Today's globals, named so the dormant path is PROVABLY equal to current
@@ -304,6 +309,7 @@ export const GLOBAL_DEFAULTS: ResolvedCorridorRules = {
   aml: AML_DEFAULTS,
   amlHolds: false,
   amlHoldRules: Object.freeze([]) as readonly AmlHoldRule[],
+  riskSignals: RISK_SIGNALS_OFF,
 };
 
 // corridor_compliance is untrusted jsonb: every AML field is validated and
@@ -331,6 +337,26 @@ function resolveAml(...layers: Array<Partial<AmlConfig> | undefined>): AmlConfig
     firstUsd: posNumber(pick('firstUsd'), AML_DEFAULTS.firstUsd),
     senders: posInt(pick('senders'), AML_DEFAULTS.senders),
   };
+}
+
+// Fix pack 6 (P18): the stored riskSignals jsonb is untrusted. Absent or not a
+// plain object -> the shared RISK_SIGNALS_OFF; enabled only for a literal true;
+// thresholds through posNumber/posInt with the OFF defaults as fallback (the
+// 1..10000 / 1..720 bounds are the writer's, T23); hold filtered to known
+// signals, de-duplicated, canonical order. enabled false keeps valid stored
+// thresholds (the admin form shows them). Result and hold are frozen copies.
+function resolveRiskSignals(stored: unknown): RiskSignalConfig {
+  if (stored === undefined || stored === null || typeof stored !== 'object' || Array.isArray(stored)) {
+    return RISK_SIGNALS_OFF;
+  }
+  const o = stored as Record<string, unknown>;
+  const hold: readonly unknown[] = Array.isArray(o.hold) ? o.hold : [];
+  return Object.freeze({
+    enabled: o.enabled === true,
+    amountUsd: posNumber(o.amountUsd, RISK_SIGNALS_OFF.amountUsd),
+    newAccountHours: posInt(o.newAccountHours, RISK_SIGNALS_OFF.newAccountHours),
+    hold: Object.freeze(RISK_SIGNALS.filter((s) => hold.includes(s))) as readonly RiskSignal[],
+  });
 }
 
 // Code-defined per-corridor DEFAULTS. EMPTY at ship time — every corridor
@@ -387,5 +413,6 @@ export function resolveCorridorRules(
     aml: resolveAml(override.aml, corridorDefault.aml),
     amlHolds,
     amlHoldRules: resolveAmlHoldRules(amlHolds, override.amlHoldRules ?? corridorDefault.amlHoldRules),
+    riskSignals: resolveRiskSignals(override.riskSignals ?? corridorDefault.riskSignals),
   };
 }
