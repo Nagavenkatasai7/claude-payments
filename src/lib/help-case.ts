@@ -1,4 +1,5 @@
 import type { Db, DbOrTx } from '@/db/client';
+import { createAuditRepo } from '@/db/repos/aux-repos';
 import { createOutboxRepo } from '@/db/repos/outbox-repo';
 import { createTicketRepo } from '@/db/repos/ticket-repo';
 import { createTransferRepo } from '@/db/repos/transfer-repo';
@@ -6,6 +7,8 @@ import { newTransferId } from './id';
 import { pokeWorker } from './outbox';
 import { HUMAN_HELP_CATEGORY, HUMAN_HELP_SUBJECT } from './ticket-category';
 import { boundUntrustedText } from './untrusted-text';
+import { regDueAt, type RegClass } from './reg-clocks';
+import type { ReportCode } from './error-notice';
 import type { PartnerId } from './types';
 
 /**
@@ -25,6 +28,14 @@ import type { PartnerId } from './types';
  *    ("Also reported: <reason>.", never the customer's text), an alert deduped
  *    help:<id>:<reason> and a fresh triage (triage:<id>:<reason>), so staff see
  *    the escalation. The same reason again adds nothing.
+ *  - fix pack 8 (R44, P9): the reason 'complaint' gives the case the regulatory
+ *    class complaint, 'unauthorised' the class fraud_report: urgent, a first
+ *    notice and a due date (reg-clocks), one ticket.reg_case.open audit row
+ *    (enum codes, ids and dates only). A reused case WITHOUT a class is stamped
+ *    once (first notice = its createdAt when it already recorded that reason,
+ *    else now); a reused case WITH a class keeps its first class and only ever
+ *    takes the EARLIER due date (tightenDueAt). Every other reason: no class,
+ *    today's exact case.
  * The caller pokes the worker AFTER its commit (openHelpCaseAndPoke does both),
  * so the worker never wakes for rows that may still roll back.
  *
@@ -57,7 +68,17 @@ export interface HelpCaseResult {
   partnerId: PartnerId;
   /** false ⇒ the open case was reused. */
   created: boolean;
+  /** Pack 8 (P9): the case's class and due date whenever the case HAS a class (new, stamped or reused). */
+  regClass?: RegClass;
+  dueAt?: string;
+  /** true when THIS call created a classed case or stamped the first class on a reused one (the event trigger of P13). */
+  caseCreatedOrStamped?: boolean;
 }
+
+/** Pack 8 (P9): the regulatory class of a help-case reason; every other reason has none. */
+const CLASS_OF: Partial<Record<HelpCaseReason, RegClass>> = { complaint: 'complaint', unauthorised: 'fraud_report' };
+/** The report code of the ticket.reg_case.open audit row (P5's ReportCode spelling). */
+const CODE_OF: Partial<Record<HelpCaseReason, ReportCode>> = { complaint: 'complaint', unauthorised: 'unauthorized' };
 
 const HELP_SUMMARY_MAX = 300;
 
@@ -100,6 +121,8 @@ function caseBody(input: OpenHelpCaseInput): string {
 /** Open (or reuse) the customer's help case inside the caller's transaction. Does NOT poke the worker. */
 export async function openHelpCase(tx: DbOrTx, input: OpenHelpCaseInput): Promise<HelpCaseResult> {
   const tickets = createTicketRepo(tx);
+  const cls = CLASS_OF[input.reason];
+  const nowMs = Date.now();
   const open = await tickets.findOpenHumanHelpCase(input.partnerId, input.phone);
   const ticket =
     open ??
@@ -111,7 +134,60 @@ export async function openHelpCase(tx: DbOrTx, input: OpenHelpCaseInput): Promis
       subject: HUMAN_HELP_SUBJECT,
       body: caseBody(input),
       category: HUMAN_HELP_CATEGORY,
+      // P9 step 1: a classed case (createTicket forces urgent).
+      ...(cls ? { regClass: cls, firstNoticeAt: new Date(nowMs), dueAt: new Date(regDueAt(cls, nowMs)) } : {}),
     }));
+
+  // Pack 8 (P9): the class writes, right after the find/create and before the outbox rows.
+  // The reasons are read BEFORE today's escalation note is appended (else the new reason would
+  // always look recorded).
+  const recorded = open && cls ? await recordedReasons(tx, open.id) : null;
+  let classOfCase: RegClass | undefined;
+  let dueAt: string | undefined;
+  let classStamped = false;
+  const recordAudit = async (c: RegClass, due: string, reused: boolean) => {
+    await createAuditRepo(tx).record({
+      partnerId: ticket.partnerId,
+      actor: 'system',
+      actorType: 'system',
+      action: 'ticket.reg_case.open',
+      subjectId: ticket.id,
+      meta: { regClass: c, code: CODE_OF[input.reason], dueAt: due, reused, stamped: true },
+    });
+  };
+  if (!open) {
+    if (cls) {
+      classOfCase = cls;
+      dueAt = ticket.dueAt ?? new Date(regDueAt(cls, nowMs)).toISOString();
+      classStamped = true;
+      await recordAudit(cls, dueAt, false);
+    }
+  } else if (open.regClass) {
+    // P9 step 3: the first class is kept; a classed reason only ever moves the due date EARLIER.
+    classOfCase = open.regClass;
+    dueAt = open.dueAt;
+    if (cls) {
+      await tickets.tightenDueAt(open.id, open.partnerId, new Date(regDueAt(cls, nowMs)));
+      dueAt = (await tickets.getTicket(open.id))?.dueAt ?? dueAt;
+    }
+  } else if (cls) {
+    // P9 step 2: stamp the first class; the first notice is the case's createdAt when the
+    // customer already reported this reason on it (critic P5).
+    const firstMs = recorded?.has(input.reason) ? Date.parse(open.createdAt) : nowMs;
+    const due = new Date(regDueAt(cls, firstMs));
+    if (await tickets.stampRegClass(open.id, open.partnerId, { regClass: cls, firstNoticeAt: new Date(firstMs), dueAt: due })) {
+      classOfCase = cls;
+      dueAt = due.toISOString();
+      classStamped = true;
+      await recordAudit(cls, dueAt, true);
+    } else {
+      // A concurrent report stamped it first: re-read its class and due date.
+      const now = await tickets.getTicket(open.id);
+      classOfCase = now?.regClass;
+      dueAt = now?.dueAt;
+    }
+  }
+
   // Enqueued on BOTH paths with dedupe keys: a crash between an older
   // non-transactional insert and its enqueues is healed by the next request,
   // and a repeat adds nothing (the outbox dedupe index is not partial on status).
@@ -122,7 +198,7 @@ export async function openHelpCase(tx: DbOrTx, input: OpenHelpCaseInput): Promis
     { message: `🙋 SmartRemit ops: a customer asked for a person — case ${ticket.id} (${ticket.partnerId}) is in the Tickets queue. Reason: ${input.reason}.` },
     { dedupeKey: `help:${ticket.id}` },
   );
-  if (open && REASON_RANK[input.reason] > REASON_RANK.question && !(await recordedReasons(tx, ticket.id)).has(input.reason)) {
+  if (open && REASON_RANK[input.reason] > REASON_RANK.question && !(recorded ?? (await recordedReasons(tx, ticket.id))).has(input.reason)) {
     await tickets.appendMessage({
       ticketId: ticket.id,
       actorType: 'system',
@@ -137,7 +213,15 @@ export async function openHelpCase(tx: DbOrTx, input: OpenHelpCaseInput): Promis
       { dedupeKey: `help:${ticket.id}:${input.reason}` },
     );
   }
-  return { caseId: ticket.id, partnerId: ticket.partnerId, created: !open };
+  // P13 case event (T18): enqueueCaseEventIfEligible(tx, ticket) when caseCreatedOrStamped
+  return {
+    caseId: ticket.id,
+    partnerId: ticket.partnerId,
+    created: !open,
+    // A classless case keeps today's exact result shape.
+    ...(classOfCase ? { regClass: classOfCase, ...(dueAt ? { dueAt } : {}) } : {}),
+    ...(classStamped ? { caseCreatedOrStamped: true } : classOfCase ? { caseCreatedOrStamped: false } : {}),
+  };
 }
 
 /** openHelpCase in its own transaction, then a worker poke once it has committed. */
