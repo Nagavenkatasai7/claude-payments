@@ -13,6 +13,8 @@ import {
   EMPTY_AML_EVIDENCE,
   loadHoldEvidence,
   partnerScreeningView,
+  recordScreeningView,
+  amlEvidenceDetailRows,
   toHoldReviewEvidence,
   type AmlSubKind,
   type HoldEvidence,
@@ -276,5 +278,37 @@ describe('toHoldReviewEvidence', () => {
     expect(toRepo).toBe(AML_SUB_KINDS);
     expect(AML_SUB_KINDS).toEqual(['aml_rule', 'aml_check_failed', 'scam_pattern', 'risk_signal']);
     expect(Object.isFrozen(AML_SUB_KINDS)).toBe(true);
+  });
+});
+
+describe('recordScreeningView (T12, P8, P28)', () => {
+  beforeEach(() => logSpy.logWarn.mockClear());
+
+  it('writes ONE own-tenant staff row { holdClasses, actorScope: partner } on the transfer and answers true', async () => {
+    const db = await freshDb();
+    await seedPartner(db, 'pa');
+    expect(await recordScreeningView(db, { partnerId: 'pa', actor: 'co-a', transferId: 'th1', holdClasses: ['kyc', 'aml'] })).toBe(true);
+    const rows = (await createAuditRepo(db).listByPartner('pa')).filter((r) => r.action === 'transfer.screening.view');
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ partnerId: 'pa', actor: 'co-a', actorType: 'staff', subjectId: 'th1', meta: { holdClasses: ['kyc', 'aml'], actorScope: 'partner' } });
+  });
+
+  it('a failed write never throws: false and one logWarn with the error NAME and transfer id only', async () => {
+    const err = new Error('insert failed: 15551239876');
+    err.name = 'NeonDbError';
+    const throwing = { insert() { throw err; } } as unknown as DbOrTx;
+    expect(await recordScreeningView(throwing, { partnerId: 'pa', actor: 'co-a', transferId: 'th1', holdClasses: [] })).toBe(false);
+    expect(logSpy.logWarn).toHaveBeenCalledTimes(1);
+    expect(logSpy.logWarn).toHaveBeenCalledWith('partner.screening-view', 'NeonDbError', { transferId: 'th1' });
+  });
+});
+
+describe('amlEvidenceDetailRows (T12)', () => {
+  it('closed labels only: the scam category label and the signal labels; none for the empty view', () => {
+    expect(amlEvidenceDetailRows(EMPTY_AML_EVIDENCE)).toEqual([]);
+    expect(amlEvidenceDetailRows({ kinds: ['scam_pattern', 'risk_signal'], rules: [], scamCategory: 'romance', riskSignals: ['first_transfer', 'new_account'] })).toEqual([
+      { label: 'Scam pattern', value: 'Person met online' },
+      { label: 'Warning signals', value: 'First transfer, New account' },
+    ]);
   });
 });

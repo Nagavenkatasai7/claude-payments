@@ -25,8 +25,10 @@ import { createAuditRepo, type AuditRow } from '@/db/repos/aux-repos';
 import type { HoldReviewEvidence } from '@/db/repos/hold-review-repo';
 import { AML_HOLD_RULES, isAmlHoldRule, type AmlHoldRule } from './aml-rules';
 import { boundHoldEvidence } from './hold-decision';
+import type { HoldClass } from './hold-queue';
+import { t, type MessageKey } from './i18n';
 import { logWarn } from './log';
-import { PURPOSE_RISK_CATEGORIES, type PurposeRiskCategory } from './purpose-detail';
+import { PURPOSE_RISK_CATEGORIES, PURPOSE_RISK_LABELS, type PurposeRiskCategory } from './purpose-detail';
 import { isRiskSignal, RISK_SIGNALS, type RiskSignal } from './risk-signals';
 import type { SanctionsDecision, ScreeningEvidence } from './sanctions/evidence';
 import { listScreenEvidence } from './sanctions/evidence-read';
@@ -198,4 +200,51 @@ export function toHoldReviewEvidence(e: HoldEvidence): HoldReviewEvidence {
   if (e.aml.riskSignals.length > 0) out.riskSignals = [...e.aml.riskSignals];
   if (e.aml.scamCategory !== null) out.scamCategory = e.aml.scamCategory;
   return boundHoldEvidence(out);
+}
+
+/**
+ * T12 (P8, P28): the `transfer.screening.view` row of ONE render of the
+ * evidence panel on /partner/transfers/[id] (like `pii.view`): actor the
+ * username, subject the transfer id, OWNER tenant, meta the row's hold classes
+ * (closed enum) and the scope. True when written. A failed write never throws:
+ * one logWarn (error NAME and transfer id only) and false, so the page shows
+ * no evidence without its record.
+ */
+export async function recordScreeningView(
+  db: DbOrTx,
+  i: { partnerId: PartnerId; actor: string; transferId: string; holdClasses: readonly HoldClass[] },
+): Promise<boolean> {
+  try {
+    await createAuditRepo(db).record({
+      partnerId: i.partnerId,
+      actor: i.actor,
+      actorType: 'staff',
+      action: 'transfer.screening.view',
+      subjectId: i.transferId,
+      meta: { holdClasses: [...i.holdClasses], actorScope: 'partner' },
+    });
+    return true;
+  } catch (err) {
+    logWarn('partner.screening-view', err instanceof Error ? err.name : 'error', { transferId: i.transferId });
+    return false;
+  }
+}
+
+/**
+ * T12: the labelled detail rows of the AML evidence (the closed scam-pattern
+ * label and the warning-signal labels), for the partner evidence panel. Closed
+ * labels only, never the customer's text. Built here, not in the page, so no
+ * file under src/app/partner names the signal field (tests/risk-signals-action
+ * "partners have no risk-signal writer").
+ */
+export function amlEvidenceDetailRows(aml: AmlEvidenceView): Array<{ label: string; value: string }> {
+  const rows: Array<{ label: string; value: string }> = [];
+  if (aml.scamCategory) rows.push({ label: t('partner.evidence.scamCategory'), value: PURPOSE_RISK_LABELS[aml.scamCategory] });
+  if (aml.riskSignals.length > 0) {
+    rows.push({
+      label: t('partner.evidence.riskSignals'),
+      value: aml.riskSignals.map((s) => t(`partner.evidence.signal.${s}` as MessageKey)).join(', '),
+    });
+  }
+  return rows;
 }
