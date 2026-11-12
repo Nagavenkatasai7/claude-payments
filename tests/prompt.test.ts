@@ -570,19 +570,39 @@ describe('SYSTEM_PROMPT — refunds & cancellations (shared region, both KYC var
     }
   });
 
-  it('use_recall → open a recall case but be honest recovery is NOT guaranteed', () => {
+  it('a reported problem → open_recall_dispute at any time, relay reply_to_customer, never impossible or guaranteed', () => {
     for (const p of variants) {
-      expect(p).toContain('use_recall');
-      expect(p).toContain('24-hour recall window');
-      expect(p).toContain('recovery is NOT guaranteed once funds are delivered');
-      expect(p).toContain('never promise a reversal, a chargeback, or an exception');
+      expect(p).toContain('call open_recall_dispute with the transfer and the reason at any time');
+      expect(p).toContain('Relay its reply_to_customer verbatim.');
+      expect(p).toContain('Never say recovery or a refund is impossible or guaranteed.');
+      expect(p).toContain('If request_refund returns error_code: use_recall, the money was already delivered');
+      expect(p).toContain('If open_recall_dispute answers which_transfer, ask the customer which transfer they mean.');
+      expect(p).toContain(
+        'If its result has cancel_possible, relay the case text and offer the cancel (request_refund, confirm only after a yes).',
+      );
     }
   });
 
-  it('recall_window_passed → delivered over 24h ago, apologize, never promise a reversal', () => {
+  it('no refusal wording is left for a delivered transfer', () => {
     for (const p of variants) {
-      expect(p).toContain('recall_window_passed');
-      expect(p).toContain('can no longer be recalled');
+      for (const gone of [
+        'recall_window_passed',
+        'can no longer be recalled',
+        'recovery is NOT guaranteed',
+        '24-hour recall window',
+        'cannot be pulled back',
+        'use_request_refund',
+      ]) {
+        expect(p).not.toContain(gone);
+      }
+    }
+  });
+
+  it('request_human_help: a reply_to_customer is relayed instead of the reply_hint', () => {
+    for (const p of variants) {
+      expect(p).toContain(
+        'relay its reply_hint, which quotes the case_id. Always give them the case_id. When it also returns reply_to_customer, relay that verbatim instead of the reply_hint.',
+      );
     }
   });
 
@@ -872,7 +892,9 @@ describe('Program-Fix 49B: prompt and tool schemas agree', () => {
       expect(p.split('If a tool replies asking which currency')).toHaveLength(2);
       // The unique lines of both old blocks survive the merge.
       expect(p).toContain('NEVER write, type, paraphrase, or guess any URL or link yourself.');
-      expect(p).toContain("Never tell a user they \"can't send\" because of where they are.");
+      expect(p).toContain(
+        "Never tell a user they \"can't send\" because of where they are, unless a tool's reply_to_customer says so; then relay it verbatim.",
+      );
       expect(p).toContain('amount_source_display');
     }
   });
@@ -902,7 +924,7 @@ describe('Program-Fix 49B (main-session decision): compliance and recall wording
     buildSystemPrompt({ brand: 'Acme Pay', kycGateActive: false, kycMode: 'delegated' }),
   ];
   const RULE =
-    'EXCEPTION (translation parked for counsel): compliance-block text (a tool result with blocked: true) and recall or refund text from request_refund or open_recall_dispute results are relayed VERBATIM IN ENGLISH, never translated.';
+    'EXCEPTION (translation parked for counsel): compliance-block text (a tool result with blocked: true), recall or refund text from request_refund or open_recall_dispute results, and the case text (reply_to_customer) of open_recall_dispute or request_human_help are relayed VERBATIM IN ENGLISH, never translated.';
   const PREFACE =
     'In the customer\'s language you may add ONE short line before it saying the following is required wording in English.';
 
