@@ -14,12 +14,15 @@ import { freshDb, seedLedgerSpend, seedPartner, seedSender } from './helpers-db'
 import { createIdempotencyRepo } from '@/db/repos/aux-repos';
 import { SendBusyError } from '@/lib/send-limits';
 import { DEFAULT_PARTNER_ID } from '@/lib/defaults';
+import type { RiskSignal } from '@/lib/risk-signals';
+import { draftWithRiskSignals } from './helpers-risk';
 
 const PHONE = '15551234567';
 
 // Fix pack 5 T21a (P21): the order of the originator write and the mint, and a write fault.
 // Both modules are the real ones (spread); the wrappers only record and, on demand, throw.
-const origSeam = vi.hoisted(() => ({ order: [] as string[], writeThrows: false }));
+// Fix pack 6 T27: `inputs` records each createTransfer input (the risk key).
+const origSeam = vi.hoisted(() => ({ order: [] as string[], writeThrows: false, inputs: [] as unknown[] }));
 vi.mock('@/lib/originator-info', async (orig) => {
   const real = await orig<typeof import('@/lib/originator-info')>();
   return {
@@ -37,6 +40,7 @@ vi.mock('@/lib/transfer-create', async (orig) => {
     ...real,
     createTransfer: async (...a: Parameters<typeof real.createTransfer>) => {
       origSeam.order.push('createTransfer');
+      origSeam.inputs.push(a[3]);
       return real.createTransfer(...a);
     },
   };
@@ -1196,5 +1200,65 @@ describe('finalizeDraftPayment: the originator data (pack 5 T21a)', { retry: 0 }
     const after = await stores.customerStore.getCustomer('default', PHONE);
     expect(after?.sourceOfFunds).toBe('employment'); // the EDD save ran after the mint
     expect(after?.residentialAddress).toBe(ADDRESS); // and kept the address
+  });
+});
+
+// Fix pack 6 (R48, P19 T27): a draft that carries riskSignals mints only with the
+// customer's tick (opts.risk). Without it the mint's RiskAckRequiredError becomes
+// 'risk_ack_required': nothing minted, the claim stays bound, the draft is kept.
+describe('finalizeDraftPayment: the risk tick (pack 6 T27)', { retry: 0 }, () => {
+  beforeEach(() => {
+    origSeam.order = [];
+    origSeam.inputs = [];
+  });
+  type MintInput = { risk?: { shown: string[]; acked: boolean; ackedAt?: string } };
+  const lastInput = () => origSeam.inputs[origSeam.inputs.length - 1] as MintInput;
+
+  it("a draft with riskSignals and no opts.risk -> { ok:false, error:'risk_ack_required' }; claim bound, no transfer, the draft still readable", async () => {
+    const stores = await buildStores();
+    const draftId = await makeDraft(stores, 200);
+    await draftWithRiskSignals(stores.draftStore, { draftId, riskSignals: ['first_transfer'] });
+    expect(await finalizeDraftPayment(stores, draftId)).toEqual({ ok: false, error: 'risk_ack_required' });
+    expect(lastInput().risk).toEqual({ shown: ['first_transfer'], acked: false });
+    const bound = await createIdempotencyRepo(stores.db).find(DEFAULT_PARTNER_ID, `draft:${draftId}`);
+    expect(bound).not.toBeNull();
+    expect(await stores.store.getTransfer(bound!)).toBeNull();
+    expect(await stores.store.getTransferCount('default', PHONE)).toBe(0);
+    expect(await stores.draftStore.getDraft(draftId)).not.toBeNull();
+  });
+
+  it('with opts.risk { acked:true, ackedAt } -> minted; createTransfer received risk { shown, acked:true, ackedAt }', async () => {
+    const stores = await buildStores();
+    const draftId = await makeDraft(stores, 200);
+    await draftWithRiskSignals(stores.draftStore, { draftId, riskSignals: ['first_transfer', 'chat_cue'] });
+    const ackedAt = new Date().toISOString();
+    const r = await finalizeDraftPayment(stores, draftId, undefined, { risk: { acked: true, ackedAt } });
+    expect(r.ok).toBe(true);
+    expect(lastInput().risk).toEqual({ shown: ['first_transfer', 'chat_cue'], acked: true, ackedAt });
+    expect(await stores.draftStore.getDraft(draftId)).toBeNull();
+  });
+
+  it('a draft without riskSignals and no opts.risk -> the createTransfer input has NO risk key', async () => {
+    const stores = await buildStores();
+    const draftId = await makeDraft(stores, 200);
+    expect((await finalizeDraftPayment(stores, draftId)).ok).toBe(true);
+    expect(Object.prototype.hasOwnProperty.call(lastInput(), 'risk')).toBe(false);
+  });
+
+  it('stored garbage in draft.riskSignals is filtered with isRiskSignal (garbage alone asks nothing)', async () => {
+    const stores = await buildStores();
+    const draftId = await makeDraft(stores, 200);
+    await draftWithRiskSignals(stores.draftStore, {
+      draftId, riskSignals: ['bogus', 'first_transfer', 42] as unknown as RiskSignal[],
+    });
+    const ackedAt = new Date().toISOString();
+    expect((await finalizeDraftPayment(stores, draftId, undefined, { risk: { acked: true, ackedAt } })).ok).toBe(true);
+    expect(lastInput().risk).toEqual({ shown: ['first_transfer'], acked: true, ackedAt });
+
+    const fresh = await buildStores(); // a second send the same day would hit the default cap
+    const other = await makeDraft(fresh, 100);
+    await draftWithRiskSignals(fresh.draftStore, { draftId: other, riskSignals: ['bogus'] as unknown as RiskSignal[] });
+    expect((await finalizeDraftPayment(fresh, other)).ok).toBe(true);
+    expect(Object.prototype.hasOwnProperty.call(lastInput(), 'risk')).toBe(false);
   });
 });

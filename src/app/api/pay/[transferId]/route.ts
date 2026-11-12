@@ -38,7 +38,8 @@ import { rescreenBeforePay } from '@/lib/pay-rescreen';
 import { railPartnerOf, realMoneyFor } from '@/lib/live-gate';
 import { resolveCorridorRules } from '@/lib/compliance-config';
 import { SENDS_PAUSED_MESSAGE } from '@/lib/flags';
-import { payAccountHolderInvalid, payApprovalNotRecorded, payNotAvailable, payOriginatorInvalid, payReloadRequired, payTemporarilyUnavailable, transferFunded } from '@/lib/pay-not-available';
+import { payAccountHolderInvalid, payApprovalNotRecorded, payNotAvailable, payOriginatorInvalid, payReloadRequired, payRiskAckRequired, payTemporarilyUnavailable, transferFunded } from '@/lib/pay-not-available';
+import { isRiskSignal } from '@/lib/risk-signals';
 import { payEsignGate } from '@/lib/pay-esign-gate';
 import { originatorViewFor, writeOriginatorInfo } from '@/lib/originator-info';
 import { validateSenderAddress, validateSenderDob } from '@/lib/travel-rule';
@@ -567,6 +568,19 @@ export async function POST(
       }
     }
 
+    // Fix pack 6 T27 (R48, P19, P7 step 7): the risk-warning tick, DRAFT branch
+    // only, after the account-holder rule and before the originator rule and the
+    // E-SIGN gate: no read (the draft is in hand), no code spent, nothing written.
+    // Only a draft that carries signals (stored garbage filtered) asks; a minted
+    // row and a consumed draft continuing on its transfer (otpDraft null) never
+    // do. An old tab (key absent) gets the neutral 409; a posted value that is not
+    // exactly true gets the new page's 400. Never at request_otp (P0 rule 12).
+    const riskShown = otpDraft ? (otpDraft.riskSignals ?? []).filter(isRiskSignal) : [];
+    if (riskShown.length > 0) {
+      if (!body.present.riskAck) return payReloadRequired(false);
+      if (!body.riskAck) return payRiskAckRequired();
+    }
+
     // Fix pack 5 T21a (P21, R38): the sender's home address and date of birth,
     // b2c on real money only, after the account-holder rule and still BEFORE the
     // code is checked. No read at all unless realMoneyForField (never true for
@@ -961,14 +975,23 @@ export async function POST(
       stores,
       transferId,
       bankDetails,
-      typedLegalName || hasOriginator
+      typedLegalName || hasOriginator || riskShown.length > 0
         ? {
             ...(typedLegalName ? { recipientLegalName: typedLegalName } : {}),
             ...(hasOriginator ? { originator } : {}),
+            // Fix pack 6 T27 (P19): the tick checked above, at the evidence time.
+            ...(riskShown.length > 0 ? { risk: { acked: true, ackedAt: new Date(evidenceAt).toISOString() } } : {}),
           }
         : undefined,
     );
     if (!result.ok) {
+      if (result.error === 'risk_ack_required') {
+        // Fix pack 6 T27 (P19): the mint's backstop refused a draft whose signals
+        // came without the tick. Nothing was minted or charged; the claim and the
+        // draft stay, so a reload shows the tick. No alert: nothing was recorded
+        // wrongly. A draft is never funded.
+        return payReloadRequired(false);
+      }
       if (result.error === 'originator_not_recorded') {
         // Fix pack 5 T21a (P21): the finalizer could not write the sender's
         // travel-rule data (it logged the error name). Nothing was claimed,

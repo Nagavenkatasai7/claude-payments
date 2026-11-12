@@ -3,7 +3,7 @@
 // [invoiceId]) routes. A field outside its surface is null and not present.
 // The new fields (disclosureHash, accountHolder; fix pack 5 adds senderAddress
 // and senderDob, transfer and link only; fix pack 6 adds esignConsentVersion,
-// transfer and link only) are optional for one release, so the `present` flags
+// transfer and link only, and riskAck, transfer only) are optional for one release, so the `present` flags
 // tell "not posted" from "posted but invalid".
 // Pure; never throws.
 import { isCleanName, NAME_MAX } from './untrusted-text';
@@ -25,6 +25,8 @@ export interface ParsedPayBody {
   senderDob: string | null;
   /** The E-SIGN consent version the page posted (transfer and link only; fix pack 6, P4). Kept as posted. */
   esignConsentVersion: string | null;
+  /** The risk-warning tick (transfer only; fix pack 6, P4): true only for the boolean `true`. */
+  riskAck: boolean;
   country: string | null;
   fields: Record<string, string> | null;
   ach: unknown;
@@ -37,6 +39,7 @@ export interface ParsedPayBody {
     senderAddress: boolean;
     senderDob: boolean;
     esignConsentVersion: boolean;
+    riskAck: boolean;
   };
 }
 
@@ -45,11 +48,11 @@ const DISCLOSURE_HASH = /^dh1:[0-9a-f]{64}$/;
 function emptyBody(): ParsedPayBody {
   return {
     action: null, otp: '', disclosureVersion: null, disclosureHash: null, accountHolder: null,
-    senderAddress: null, senderDob: null, esignConsentVersion: null,
+    senderAddress: null, senderDob: null, esignConsentVersion: null, riskAck: false,
     country: null, fields: null, ach: null, fundingMethod: null, quoteLockedAt: null,
     present: {
       disclosureVersion: false, disclosureHash: false, accountHolder: false, senderAddress: false, senderDob: false,
-      esignConsentVersion: false,
+      esignConsentVersion: false, riskAck: false,
     },
   };
 }
@@ -84,6 +87,7 @@ export function parsePayBody(raw: unknown, surface: PaySurface): ParsedPayBody {
       senderAddress: originatorSurface && typeof o.senderAddress === 'string' ? o.senderAddress.trim() : null,
       senderDob: originatorSurface && typeof o.senderDob === 'string' ? o.senderDob.trim() : null,
       esignConsentVersion: disclosure ? str(o.esignConsentVersion) : null,
+      riskAck: transfer && o.riskAck === true,
       country: transfer || b2b ? str(o.country) : null,
       fields: transfer || b2b ? stringFields(o.fields) : null,
       ach: transfer ? (o.ach ?? null) : null,
@@ -96,6 +100,7 @@ export function parsePayBody(raw: unknown, surface: PaySurface): ParsedPayBody {
         senderAddress: originatorSurface && has('senderAddress'),
         senderDob: originatorSurface && has('senderDob'),
         esignConsentVersion: disclosure && has('esignConsentVersion'),
+        riskAck: transfer && has('riskAck'),
       },
     };
   } catch {

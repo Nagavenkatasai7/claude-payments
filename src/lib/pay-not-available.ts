@@ -9,6 +9,7 @@ import {
   PAY_SENDER_ADDRESS_INVALID_COPY,
   PAY_SENDER_DOB_INVALID_COPY,
 } from './pay-outcome';
+import { PAY_RISK_ACK_REQUIRED_COPY } from './legal/risk-warning';
 import type { Transfer } from './types';
 
 /**
@@ -111,5 +112,18 @@ export function payTemporarilyUnavailable(): NextResponse {
   return NextResponse.json(
     { ok: false, error: 'Temporary problem. Please try again in a moment.', reason: 'temporarily_unavailable' },
     { status: 503 },
+  );
+}
+
+/**
+ * Fix pack 6 (P19, T27): a draft that showed the risk warning was posted with
+ * `riskAck` present but not exactly `true` (the box was not ticked). Answered
+ * before the code is checked: nothing was consumed, written or charged. The copy
+ * never says why the warning was shown (P0 rule 11).
+ */
+export function payRiskAckRequired(): NextResponse {
+  return NextResponse.json(
+    { ok: false, error: PAY_RISK_ACK_REQUIRED_COPY, reason: 'risk_ack_required' },
+    { status: 400 },
   );
 }

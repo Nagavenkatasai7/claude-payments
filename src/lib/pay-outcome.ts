@@ -1,4 +1,5 @@
 import { REWARD_ENDED_MESSAGE } from './rewards/copy';
+import { PAY_RISK_ACK_REQUIRED_COPY } from './legal/risk-warning';
 // Review S2 (Program-Fix 32): the pay routes answer a POST on a row that is no
 // longer awaiting payment with 200 { ok: true, status } (ruling 7 keeps that
 // contract fixed — api/pay/[transferId]/route.ts refuseUnlessAwaiting). A
@@ -115,6 +116,8 @@ export function payErrorMessage(body: unknown): string | null {
   if (b.reason === 'reward_ended') return PAY_REWARD_ENDED_COPY;
   if (b.reason === 'reload_required') return b.funded === true ? PAY_RELOAD_REQUIRED_FUNDED_COPY : PAY_RELOAD_REQUIRED_COPY;
   if (b.reason === 'not_available') return PAY_NOT_AVAILABLE_COPY;
+  // Fix pack 6 (P4, T27): the draft pay page's risk-warning box was not ticked.
+  if (b.reason === 'risk_ack_required') return PAY_RISK_ACK_REQUIRED_COPY;
   if (b.reason === 'approval_not_recorded') {
     return b.funded === true ? PAY_APPROVAL_NOT_RECORDED_FUNDED_COPY : PAY_APPROVAL_NOT_RECORDED_COPY;
   }

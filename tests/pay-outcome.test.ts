@@ -6,6 +6,7 @@ import {
   PAY_RELOAD_REQUIRED_FUNDED_COPY, PAY_APPROVAL_NOT_RECORDED_FUNDED_COPY,
 } from '@/lib/pay-outcome';
 import { FX_UNAVAILABLE_MESSAGE } from '@/lib/rate';
+import { PAY_RISK_ACK_REQUIRED_COPY } from '@/lib/legal/risk-warning';
 
 // Review S2 (Program-Fix 32): the pay route's contract is fixed (ruling 7) — a
 // POST on a row that is no longer awaiting payment answers 200
@@ -46,6 +47,10 @@ describe('payErrorMessage', () => {
     expect(m).toBe(PAY_TEMPORARY_COPY);
     expect(m).toMatch(/try again/i);
     expect(m).not.toMatch(/charged/i);
+  });
+
+  it('fix pack 6 (P4, T27): risk_ack_required -> PAY_RISK_ACK_REQUIRED_COPY', () => {
+    expect(payErrorMessage({ ok: false, reason: 'risk_ack_required', error: 'x' })).toBe(PAY_RISK_ACK_REQUIRED_COPY);
   });
 
   it('never echoes server text and returns null for anything else', () => {
