@@ -41,6 +41,10 @@ export const PAY_RECEIPT_PRINT_HINT = "To print or save this receipt, use your b
 export const PAY_RECEIPT_NOT_COMPLETED_COPY = 'This transfer was not completed. Nothing was charged.';
 export const PAY_RECEIPT_REFUNDED_COPY = 'This payment was refunded.';
 export const PAY_RECEIPT_CANCELLED_CHARGED_COPY = 'This transfer was not completed. Any payment will be returned.';
+// Review round 1 RC1 (D2): a cancelled charged row with no refund in flight (partner-funded,
+// a refund requested or failed): nothing promises a return the platform has not started.
+export const PAY_RECEIPT_CANCELLED_CONTACT_COPY =
+  'This transfer was not completed. If you paid, reply in the WhatsApp chat and we will help you.';
 
 // Program-Fix 14 follow-up: the two pay refusals the customer can fix in the
 // WhatsApp chat get their own copy; every other failure keeps the form's

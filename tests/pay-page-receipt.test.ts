@@ -11,6 +11,7 @@ import {
 } from '@/lib/remittance-disclosure';
 import {
   PAY_RECEIPT_CANCELLED_CHARGED_COPY,
+  PAY_RECEIPT_CANCELLED_CONTACT_COPY,
   PAY_RECEIPT_NOT_COMPLETED_COPY,
   PAY_RECEIPT_PRINT_HINT,
   PAY_RECEIPT_REFUNDED_COPY,
@@ -293,8 +294,8 @@ describe('/pay/[transferId] receipt states (pack 6 T11, P11)', { retry: 0 }, () 
     expect(html).not.toContain('Payment complete');
   });
 
-  it('cancelled 22-char row with paidAt -> the cancelled-charged copy, no receipt, no form, no Payment complete', async () => {
-    current = { status: 'cancelled' };
+  it("cancelled 22-char row with paidAt and a refund 'pending' -> the cancelled-charged copy, no receipt, no form, no Payment complete", async () => {
+    current = { status: 'cancelled', refundStatus: 'pending' };
     const html = await render();
     expect(html).toContain(PAY_RECEIPT_CANCELLED_CHARGED_COPY);
     expect(html).not.toContain('pay-receipt');
@@ -302,6 +303,44 @@ describe('/pay/[transferId] receipt states (pack 6 T11, P11)', { retry: 0 }, () 
     expect(html).not.toContain('Payment complete');
     expect(html).not.toContain('provider-line');
     expect(getDisclosureSnapshot).not.toHaveBeenCalled();
+  });
+
+  // review round 1 RC1 (D2, D3)
+  it('cancelled partner-funded row (paidAt, refund none) -> the contact copy, never "will be returned"', async () => {
+    current = { status: 'cancelled', refundStatus: 'none' };
+    const html = await render();
+    expect(html).toContain(PAY_RECEIPT_CANCELLED_CONTACT_COPY);
+    expect(html).not.toContain('will be returned');
+    expect(html).not.toContain('pay-receipt');
+    expect(html).not.toContain(HINT_HTML);
+    expect(html).not.toContain('Payment complete');
+    expect(getDisclosureSnapshot).not.toHaveBeenCalled();
+  });
+
+  it("cancelled charged row with complianceStatus 'blocked' -> 'Processing' only, neither cancelled copy", async () => {
+    for (const refundStatus of ['pending', 'none', 'failed'] as const) {
+      current = { status: 'cancelled', complianceStatus: 'blocked', refundStatus };
+      const html = await render();
+      expect(html, refundStatus).toContain('Processing');
+      expect(html, refundStatus).not.toContain(PAY_RECEIPT_CANCELLED_CHARGED_COPY);
+      expect(html, refundStatus).not.toContain(PAY_RECEIPT_CANCELLED_CONTACT_COPY);
+      expect(html, refundStatus).not.toContain('will be returned');
+      expect(html, refundStatus).not.toContain('pay-receipt');
+      expect(html, refundStatus).not.toContain(HINT_HTML);
+      expect(html, refundStatus).not.toContain('money sent');
+    }
+    expect(getDisclosureSnapshot).not.toHaveBeenCalled();
+  });
+
+  // review round 1 RC1 (D1)
+  it("paid row with complianceStatus 'blocked' -> 'Processing' only, no receipt, no money sent", async () => {
+    current = { status: 'paid', complianceStatus: 'blocked' };
+    const html = await render();
+    expect(html).toContain('Processing');
+    expect(html).not.toContain('data-testid="pay-receipt"');
+    expect(html).not.toContain('money sent');
+    expect(html).not.toContain('Payment complete');
+    expect(html).not.toContain(HINT_HTML);
   });
 
   it("cancelled with refundStatus 'completed' -> the refunded copy", async () => {

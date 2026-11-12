@@ -13,7 +13,8 @@ export type PayReceiptState =
   | 'held_no_receipt'
   | 'not_completed'
   | 'refunded'
-  | 'cancelled_charged';
+  | 'cancelled_charged'
+  | 'cancelled_contact';
 
 export function payReceiptState(
   t: Pick<Transfer, 'id' | 'status' | 'refundStatus' | 'paidAt' | 'fundingState' | 'complianceStatus' | 'environment'>,
@@ -22,7 +23,12 @@ export function payReceiptState(
   if (t.status === 'cancelled') {
     const charged = !!t.paidAt || (t.refundStatus ?? 'none') !== 'none';
     if (!isOpaqueTransferId(t.id) || !charged) return null;
-    return t.refundStatus === 'completed' ? 'refunded' : 'cancelled_charged';
+    // Review round 1 RC1 (D2): a sanctions-blocked row never promises a return (the partner's
+    // compliance officer decides); only a refund in flight says "will be returned".
+    if (t.refundStatus === 'completed') return 'refunded';
+    if (t.complianceStatus === 'blocked') return 'held_no_receipt';
+    if (t.refundStatus === 'pending') return 'cancelled_charged';
+    return 'cancelled_contact'; // 'none' with paidAt (partner-funded), 'requested', 'failed'
   }
   if (t.environment === 'test') return 'legacy_complete';
   if (!isOpaqueTransferId(t.id)) return 'legacy_complete';
@@ -30,5 +36,7 @@ export function payReceiptState(
   if (t.fundingState === 'returned') return 'held_no_receipt';
   if (t.status === 'blocked') return t.paidAt ? 'held_no_receipt' : 'not_completed';
   if (t.status === 'in_review') return t.complianceStatus === 'blocked' ? 'held_no_receipt' : 'held_receipt';
+  // Review round 1 RC1 (D1): the worker's list heal keeps a matched row 'paid' + 'blocked'.
+  if (t.complianceStatus === 'blocked') return 'held_no_receipt';
   return 'complete_receipt';
 }

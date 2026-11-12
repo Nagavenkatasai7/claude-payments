@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import {
   PAY_HELD_LABEL,
   PAY_RECEIPT_CANCELLED_CHARGED_COPY,
+  PAY_RECEIPT_CANCELLED_CONTACT_COPY,
   PAY_RECEIPT_NOT_COMPLETED_COPY,
   PAY_RECEIPT_PRINT_HINT,
   PAY_RECEIPT_REFUNDED_COPY,
@@ -31,6 +32,10 @@ describe('pay receipt copy (pack 6 P20)', () => {
     expect(PAY_RECEIPT_NOT_COMPLETED_COPY).toBe('This transfer was not completed. Nothing was charged.');
     expect(PAY_RECEIPT_REFUNDED_COPY).toBe('This payment was refunded.');
     expect(PAY_RECEIPT_CANCELLED_CHARGED_COPY).toBe('This transfer was not completed. Any payment will be returned.');
+    // review round 1 RC1 (D2): a cancelled charged row with no refund in flight
+    expect(PAY_RECEIPT_CANCELLED_CONTACT_COPY).toBe(
+      'This transfer was not completed. If you paid, reply in the WhatsApp chat and we will help you.',
+    );
   });
 
   it('no line says review, check, compliance or held (no tipping off)', () => {
@@ -40,6 +45,7 @@ describe('pay receipt copy (pack 6 P20)', () => {
       PAY_RECEIPT_NOT_COMPLETED_COPY,
       PAY_RECEIPT_REFUNDED_COPY,
       PAY_RECEIPT_CANCELLED_CHARGED_COPY,
+      PAY_RECEIPT_CANCELLED_CONTACT_COPY,
       PAY_HELD_LABEL,
     ]) {
       for (const w of ['review', 'check', 'compliance', 'held']) expect(s.toLowerCase(), s).not.toContain(w);

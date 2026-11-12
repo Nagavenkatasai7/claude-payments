@@ -23,8 +23,50 @@ describe('payReceiptState (pack 6 P11)', () => {
     expect(payReceiptState(row({ status: 'awaiting_payment' }))).toBe('form');
   });
 
-  it('cancelled 22-char with paidAt -> cancelled_charged', () => {
-    expect(payReceiptState(row({ status: 'cancelled', paidAt: PAID_AT }))).toBe('cancelled_charged');
+  it("cancelled 22-char with paidAt and refundStatus 'pending' -> cancelled_charged", () => {
+    expect(payReceiptState(row({ status: 'cancelled', paidAt: PAID_AT, refundStatus: 'pending' }))).toBe('cancelled_charged');
+  });
+
+  // review round 1 RC1 (D2): no refund in flight (partner-funded, requested, failed) -> contact copy
+  it("cancelled 22-char charged, refund 'none' (paidAt) / 'requested' / 'failed' -> cancelled_contact", () => {
+    expect(payReceiptState(row({ status: 'cancelled', paidAt: PAID_AT }))).toBe('cancelled_contact');
+    expect(payReceiptState(row({ status: 'cancelled', paidAt: PAID_AT, refundStatus: 'none' }))).toBe('cancelled_contact');
+    expect(payReceiptState(row({ status: 'cancelled', paidAt: PAID_AT, refundStatus: 'requested' }))).toBe('cancelled_contact');
+    expect(payReceiptState(row({ status: 'cancelled', refundStatus: 'requested' }))).toBe('cancelled_contact');
+    expect(payReceiptState(row({ status: 'cancelled', paidAt: PAID_AT, refundStatus: 'failed' }))).toBe('cancelled_contact');
+    expect(payReceiptState(row({ status: 'cancelled', refundStatus: 'failed' }))).toBe('cancelled_contact');
+  });
+
+  // review round 1 RC1 (D2): a sanctions-blocked cancelled charged row never promises a return
+  it("cancelled 22-char charged with complianceStatus 'blocked' -> held_no_receipt unless refunded", () => {
+    for (const refundStatus of ['pending', 'none', 'failed', 'requested'] as const) {
+      expect(
+        payReceiptState(row({ status: 'cancelled', paidAt: PAID_AT, refundStatus, complianceStatus: 'blocked' })),
+        refundStatus,
+      ).toBe('held_no_receipt');
+    }
+    expect(payReceiptState(row({ status: 'cancelled', paidAt: PAID_AT, complianceStatus: 'blocked' }))).toBe('held_no_receipt');
+    expect(
+      payReceiptState(row({ status: 'cancelled', paidAt: PAID_AT, refundStatus: 'completed', complianceStatus: 'blocked' })),
+    ).toBe('refunded');
+  });
+
+  it("cancelled never charged, or a legacy id, with complianceStatus 'blocked' -> null", () => {
+    expect(payReceiptState(row({ status: 'cancelled', complianceStatus: 'blocked' }))).toBeNull();
+    expect(payReceiptState(row({ id: LEGACY, status: 'cancelled', paidAt: PAID_AT, complianceStatus: 'blocked' }))).toBeNull();
+  });
+
+  // review round 1 RC1 (D1): the list heal keeps a matched row 'paid' with complianceStatus 'blocked'
+  it("paid / delivered with complianceStatus 'blocked' -> held_no_receipt (never complete_receipt)", () => {
+    expect(payReceiptState(row({ status: 'paid', paidAt: PAID_AT, complianceStatus: 'blocked' }))).toBe('held_no_receipt');
+    expect(payReceiptState(row({ status: 'delivered', paidAt: PAID_AT, complianceStatus: 'blocked' }))).toBe('held_no_receipt');
+  });
+
+  it("a 'test' row and a legacy id with complianceStatus 'blocked' keep legacy_complete", () => {
+    expect(payReceiptState(row({ status: 'paid', paidAt: PAID_AT, environment: 'test', complianceStatus: 'blocked' }))).toBe(
+      'legacy_complete',
+    );
+    expect(payReceiptState(row({ id: LEGACY, status: 'paid', paidAt: PAID_AT, complianceStatus: 'blocked' }))).toBe('legacy_complete');
   });
 
   it("cancelled 22-char with refundStatus 'pending' and no paidAt -> cancelled_charged", () => {

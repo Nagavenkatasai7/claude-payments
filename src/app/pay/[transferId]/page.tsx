@@ -46,6 +46,7 @@ import { payReceiptState, type PayReceiptState } from '@/lib/pay-receipt-state';
 import { FIXED_REPLIES } from '@/lib/hold-replies';
 import {
   PAY_RECEIPT_CANCELLED_CHARGED_COPY,
+  PAY_RECEIPT_CANCELLED_CONTACT_COPY,
   PAY_RECEIPT_NOT_COMPLETED_COPY,
   PAY_RECEIPT_PRINT_HINT,
   PAY_RECEIPT_REFUNDED_COPY,
@@ -103,6 +104,28 @@ function ChargedCancelledSheet({ copy }: { copy: string }) {
       <div className={sheetClasses}>
         <DarkSheetBrand />
         <h1 className={headingClasses}>{copy}</h1>
+      </div>
+    </main>
+  );
+}
+
+/** Fix pack 6 (P11): the label-only held line ('Processing'); no receipt, no print hint. */
+function HeldLabelLine() {
+  return <p className={neutralClasses}>{FIXED_REPLIES.label_held}</p>;
+}
+
+/**
+ * Review round 1 RC1 (D3): a charged cancelled row that is sanctions-blocked: the same chrome
+ * and the same label-only line as the non-cancelled held_no_receipt sheet; no snapshot, payout
+ * or provider read, and no word on whether any money comes back.
+ */
+function HeldCancelledSheet() {
+  return (
+    <main className={pageClasses}>
+      <div className={sheetClasses}>
+        <DarkSheetBrand />
+        <h1 className={headingClasses}>Secure payment</h1>
+        <HeldLabelLine />
       </div>
     </main>
   );
@@ -280,7 +303,19 @@ async function renderPayPage(transferId: string) {
     if (transfer.status === 'cancelled') {
       const st = payReceiptState(transfer);
       if (st === null || (await createTransferRepo(getDb()).isPaymentLinkTransfer(transfer.id))) return <InactiveSheet />;
-      return <ChargedCancelledSheet copy={st === 'refunded' ? PAY_RECEIPT_REFUNDED_COPY : PAY_RECEIPT_CANCELLED_CHARGED_COPY} />;
+      switch (st) {
+        case 'refunded':
+          return <ChargedCancelledSheet copy={PAY_RECEIPT_REFUNDED_COPY} />;
+        case 'cancelled_charged':
+          return <ChargedCancelledSheet copy={PAY_RECEIPT_CANCELLED_CHARGED_COPY} />;
+        case 'cancelled_contact':
+          return <ChargedCancelledSheet copy={PAY_RECEIPT_CANCELLED_CONTACT_COPY} />;
+        case 'held_no_receipt':
+          return <HeldCancelledSheet />;
+        default:
+          // payReceiptState answers no other state for a cancelled row; fail to the dead link.
+          return <InactiveSheet />;
+      }
     }
     // Batch B2: a payment-link transfer is paid only on its link page
     // (/pay/l/[token]), which re-runs the link checks; the POST here refuses it
@@ -563,7 +598,7 @@ async function renderPayPage(transferId: string) {
         {receiptBlock}
       </>
     ) : receiptState === 'held_no_receipt' ? (
-      <p className={neutralClasses}>{FIXED_REPLIES.label_held}</p>
+      <HeldLabelLine />
     ) : receiptState === 'not_completed' ? (
       <p className={neutralClasses}>{PAY_RECEIPT_NOT_COMPLETED_COPY}</p>
     ) : receiptState === 'refunded' ? (
