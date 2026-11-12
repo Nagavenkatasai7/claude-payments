@@ -57,14 +57,18 @@ vi.mock('@/db/repos/integrations-repo', async (orig) => {
   };
 });
 
-// The sender flags read: a switch that makes it throw.
-const flagsRead = vi.hoisted(() => ({ throws: false }));
+// The sender flags read: a switch that makes it throw before any SQL, and (F4, early review EE2)
+// one that runs a FAILING statement on the caller's handle first (a real SQL failure: Postgres
+// aborts the transaction or savepoint it ran in), then delegates.
+const flagsRead = vi.hoisted(() => ({ throws: false, sqlFails: false }));
 vi.mock('@/db/repos/customer-repo', async (orig) => {
   const real = await orig<typeof import('@/db/repos/customer-repo')>();
+  const { sql: q } = await import('drizzle-orm');
   return {
     ...real,
     readSenderScreeningFlags: async (...a: Parameters<typeof real.readSenderScreeningFlags>) => {
       if (flagsRead.throws) throw new Error('flags read failed');
+      if (flagsRead.sqlFails) await a[0].execute(q`select 1/0`);
       return real.readSenderScreeningFlags(...a);
     },
   };
@@ -104,6 +108,7 @@ beforeEach(async () => {
   railRead.calls = 0;
   railRead.throws = false;
   flagsRead.throws = false;
+  flagsRead.sqlFails = false;
 });
 
 /** An uncertified owner on an http (real-money) rail. */
@@ -278,6 +283,33 @@ describe('rejectTransfer: the funds rule (D7)', { retry: 0 }, () => {
     expect((await load(t.id)).refundStatus ?? 'none').toBe('none');
     expect(await refunds()).toEqual([]);
     expect(await byKey(`rejectfunds:${t.id}`)).toHaveLength(1);
+  });
+
+  it('8b2 (F4, EE2): the flags SELECT really fails in the transaction: the reject still commits, the funds are kept, rejectfunds + rejectmsg', async () => {
+    await httpOwner();
+    const t = await heldRowFor(db, 'acme', 'kyc', { id: 'fr_8b2', fundingRef: 'ch_fr_8b2' });
+    flagsRead.sqlFails = true;
+    await rejectTransfer(store, db, t.id, REJ);
+    expect(await load(t.id)).toMatchObject({ status: 'cancelled' });
+    expect((await load(t.id)).refundStatus ?? 'none').toBe('none');
+    expect(await refunds()).toEqual([]);
+    expect(await byKey(`rejectfunds:${t.id}`)).toHaveLength(1);
+    const msg = await byKey(`rejectmsg:${t.id}`);
+    expect(msg).toHaveLength(1);
+    expect(msg[0].kind).toBe('whatsapp.text');
+    expect(await rejectMeta(t.id)).toMatchObject({ fundsKept: true, refundStatus: 'none' });
+  });
+
+  it('8b3 (F4, EE2): the same real failure on the REVIEW path (certified owner): the reject commits with the funds kept and its review row', async () => {
+    await certifiedQueuePartner(db);
+    const t = await heldRowFor(db, 'acme', 'blocked', { id: 'fr_8b3', fundingRef: 'ch_fr_8b3' });
+    const review = await platformReviewFor(db, t.id, REJ, { holdClass: 'blocked', disposition: 'confirmed_match' });
+    flagsRead.sqlFails = true; // after platformReviewFor (it reads the flags itself)
+    await rejectTransfer(store, db, t.id, REJ, undefined, review);
+    expect((await load(t.id)).status).toBe('cancelled');
+    expect(await refunds()).toEqual([]);
+    expect(await byKey(`rejectfunds:${t.id}`)).toHaveLength(1);
+    expect(await byKey(`rejectmsg:${t.id}`)).toHaveLength(1);
   });
 
   it('8c: no customer row for the sender (a partner-API sender), kyc-only row: refund as today (nothing to read is not a hit)', async () => {

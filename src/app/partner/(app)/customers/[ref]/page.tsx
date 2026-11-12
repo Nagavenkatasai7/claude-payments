@@ -24,7 +24,11 @@ import { decodeTransferCursor, encodeTransferCursor } from '@/lib/partner-transf
 import { PARTNER_ADMIN } from '@/lib/partner-access';
 import { PLATFORM_SEND_LIMITS, resolveEffectiveSendLimits, type SendLimitSource } from '@/lib/send-limits';
 import { partnerMayWriteOverride } from '@/lib/partner-send-limits';
-import { partnerKycOfferedDecisions } from '@/lib/partner-reviews';
+import { partnerKycFlag, partnerKycOfferedDecisions, type KycDecision } from '@/lib/partner-reviews';
+import { isQualifiedComplianceUser, partnerDecidesKyc } from '@/lib/partner-decision-scope';
+import { readSenderScreeningFlags } from '@/db/repos/customer-repo';
+import type { PartnerCtx } from '@/lib/partner-access';
+import type { Customer, Partner } from '@/lib/types';
 import { formatMoney } from '@/lib/ui/money';
 import { t, type MessageKey } from '@/lib/i18n';
 import { Card, MaskedValue, PageHeader, buttonVariants } from '@/components/ds';
@@ -32,6 +36,7 @@ import { PARTNER_ROUTES } from '../../../routes';
 import { revealCustomerFieldAction } from './actions';
 import { LimitForm } from './limit-form';
 import { KycDecisionDialog } from './kyc-decision-dialog';
+import { KycComplianceDialog } from './kyc-compliance-dialog';
 import { CustomerTransfers, toCustomerTransferRow } from './customer-transfers';
 import { EsignConsentBlock, loadEsignConsentView } from './esign-block';
 
@@ -64,6 +69,47 @@ const KYC_TRAIL_LIMIT = 50;
 /** Lost-features p2 A10: transfers shown per page on the customer page (keyset "Older" link). */
 const CUSTOMER_TRANSFERS_PAGE = 25;
 
+/**
+ * Fix pack 7 T26 (P24): the KYC block of a partner that DECIDES KYC (partnerDecidesKyc). Only a
+ * qualified compliance user (a fresh staff read: listed, active admin/agent of this tenant, two-step
+ * enrolled) is offered decisions or sees the customer's own PEP-only flag; a watchlist or stamp-only
+ * flag is SmartRemit's (one neutral note). The flags are read as stored (the watchlist stamp
+ * included), and every read failure fails closed (not qualified / 'platform').
+ */
+type DecidingKyc =
+  | { qualified: false }
+  | { qualified: true; flag: 'platform' }
+  | { qualified: true; flag: 'none' | 'pep'; decisions: KycDecision[]; flaggedAt: string };
+
+async function loadDecidingKyc(partner: Partner, ctx: PartnerCtx, customer: Customer, mfaEnrolled: boolean): Promise<DecidingKyc> {
+  let qualified = false;
+  try {
+    const staff = await getAuthStore().getStaff(ctx.username);
+    const fact = staff
+      ? { username: staff.username, partnerId: staff.partnerId ?? null, role: staff.role, active: staff.status !== 'suspended' }
+      : null;
+    qualified = fact !== null && fact.username === ctx.username && isQualifiedComplianceUser(partner, fact, mfaEnrolled);
+  } catch {
+    qualified = false;
+  }
+  if (!qualified) return { qualified: false };
+  let flags: Awaited<ReturnType<typeof readSenderScreeningFlags>>;
+  try {
+    flags = await readSenderScreeningFlags(getDb(), ctx.partnerId, customer.senderPhone);
+  } catch {
+    return { qualified: true, flag: 'platform' };
+  }
+  const screened = { ...customer, ...(flags ?? {}) };
+  const flag = partnerKycFlag(screened);
+  if (flag === 'platform') return { qualified: true, flag };
+  return {
+    qualified: true,
+    flag,
+    decisions: partnerKycOfferedDecisions(partner, screened, { qualified: true }),
+    flaggedAt: flags?.screeningFlaggedAt ? flags.screeningFlaggedAt.toISOString() : '',
+  };
+}
+
 function Section({ title, children }: { title: string; children: ReactNode }) {
   return (
     <Card as="section" className="p-5 sm:p-6">
@@ -81,6 +127,9 @@ function Section({ title, children }: { title: string; children: ReactNode }) {
  * caught, so no record means no page. Everything shown comes from customerDetailView: masked values
  * and closed labels only. No screening detail, rejection reason or ID number is shown. A value is
  * revealed only through the audited action; the client receives the masked string, never the value.
+ * Fix pack 7 T26 (P24): the one exception to "no screening detail" is a partner that decides KYC:
+ * ITS qualified compliance users see their own customer's PEP-only flag (a licensee's own
+ * decision); nobody else sees a flag, and for every other partner the block is today's.
  */
 export default async function PartnerCustomerDetailPage({
   params,
@@ -143,6 +192,7 @@ export default async function PartnerCustomerDetailPage({
   // or without a hit). decideKycAction re-checks everything. When nothing is offered ('ours' mode or
   // a no-op) the admin sees ONE neutral line.
   const kycDecisions = canEditLimits ? partnerKycOfferedDecisions(partner, customer) : [];
+  const deciding = partner && partnerDecidesKyc(partner) ? await loadDecidingKyc(partner, ctx, customer, mfaEnrolled) : null;
   const override = customer.sendLimitOverride;
   const esignView = await loadEsignConsentView(ctx.partnerId, customer.senderPhone); // Fix pack 6 TC-T1
   const partnerSetExpiry =
@@ -216,7 +266,30 @@ export default async function PartnerCustomerDetailPage({
             )}
             <p className="mt-2 text-[12.5px] text-ds-ink-subtle">{t('partner.customers.trail.note')}</p>
           </div>
-          {canEditLimits ? (
+          {deciding && (canEditLimits || deciding.qualified) ? (
+            <div className="mt-4 border-t border-ds-border pt-4" data-testid="partner-kyc-decision">
+              <h3 className="mb-2 text-[15px] font-bold text-ds-ink">{t('partner.kyc.decisionTitle')}</h3>
+              {!deciding.qualified ? (
+                <p role="note" className="text-[14px] text-ds-ink-muted">
+                  {t('partner.kyc.notCompliance')}
+                </p>
+              ) : deciding.flag === 'platform' ? (
+                <p role="note" className="text-[14px] text-ds-ink-muted">
+                  {t('partner.kyc.platformDecides')}
+                </p>
+              ) : deciding.decisions.length > 0 ? (
+                <>
+                  <p className="mb-3 text-[13px] text-ds-ink-muted">{t('partner.kyc.decisionSub')}</p>
+                  {deciding.flag === 'pep' ? <p className="mb-3 text-[13.5px] font-semibold text-ds-ink">{t('partner.kyc.pepFlagNote')}</p> : null}
+                  <KycComplianceDialog customerRef={view.ref} decisions={deciding.decisions} pepFlag={deciding.flag === 'pep'} flaggedAt={deciding.flaggedAt} />
+                </>
+              ) : (
+                <p role="note" className="text-[14px] text-ds-ink-muted">
+                  {t('partner.reviews.neutral')}
+                </p>
+              )}
+            </div>
+          ) : canEditLimits ? (
             <div className="mt-4 border-t border-ds-border pt-4" data-testid="partner-kyc-decision">
               <h3 className="mb-2 text-[15px] font-bold text-ds-ink">{t('partner.kyc.decisionTitle')}</h3>
               {kycDecisions.length > 0 ? (

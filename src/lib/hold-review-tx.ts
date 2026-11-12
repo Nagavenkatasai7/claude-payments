@@ -91,15 +91,20 @@ export type ReviewWant = 'release' | 'reject' | 'record';
 /**
  * P9 step 6 (T9): the PEP-clear rule on a routed review, checked BEFORE anything
  * is written. A partner's final releasing sender_pep step needs `pepClear`
- * (without it: 'disposition'); `pepClear` on any other review is a programming
- * error (throws). Returns null when the review may go on.
+ * (without it: 'disposition'). F1 (early review EA1/EB1): `pepClear` on a
+ * partner sender_pep releasing step that is NOT final (four-eyes step 1; the
+ * cycle changed between the plan and the lock) answers 'changed' like every
+ * other changed-under-lock case; callers drop pepClear on a planned non-final
+ * step. `pepClear` on any other class, scope or a disposition that does not
+ * release is a programming error (throws). Returns null when the review may go on.
  */
 export function pepClearRefusal(r: Pick<RoutedReview, 'cls' | 'step'>, review: HoldReviewInput): HoldRefusedWhy | null {
-  const partnerPepRelease =
-    r.cls.holdClass === 'sender_pep' && review.actorScope === 'partner' && dispositionReleases(review.disposition) && r.step.final;
+  const partnerPepReleaseStep =
+    r.cls.holdClass === 'sender_pep' && review.actorScope === 'partner' && dispositionReleases(review.disposition);
+  const partnerPepRelease = partnerPepReleaseStep && r.step.final;
   if (review.pepClear) {
-    if (!partnerPepRelease) throw new Error('hold review: pepClear is for a final partner sender_pep release only');
-    return null;
+    if (!partnerPepReleaseStep) throw new Error('hold review: pepClear is for a final partner sender_pep release only');
+    return partnerPepRelease ? null : 'changed';
   }
   return partnerPepRelease ? 'disposition' : null;
 }
@@ -131,6 +136,33 @@ function hasDataMissingReason(t: Pick<Transfer, 'complianceReasons'>): boolean {
  * P9 steps 1-4: lock the row tenant-pinned to `review.ownerId`, then route it
  * (routeLockedReview). Null or not in_review -> 'already'.
  */
+/**
+ * Fix pack 7 F4 (early review EE2): the sender flags read under the lock (`forUpdate`, transfer ->
+ * customer order) for the callers that turn a FAILED read into a fail-closed answer and then go on
+ * in the SAME transaction (routeLockedReview, rejectTransfer, refundHoldGuard). The read runs in a
+ * SAVEPOINT (drizzle's nested transaction: node_modules/drizzle-orm/neon-serverless/session.js:197-208,
+ * pglite/session.js:138-153, typed at neon-serverless/session.d.ts:56 and pglite/session.d.ts:54;
+ * the same pattern as store.ts `inSavepoint`): a failed statement rolls back to the savepoint
+ * ONLY, so the caller's next statement does not fail with 25P02 (in failed transaction). The lock
+ * taken by a successful read belongs to the outer transaction (a released savepoint keeps its
+ * locks). `{ read: false }` = the read failed (the error NAME only, never the driver object);
+ * `{ read: true, flags: null }` = this tenant has no customer row for the phone. Call it inside a
+ * transaction: on a bare Db handle the read would run in a transaction of its own and the lock
+ * would not outlive it.
+ */
+export async function readSenderFlagsLocked(
+  tx: DbOrTx,
+  partnerId: PartnerId,
+  phone: string,
+): Promise<{ read: true; flags: CustomerScreeningFlags | null } | { read: false; errorName: string }> {
+  try {
+    const flags = await tx.transaction((sp) => readSenderScreeningFlags(sp, partnerId, phone, { forUpdate: true }));
+    return { read: true, flags };
+  } catch (err) {
+    return { read: false, errorName: err instanceof Error ? err.name : 'error' };
+  }
+}
+
 export async function lockAndRouteReview(
   tx: DbOrTx,
   transferId: string,
@@ -162,6 +194,8 @@ export async function routeLockedReview(
     throw new Error('hold review: actor and reason are required');
   }
   if (t.partnerId !== review.ownerId || t.status !== 'in_review') return { kind: 'already' };
+  // F3 (defence in depth): a partner never decides a sandbox row (the queue is live only); platform scope unchanged.
+  if (review.actorScope === 'partner' && t.environment === 'test') return changed('not_yours');
 
   // 1b. the owner, re-read in this transaction.
   let owner: Partner | null;
@@ -185,14 +219,11 @@ export async function routeLockedReview(
   }
   if (fp !== review.rowFp) return changed('changed');
 
-  // 3. the sender flags, ALWAYS, locked (transfer -> customer order); a failed read is null (fail closed).
-  let flags: CustomerScreeningFlags | null;
-  try {
-    flags = await readSenderScreeningFlags(tx, t.partnerId, t.phone, { forUpdate: true });
-  } catch (err) {
-    logWarn('hold-review.flags-read', err instanceof Error ? err.name : 'error', { transferId: t.id });
-    flags = null;
-  }
+  // 3. the sender flags, ALWAYS, locked (transfer -> customer order); a failed read is null (fail
+  // closed). F4 (EE2): in a savepoint, so a SQL failure leaves this transaction usable.
+  const read = await readSenderFlagsLocked(tx, t.partnerId, t.phone);
+  if (!read.read) logWarn('hold-review.flags-read', read.errorName, { transferId: t.id });
+  const flags: CustomerScreeningFlags | null = read.read ? read.flags : null;
 
   // 3b. dataOnFile (P4), only when a data_missing reason is present, with the RAIL partner's integrations.
   let dataOnFile = false;
@@ -245,6 +276,8 @@ export async function routeLockedReview(
   // P9 step 4 (T8b): a partner-scope reject keeps today's partner reject stance
   // (cancelInReviewForPartner refuses a flagged sender): unreadable flags, a watchlist
   // hit or an active stamp that is not PEP-only (senderPepOnly, R2) wait for the platform.
+  // F4 (EB2): rule 8 of decisionRoute subsumes this today; kept as the last guard, pinned by
+  // tests/hold-step4-guard.test.ts.
   if (
     want === 'reject' &&
     review.actorScope === 'partner' &&

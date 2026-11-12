@@ -20,7 +20,10 @@ import { ExpandableTable, type ExpandableColumn } from '../../expandable-table';
 import { money } from '../../format';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
-import { clearSenderScreeningHoldAction, manualKycDecisionAction, reviewKycAction, setCustomerSendLimitAction } from '../actions';
+import { clearSenderScreeningHoldAction, manualKycDecisionAction, recordKycRecommendationAction, reviewKycAction, setCustomerSendLimitAction } from '../actions';
+import { partnerDecidesKyc } from '@/lib/partner-decision-scope';
+import { senderPepOnly } from '@/lib/hold-queue';
+import { readSenderScreeningFlags } from '@/db/repos/customer-repo';
 import { KycCopilotPanel } from './kyc-copilot-panel';
 import { EsignConsentCard, loadEsignConsentView } from './esign-card';
 import { canDecideCustomerKyc, senderScreeningHoldActive, senderScreeningLabel } from '@/lib/compliance-config';
@@ -113,9 +116,24 @@ export default async function CustomerDetailPage({
   const canManualReject = customer.kycStatus !== 'rejected';
   // Program-Fix 43 follow-up: a watchlist / PEP hold is PLATFORM-only to decide.
   // Mirrors the actions' gate (the server actions are the authority).
-  const canDecideKyc = canDecideCustomerKyc(scopeOf(staff), customer);
+  const canDecideKyc = canDecideCustomerKyc(scopeOf(staff), customer, partner);
+  // Fix pack 7 T27 (P25): a partner that decides KYC decides it in its own workspace; SmartRemit
+  // records a recommendation. Every other tenant: today's markup.
+  const decides = partnerDecidesKyc(partner);
   // Fix pack 2 T6 (R06): the sender screening hold (the clear action re-checks it).
   const screeningHold = senderScreeningHoldActive(customer);
+  // T27: a PEP-only hold of such a partner is the partner's to clear. The flags come from
+  // readSenderScreeningFlags (R2: the Customer lacks the watchlist stamp); a failed read shows the
+  // clear form (the action re-checks and refuses). Read only for such a partner.
+  const pepOnlyHold =
+    decides && isPlatformAdmin && screeningHold
+      ? senderPepOnly(
+          await readSenderScreeningFlags(getDb(), customer.partnerId, customer.senderPhone).catch((err: unknown) => {
+            logWarn('admin.kyc.flags-read', err instanceof Error ? err.name : 'error', { partnerId: customer.partnerId });
+            return null;
+          }),
+        )
+      : false;
   const now = new Date();
   const limits = resolveEffectiveSendLimits(partner, customer, now);
   const capEval = evaluateCap(customer, now, todayUsedCents, 0, sendGateActive(partner), limits);
@@ -200,7 +218,12 @@ export default async function CustomerDetailPage({
             {/* Fix pack 2 T6 (R06): the sender screening hold blocks sends on
                 real-money rails until a SmartRemit platform admin clears it with
                 a typed reason (audited). It does not release held transfers. */}
-            {isPlatformAdmin && screeningHold && (
+            {isPlatformAdmin && screeningHold && pepOnlyHold && (
+              <p className="mt-4 rounded-lg border p-4 text-sm text-muted-foreground">
+                This partner decides KYC for its customers. Record what SmartRemit recommends; the partner decides.
+              </p>
+            )}
+            {isPlatformAdmin && screeningHold && !pepOnlyHold && (
               <div className="mt-4 space-y-3 rounded-lg border p-4">
                 <div className="text-sm font-medium">Clear screening hold</div>
                 <p className="text-sm text-muted-foreground">
@@ -235,7 +258,7 @@ export default async function CustomerDetailPage({
                 decision needs a typed reason (10–500 characters) and is recorded
                 in the audit log; it sends the customer no message. Shown whenever
                 the Persona review panel below is not. */}
-            {isAdmin && !canDecideKyc && (canManualApprove || canManualReject || inReview) && (
+            {isAdmin && !decides && !canDecideKyc && (canManualApprove || canManualReject || inReview) && (
               <p className="mt-4 rounded-lg border p-4 text-sm text-muted-foreground">
                 Flagged by SmartRemit screening. KYC decisions for this customer require SmartRemit platform staff.
               </p>
@@ -292,6 +315,40 @@ export default async function CustomerDetailPage({
                   </div>
                 </form>
                 <KycCopilotPanel phone={customer.senderPhone} partnerId={customer.partnerId} />
+              </div>
+            )}
+
+            {isPlatformAdmin && decides && (
+              <div className="mt-4 space-y-3 rounded-lg border p-4" data-testid="kyc-recommend">
+                <div className="text-sm font-medium">Recommend</div>
+                <p className="text-sm text-muted-foreground">
+                  This partner decides KYC for its customers. Record what SmartRemit recommends; the partner decides.
+                </p>
+                <form action={recordKycRecommendationAction} className="space-y-3">
+                  <input type="hidden" name="phone" value={customer.senderPhone} />
+                  <input type="hidden" name="partnerId" value={customer.partnerId} />
+                  <div className="flex flex-wrap gap-4 text-sm">
+                    <label className="flex items-center gap-2">
+                      <input type="radio" name="recommendation" value="approve" required /> Approve
+                    </label>
+                    <label className="flex items-center gap-2">
+                      <input type="radio" name="recommendation" value="reject" /> Reject
+                    </label>
+                  </div>
+                  <textarea
+                    name="reason"
+                    required
+                    minLength={10}
+                    maxLength={500}
+                    placeholder="Why SmartRemit recommends this (required)"
+                    rows={2}
+                    className="w-full rounded-md border border-input bg-transparent px-3 py-2 text-sm shadow-xs outline-none placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50"
+                  />
+                  <div className="flex flex-wrap gap-2">
+                    <Button type="submit" variant="outline">Record recommendation</Button>
+                  </div>
+                </form>
+                <KycCopilotPanel phone={customer.senderPhone} partnerId={customer.partnerId} mode="recommend" />
               </div>
             )}
 

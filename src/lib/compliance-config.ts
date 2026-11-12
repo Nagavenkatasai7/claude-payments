@@ -2,7 +2,7 @@ import type { CountryCode, Partner } from './types';
 import { AML_DEFAULTS, AML_HOLD_RULES, type AmlConfig, type AmlHoldRule } from './aml-rules';
 import type { FixedReplyKind } from './hold-replies';
 import { RISK_SIGNALS, RISK_SIGNALS_OFF, type RiskSignal, type RiskSignalConfig } from './risk-signals';
-import { reviewRecordApplies, type ScopeOwner } from './partner-decision-scope';
+import { partnerDecidesKyc, reviewRecordApplies, type ScopeOwner } from './partner-decision-scope';
 
 // Canonical screening constants — single source of truth.
 // compliance.ts re-exports these for backward compatibility.
@@ -306,12 +306,18 @@ export function senderScreeningLabel(c: CustomerScreeningFlags): 'watchlist' | '
   return isScreeningCustomerHold(c) ? 'hold' : 'clear';
 }
 
-/** Who may decide a customer's KYC: platform staff always; partner staff only without a screening hold. */
+/**
+ * Who may decide a customer's KYC: platform staff always; partner staff only without a screening hold.
+ * Fix pack 7 (P25, T24): platform staff may NOT decide for an owner whose partner decides KYC
+ * (partnerDecidesKyc): its KYC is decided in its own workspace, SmartRemit records a
+ * recommendation. An absent or null owner is today's rule (callers pass it from T27).
+ */
 export function canDecideCustomerKyc(
   scope: { kind: 'platform' | 'partner' },
   c: CustomerScreeningFlags,
+  owner?: ScopeOwner | null,
 ): boolean {
-  if (scope.kind === 'platform') return true;
+  if (scope.kind === 'platform') return !partnerDecidesKyc(owner);
   return !isScreeningCustomerHold(c);
 }
 

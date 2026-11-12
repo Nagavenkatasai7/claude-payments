@@ -99,6 +99,19 @@ vi.mock('@/db/repos/partner-repo', async (orig) => {
   };
 });
 
+// F4 (early review ED2): the admin reject consults canRejectHeld (the P12 rule); a pass-through spy.
+const rejectRule = vi.hoisted(() => ({ calls: [] as unknown[][] }));
+vi.mock('@/lib/dashboard-ops', async (orig) => {
+  const real = await orig<typeof import('@/lib/dashboard-ops')>();
+  return {
+    ...real,
+    canRejectHeld: (...a: Parameters<typeof real.canRejectHeld>) => {
+      rejectRule.calls.push(a);
+      return real.canRejectHeld(...a);
+    },
+  };
+});
+
 import { escalateHoldAction, rejectTransferAction, releaseTransferAction } from '@/app/admin-dashboard/actions';
 
 // ── Pure part ────────────────────────────────────────────────────────────────
@@ -316,6 +329,7 @@ beforeEach(async () => {
   ownerRead.mode = 'real';
   hostHeader.value = 'smartremit.ai';
   auth.platformCalls = 0;
+  rejectRule.calls = [];
 });
 
 describe('pack 7 T14a: the admin release / reject actions', { retry: 0 }, () => {
@@ -481,6 +495,43 @@ describe('pack 7 T14a: the admin release / reject actions', { retry: 0 }, () => 
     ownerRead.mode = 'real';
     expect(await snapshot(t.id)).toEqual(before);
     expect(gate.calls).toEqual([]);
+  });
+
+  it('F4.1 (ED2): queue owner, real-money [LARGE] row, platform reject of kyc: PARTNER_DECIDES, and canRejectHeld was consulted', async () => {
+    await certifiedQueuePartner(db);
+    const t = await setReasons((await heldRowFor(db, 'acme', 'kyc')).id, [LARGE_AMOUNT_REASON]);
+    const before = await snapshot(t.id);
+    // The class LARGE_AMOUNT_REASON maps to (kyc), and the brief's literal 'large_amount' (not a class: no posted class).
+    for (const holdClass of ['kyc', 'large_amount']) {
+      rejectRule.calls = [];
+      expect(await errorOf(rejectTransferAction(full(t, holdClass, 'customer_not_verified')))).toBe(PARTNER_DECIDES_HOLD_REFUSAL);
+      expect(rejectRule.calls).toHaveLength(1);
+      expect(rejectRule.calls[0][0]).toEqual({ kind: 'platform' });
+      expect((rejectRule.calls[0][1] as Partner).id).toBe('acme');
+      expect((rejectRule.calls[0][2] as Transfer).id).toBe(t.id);
+    }
+    expect(await snapshot(t.id)).toEqual(before);
+    expect(gate.calls).toEqual([]);
+  });
+
+  it('F4.1b (ED2): a posted platform class the row does not carry on an all-partner row: only canRejectHeld refuses (PARTNER_DECIDES)', async () => {
+    await certifiedQueuePartner(db);
+    const t = await setReasons((await heldRowFor(db, 'acme', 'kyc')).id, [LARGE_AMOUNT_REASON]);
+    const before = await snapshot(t.id);
+    expect(await errorOf(rejectTransferAction(full(t, 'sanctions_review', 'confirmed_match')))).toBe(PARTNER_DECIDES_HOLD_REFUSAL);
+    expect(rejectRule.calls).toHaveLength(1);
+    expect(await snapshot(t.id)).toEqual(before);
+    expect(gate.calls).toEqual([]);
+  });
+
+  it('F4.1c (ED2): a release never consults the reject rule; a certified delegated reject does, and the rule allows it', async () => {
+    await certifiedQueuePartner(db, { holdDecider: 'smartremit_delegated' });
+    const t = await heldRowFor(db, 'acme', 'kyc');
+    expect(await errorOf(releaseTransferAction(full(t, 'kyc', 'documents_verified')))).toBe(STEP_TEXT);
+    expect(rejectRule.calls).toEqual([]);
+    // Certified delegated: the reject consults the rule, which allows it (kyc is platform-decided).
+    expect(await errorOf(rejectTransferAction(full(t, 'kyc', 'customer_not_verified')))).toBe(STEP_TEXT);
+    expect(rejectRule.calls).toHaveLength(1);
   });
 });
 

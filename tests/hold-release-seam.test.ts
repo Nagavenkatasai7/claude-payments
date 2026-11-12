@@ -553,6 +553,54 @@ describe('the PEP clear in the release seam (T9)', { retry: 0 }, () => {
     expect(await clearedAt(b.phone)).toBeNull();
     expect(await clearAudits(b.phone)).toEqual([]);
   });
+
+  it('12b (F1): four-eyes: pepClear on a step the LOCKED route finds non-final -> changed, nothing written; pepClear on a kyc step 1 still throws', async () => {
+    await certifiedQueuePartner(db, { fourEyes: true });
+    // A kyc row first (heldRowFor rows share one sender; the sender_pep row below flags it).
+    const k = await heldRowFor(db, 'acme', 'kyc', { id: 'pep_on_kyc4' });
+    const kycWithClear = { ...partnerReview(k, 'co-a', false), pepClear: { reviewedFlaggedAt: '' } };
+    await expect(recordHoldStep(db, { ...kycWithClear, transferId: k.id })).rejects.toThrow(/pepClear is for a final partner sender_pep release only/);
+    expect(await count('hold_reviews', k.id)).toBe(0);
+
+    const t = await heldRowFor(db, 'acme', 'sender_pep');
+    const before = await snapshot(t.id);
+    const step1 = await pepRelease(t, { expectFinal: false });
+    expect(await recordHoldStep(db, { ...step1, transferId: t.id })).toEqual({ kind: 'changed', why: 'changed' });
+    expect(await snapshot(t.id)).toEqual(before);
+    expect(await clearedAt(t.phone)).toBeNull();
+    expect(await clearAudits(t.phone)).toEqual([]);
+
+    // Step 1 without pepClear is recorded and clears nothing; step 2 (co-b, final) with pepClear clears and releases.
+    expect(await recordHoldStep(db, { ...step1, pepClear: undefined, transferId: t.id })).toMatchObject({ kind: 'recorded', final: false });
+    expect(await clearedAt(t.phone)).toBeNull();
+    expect(await clearAudits(t.phone)).toEqual([]);
+    await releaseTransfer(store, db, t.id, { actor: 'co-b', reason: REASON }, undefined, await pepRelease(t, { actor: 'co-b' }));
+    expect((await store.getTransfer(t.id))?.status).toBe('paid');
+    expect(await clearedAt(t.phone)).not.toBeNull();
+    expect(await clearAudits(t.phone)).toHaveLength(1);
+  });
+});
+
+describe('sandbox rows in the locked route (F3, early review EA2/EC2)', { retry: 0 }, () => {
+  it('a PARTNER review on a test row -> changed not_yours, nothing written; a PLATFORM review on a test row is recorded as before', async () => {
+    await certifiedQueuePartner(db, { fourEyes: true });
+    const k = await heldRowFor(db, 'acme', 'kyc', { id: 'sbx_kyc' });
+    const m = await setReasons((await heldRowFor(db, 'acme', 'kyc', { id: 'sbx_mix' })).id, [LARGE_AMOUNT_REASON, POSSIBLE_MATCH_REASON]);
+    await db.execute(sql`UPDATE transfers SET environment = 'test' WHERE id IN (${k.id}, ${m.id})`);
+
+    const before = await snapshot(k.id);
+    expect(await recordHoldStep(db, { ...partnerReview(k, 'co-a', false), transferId: k.id })).toEqual({ kind: 'changed', why: 'not_yours' });
+    expect(await snapshot(k.id)).toEqual(before);
+    expect(await releaseHold(db, k, await rail(), undefined, undefined, partnerReview(k, 'co-a', true))).toEqual({ kind: 'changed', why: 'not_yours' });
+    await expect(releaseTransfer(store, db, k.id, { actor: 'co-a', reason: REASON }, undefined, partnerReview(k, 'co-a', true))).rejects.toBeInstanceOf(
+      HoldReviewChangedError,
+    );
+    expect(await snapshot(k.id)).toEqual(before);
+
+    const plat = review(m, 'sanctions_review', 'false_positive_match');
+    expect(await recordHoldStep(db, { ...plat, transferId: m.id })).toMatchObject({ kind: 'recorded', final: true });
+    expect(await count('hold_reviews', m.id)).toBe(1);
+  });
 });
 
 describe('releaseHoldAfterRescreen with a review (DP2)', { retry: 0 }, () => {

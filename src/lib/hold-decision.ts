@@ -160,6 +160,8 @@ export async function planHoldDecision(
   };
   const t = await store.getTransfer(i.transferId);
   if (!t || t.partnerId !== i.ownerId || t.status !== 'in_review') return refuse('changed');
+  // F3 (defence in depth): a partner never decides a sandbox row (the queue is live only); platform scope unchanged.
+  if (i.actorScope === 'partner' && t.environment === 'test') return refuse('not_yours');
   let rowFp: string;
   try {
     rowFp = rowReasonsFp(t.complianceReasons);
@@ -220,8 +222,14 @@ export async function planHoldDecision(
   if (route.kind !== 'record' && !step.final) return refuse('changed');
   // The locked path's checks that need no lock, so the action shows the right copy before a step-up:
   // the PEP-clear rule (P9 step 6) and the partner reject sender stance (P9 step 4).
-  const pepRefused = pepClearRefusal({ cls, step }, { ...i, expectFinal: step.final });
+  // F1 (early review EA1/EB1): the PEP-clear rule only on a FINAL step; a non-final step
+  // (four-eyes step 1) never carries the clear, so a planned step 1 never refuses for it.
+  const { pepClear: _dropped, ...withoutClear } = i;
+  void _dropped;
+  const pepRefused = pepClearRefusal({ cls, step }, { ...(step.final ? i : withoutClear), expectFinal: step.final });
   if (pepRefused) return refuse(pepRefused);
+  // F4 (EB2): rule 8 of decisionRoute subsumes this today; kept as the last guard, pinned by
+  // tests/hold-step4-guard.test.ts.
   if (
     route.kind === 'reject' &&
     i.actorScope === 'partner' &&
