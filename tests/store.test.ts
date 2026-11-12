@@ -628,6 +628,34 @@ describe('firstSeenAtOf and store.firstSeenAt (pack 6 P19)', () => {
     expect(log).toHaveLength(2);
   });
 
+  it('capSubject carries residence only when a state is on file (pack 8 P7)', async () => {
+    const store = createStore(fakeRedis(), db);
+    const at = new Date(Date.now() - 4 * DAY).toISOString();
+    await seedRow(store, 'default', 'p1', at);
+    await seedRow(store, 'default', 'p2', at);
+    expect(
+      await createCustomerStore(db, store).setResidenceState('default', 'p1', { state: 'NY', source: 'staff_verified', at: new Date(Date.now() - DAY) }),
+    ).toBe('set');
+    const withState = await store.capSubject('default', 'p1', 'verified');
+    expect(withState).toEqual({ firstSeenAt: at, kycStatus: 'verified', residence: { state: 'NY', source: 'staff_verified' } });
+    const without = await store.capSubject('default', 'p2', 'verified');
+    expect(without).toEqual({ firstSeenAt: at, kycStatus: 'verified' });
+    expect('residence' in without).toBe(false);
+  });
+
+  it('capSubject still runs the same statements with a residence on file (pack 8 P7)', async () => {
+    const store = createStore(fakeRedis(), db);
+    await seedRow(store, 'default', 'p1', new Date(Date.now() - 4 * DAY).toISOString());
+    await createCustomerStore(db, store).setResidenceState('default', 'p1', { state: 'NY', source: 'staff_verified', at: new Date() });
+    const stop = captureQueries();
+    const cap = await store.capSubject('default', 'p1', 'verified');
+    const log = stop();
+    expect(cap.residence).toEqual({ state: 'NY', source: 'staff_verified' });
+    expect(customerSelects(log)).toHaveLength(1);
+    expect(transferSelects(log)).toHaveLength(0);
+    expect(log).toHaveLength(1);
+  });
+
   it('store.firstSeenAt makes the same reads as capSubject', async () => {
     const store = createStore(fakeRedis(), db);
     await seedRow(store, 'default', 'p1', new Date(Date.now() - 4 * DAY).toISOString());

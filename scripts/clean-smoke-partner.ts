@@ -78,6 +78,8 @@ export async function cleanSmokePartners(db: DbOrTx, log: (line: string) => void
       await tx.execute(sql`DELETE FROM partner_slug_tombstones WHERE partner_id = ${t.id}`);
       await tx.execute(sql`DELETE FROM partner_report_jobs WHERE partner_id = ${t.id}`);
       await tx.execute(sql`DELETE FROM partner_webhook_deliveries WHERE partner_id = ${t.id}`);
+      // fix pack 8: destination register rows are config, never a skip reason.
+      await tx.execute(sql`DELETE FROM partner_corridors WHERE partner_id = ${t.id}`);
       await tx.execute(sql`DELETE FROM partners WHERE id = ${t.id}`);
       log(`  ✓ removed smoke partner ${t.id} (${t.name})`);
     }

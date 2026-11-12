@@ -8,7 +8,7 @@ import { slaState } from '@/lib/ticket-sla';
 import type { Staff, Ticket, TicketPriority, TicketStatus } from '@/lib/types';
 import { ExpandableTable, type ExpandableColumn } from '../expandable-table';
 import { Card } from '@/components/ui/card';
-import { TicketStatusPill, TicketPriorityPill, TicketSlaPill, TICKET_STATUS_LABEL } from './pills';
+import { TicketStatusPill, TicketPriorityPill, TicketSlaPill, RegClassPill, RegDueText, TICKET_STATUS_LABEL } from './pills';
 
 // Shared queue view for /tickets (all customer tickets in scope) and
 // /tickets/my-queue (pinned to assignedTo = the viewer). Scope is decided by
@@ -112,6 +112,8 @@ export async function TicketQueueView({
     { label: 'Subject', primary: true },
     { label: 'Status', primary: true },
     { label: 'Priority' },
+    { label: 'Reg' },
+    { label: 'Due' },
     { label: 'Age / SLA' },
     { label: 'Category' },
     { label: 'Customer' },
@@ -131,6 +133,13 @@ export async function TicketQueueView({
       </Link>,
       <TicketStatusPill key="status" status={t.status} />,
       <TicketPriorityPill key="priority" priority={t.priority} />,
+      // Fix pack 8 (P14): the class and due date of a regulatory case (keyed on regClass).
+      t.regClass ? (
+        <RegClassPill key="reg" regClass={t.regClass} dueAt={t.dueAt} status={t.status} now={now.getTime()} />
+      ) : (
+        <span key="reg" />
+      ),
+      t.regClass ? <RegDueText key="due" dueAt={t.dueAt} /> : <span key="due" />,
       <TicketSlaPill key="sla" sla={slaState(t, firstReplies.get(t.id) ?? null, now)} now={now} />,
       <span key="category" className="text-muted-foreground">{ticketCategoryLabel(t.category)}</span>,
       <span key="customer" className="text-xs text-muted-foreground">{t.customerPhone || '—'}</span>,

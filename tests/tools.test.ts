@@ -2933,7 +2933,7 @@ describe('request_refund (customer-facing refund request — suggest-only, ops a
     expect((await ctx.store.getTransfer(id))?.refundStatus ?? 'none').toBe('none');
   });
 
-  it('delivered over 24h ago ⇒ recall_window_passed, never a refund flag', async () => {
+  it('delivered over 24h ago ⇒ use_recall (a report opens a case with a date), never a refund flag (pack 8 P11)', async () => {
     const ctx = await buildCtx(fakeRedis());
     const id = await mintTransfer(ctx);
     await ctx.store.updateTransferFromWebhook(id, 'delivered');
@@ -2944,7 +2944,10 @@ describe('request_refund (customer-facing refund request — suggest-only, ops a
       deliveredAt: new Date(Date.now() - 25 * 60 * 60 * 1000).toISOString(),
     });
     const r = await executeTool('request_refund', { transfer_id: id }, ctx);
-    expect(r.error_code).toBe('recall_window_passed');
+    expect(r.error_code).toBe('use_recall');
+    expect(r.transfer_id).toBe(id);
+    expect(String(r.reply_hint)).toContain('open_recall_dispute');
+    expect(String(r.reply_hint)).not.toContain('no longer possible');
     expectCustomerSafe(r);
     expect((await ctx.store.getTransfer(id))?.refundStatus ?? 'none').toBe('none');
   });
@@ -3365,7 +3368,9 @@ describe('open_recall_dispute (delivered-within-24h recall/dispute case)', { ret
     expect(r.opened).toBe(true);
     expect(typeof r.case_id).toBe('string');
     expect(String(r.case_id)).toMatch(/^tk_/);
-    expect(String(r.reply_hint).toLowerCase()).toContain('recovery is not guaranteed');
+    // Pack 8 (P11): the fixed case reply replaces the "recovery is not guaranteed" hint.
+    expect(String(r.reply_to_customer)).toContain(`Your case reference is ${r.case_id}.`);
+    expect(r.reply_hint).toBeUndefined();
 
     // Assert the ticket landed via the repo: customer-scoped, linked + categorized.
     const repo = createTicketRepo(db);
@@ -3376,20 +3381,23 @@ describe('open_recall_dispute (delivered-within-24h recall/dispute case)', { ret
     expect(ticket.transferId).toBe(id);
     expect(ticket.category).toBe('refund');
     expect(ticket.subject.toLowerCase()).toContain('recall');
+    expect(ticket.priority).toBe('urgent');
+    expect(ticket.regClass).toBe('error_notice');
   });
 
-  it('M2-14 (#403 L3): web chat honours the partner support switch like the receipt/portal recall (no ticket); WhatsApp unchanged', async () => {
+  it('pack 8 DP9: the partner support switch never refuses a classed case on the web (it opens, as on WhatsApp)', async () => {
     const ctx = await buildCtx(fakeRedis());
     const id = await mintDelivered(ctx);
     await ctx.partnerStore.ensureDefaultPartner();
     const { createPartnerRepo } = await import('@/db/repos/partner-repo');
     await createPartnerRepo(db).updateSupportConfig(ctx.partnerId, (prev) => ({ ...prev, enableSupportPortal: false }));
     const web = await executeTool('open_recall_dispute', { transfer_id: id, reason: 'not_received' }, { ...ctx, channel: 'web' as const });
-    expect(web.opened).toBeUndefined();
-    expect(web.error_code).toBe('support_off');
-    expect((await createTicketRepo(db).listByCustomer(ctx.phone)).filter((t) => t.transferId === id)).toHaveLength(0);
+    expect(web.opened).toBe(true);
+    expect(web.error_code).toBeUndefined();
+    expect((await createTicketRepo(db).listByCustomer(ctx.phone)).filter((t) => t.transferId === id)).toHaveLength(1);
     const wa = await executeTool('open_recall_dispute', { transfer_id: id, reason: 'not_received' }, ctx);
     expect(wa.opened).toBe(true);
+    expect(wa.case_id).toBe(web.case_id);
   });
 
   it('M2-14 (PR 397 L2): one open recall per transfer — concurrent calls, or a later call, reuse the first case', async () => {
@@ -3429,7 +3437,7 @@ describe('open_recall_dispute (delivered-within-24h recall/dispute case)', { ret
     expect(ticket.transferId).toBe(id);
   });
 
-  it('delivered over 24h ago ⇒ recall_window_passed, NO ticket opened', async () => {
+  it('delivered over 24h ago ⇒ an error_notice case opens (inside the 180-day notice window, pack 8 P5)', async () => {
     const ctx = await buildCtx(fakeRedis());
     const id = await mintDelivered(ctx);
     const t = (await ctx.store.getTransfer(id))!;
@@ -3438,13 +3446,15 @@ describe('open_recall_dispute (delivered-within-24h recall/dispute case)', { ret
       deliveredAt: new Date(Date.now() - 25 * 60 * 60 * 1000).toISOString(),
     });
     const r = await executeTool('open_recall_dispute', { transfer_id: id, reason: 'wrong_amount' }, ctx);
-    expect(r.error_code).toBe('recall_window_passed');
-    expect(r.opened).toBeUndefined();
+    expect(r.error_code).toBeUndefined();
+    expect(r.opened).toBe(true);
     const repo = createTicketRepo(db);
-    expect(await repo.listByCustomer(ctx.phone)).toHaveLength(0);
+    const mine = await repo.listByCustomer(ctx.phone);
+    expect(mine).toHaveLength(1);
+    expect(mine[0].regClass).toBe('error_notice');
   });
 
-  it('a still-refundable (paid, not delivered) transfer ⇒ use_request_refund, no ticket', async () => {
+  it('a paid, not delivered transfer inside the cancel window ⇒ the case opens AND the cancel is offered (pack 8 DP13)', async () => {
     const ctx = await buildCtx(fakeRedis());
     const created = await payPageMint({ amount_usd: 200, recipient_name: 'Mom', recipient_phone: '919876543210', funding_method: 'bank_transfer' },
       ctx,
@@ -3452,10 +3462,11 @@ describe('open_recall_dispute (delivered-within-24h recall/dispute case)', { ret
     const id = created.transfer_id as string;
     await ctx.store.updateTransferFromWebhook(id, 'paid');
     const r = await executeTool('open_recall_dispute', { transfer_id: id, reason: 'other' }, ctx);
-    expect(r.error_code).toBe('use_request_refund');
-    expect(r.transfer_id).toBe(id);
+    expect(r.opened).toBe(true);
+    expect(r.cancel_possible).toBe(true);
     const repo = createTicketRepo(db);
-    expect(await repo.listByCustomer(ctx.phone)).toHaveLength(0);
+    expect(await repo.listByCustomer(ctx.phone)).toHaveLength(1);
+    expect((await ctx.store.getTransfer(id))?.status).toBe('paid'); // the report cancels nothing
   });
 
   it("STRICT ownership: another customer's delivered transfer reads as not found", async () => {
@@ -3482,7 +3493,7 @@ describe('open_recall_dispute (delivered-within-24h recall/dispute case)', { ret
     expect(r.opened).toBe(true);
   });
 
-  it('respects the open-case cap (5) — a 6th recall is refused, no ticket', async () => {
+  it('pack 8: the open-case cap (5) never refuses a classed case — a 6th report opens (the cap stays on b2b recalls)', async () => {
     const ctx = await buildCtx(fakeRedis());
     const repo = createTicketRepo(db);
     // Pre-fill the cap with 5 open customer tickets.
@@ -3498,10 +3509,9 @@ describe('open_recall_dispute (delivered-within-24h recall/dispute case)', { ret
     }
     const id = await mintDelivered(ctx);
     const r = await executeTool('open_recall_dispute', { transfer_id: id, reason: 'other' }, ctx);
-    expect(r.error_code).toBe('too_many_open_cases');
-    expect(r.opened).toBeUndefined();
-    // Still exactly 5 — nothing new opened.
-    expect((await repo.listByCustomer(ctx.phone)).length).toBe(5);
+    expect(r.error_code).toBeUndefined();
+    expect(r.opened).toBe(true);
+    expect((await repo.listByCustomer(ctx.phone)).length).toBe(6);
   });
 });
 
@@ -4779,6 +4789,24 @@ describe('B2B buyer lifecycle controls (L1)', () => {
       expect(String(r.case_id)).toMatch(/^tk_/);
       const ticket = (await createTicketRepo(db).listByCustomer(ctx.phone)).find((t) => t.id === r.case_id)!;
       expect(ticket.transferId).toBe(id);
+    });
+
+    it('a b2b recall respects the open-case cap (5) — a 6th recall is refused, no ticket', async () => {
+      const ctx = await buildCtx(fakeRedis());
+      const repo = createTicketRepo(db);
+      for (let i = 0; i < 5; i++) {
+        await repo.createTicket({
+          id: `tk_preb${i}`, partnerId: 'default', kind: 'customer',
+          customerPhone: ctx.phone, subject: `existing ${i}`, body: 'open case',
+        });
+      }
+      const id = await mintB2b(ctx);
+      await ctx.store.updateTransferFromWebhook(id, 'paid');
+      await ctx.store.updateTransferFromWebhook(id, 'delivered');
+      const r = await executeTool('open_recall_dispute', { transfer_id: id, reason: 'other' }, ctx);
+      expect(r.error_code).toBe('too_many_open_cases');
+      expect(r.opened).toBeUndefined();
+      expect((await repo.listByCustomer(ctx.phone)).length).toBe(5);
     });
 
     it('delivered over 24h ago ⇒ past the recall window, no case', async () => {
@@ -6826,17 +6854,17 @@ describe('refund / recall on the web channel respect portal MFA (Program-Fix 49D
     expect((await ctx.store.getTransfer(id))?.refundStatus ?? 'none').toBe('none');
   });
 
-  it('enrolled web customer: open_recall_dispute refuses with verify_on_receipt and opens no case', async () => {
+  it('enrolled web customer: open_recall_dispute is not refused by the step-up — the report opens its case (pack 8 DP9)', async () => {
     const ctx = await buildCtx(fakeRedis());
     const id = await mint(ctx, true);
     await ctx.customerStore.enableMfa(ctx.partnerId, ctx.phone, B32);
     const r = await executeTool('open_recall_dispute', { transfer_id: id, reason: 'not_received' }, web(ctx));
-    expect(r.error_code).toBe('verify_on_receipt');
-    expect(r.opened).toBeUndefined();
-    expect(await ctx.ticketRepo.listByCustomer(ctx.phone)).toHaveLength(0);
+    expect(r.error_code).toBeUndefined();
+    expect(r.opened).toBe(true);
+    expect(await ctx.ticketRepo.listByCustomer(ctx.phone)).toHaveLength(1);
   });
 
-  it('CUSTOMER_MFA_REQUIRED on: an unenrolled web customer is refused too (both tools)', async () => {
+  it('CUSTOMER_MFA_REQUIRED on: request_refund is refused for an unenrolled web customer; a report still opens its case (pack 8 DP9)', async () => {
     vi.stubEnv('CUSTOMER_MFA_REQUIRED', 'true');
     const ctx = await buildCtx(fakeRedis());
     const paid = await mint(ctx, false);
@@ -6845,11 +6873,12 @@ describe('refund / recall on the web channel respect portal MFA (Program-Fix 49D
     expect((await ctx.store.getTransfer(paid))?.refundStatus ?? 'none').toBe('none');
     const delivered = await mint(ctx, true);
     const r2 = await executeTool('open_recall_dispute', { transfer_id: delivered, reason: 'other' }, web(ctx));
-    expect(r2.error_code).toBe('verify_on_receipt');
-    expect(await ctx.ticketRepo.listByCustomer(ctx.phone)).toHaveLength(0);
+    expect(r2.error_code).toBeUndefined();
+    expect(r2.opened).toBe(true);
+    expect(await ctx.ticketRepo.listByCustomer(ctx.phone)).toHaveLength(1);
   });
 
-  it('portal chat, stale session: open_recall_dispute refuses with verify_in_portal and opens no case', async () => {
+  it('portal chat, stale session: open_recall_dispute still opens the case (pack 8 DP9: a report is never refused)', async () => {
     const ctx = await buildCtx(fakeRedis());
     const id = await mint(ctx, true);
     const r = await executeTool(
@@ -6857,10 +6886,9 @@ describe('refund / recall on the web channel respect portal MFA (Program-Fix 49D
       { transfer_id: id, reason: 'not_received' },
       { ...ctx, channel: 'web' as const, webStepUp: { surface: 'portal' as const, fresh: false } },
     );
-    expect(r.error_code).toBe('verify_in_portal');
-    expect(String(r.reply_hint)).toContain(`/portal/transfers/${id}`);
-    expect(r.opened).toBeUndefined();
-    expect(await ctx.ticketRepo.listByCustomer(ctx.phone)).toHaveLength(0);
+    expect(r.error_code).toBeUndefined();
+    expect(r.opened).toBe(true);
+    expect(await ctx.ticketRepo.listByCustomer(ctx.phone)).toHaveLength(1);
   });
 
   it('portal chat, fresh session: open_recall_dispute opens the case (existing behaviour)', async () => {

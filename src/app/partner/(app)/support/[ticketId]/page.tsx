@@ -30,7 +30,7 @@ import {
 import { Badge, Card, Money, PageHeader, StatusPill } from '@/components/ds';
 import type { PartnerCtx } from '@/lib/partner-access';
 import type { Ticket, TicketMessage, Transfer } from '@/lib/types';
-import { BackLink, TicketStatusBadge, formatWhen, priorityLabel, statusLabel } from '../support-bits';
+import { BackLink, TicketStatusBadge, firstNoticeText, formatWhen, priorityLabel, regCaseTexts, statusLabel } from '../support-bits';
 import {
   AssignForm,
   EscalateForm,
@@ -328,6 +328,8 @@ export default async function PartnerTicketPage({ params }: { params: Promise<{ 
               </Link>
             ) : null}
             {isCustomer ? <span>{priorityLabel(ticket.priority)}</span> : null}
+            {isCustomer ? regCaseTexts(ticket, Date.now()).map((x) => <span key={x}>{x}</span>) : null}
+            {isCustomer && firstNoticeText(ticket) ? <span>{firstNoticeText(ticket)}</span> : null}
             <span>{t('partner.support.updated', { when: formatWhen(ticket.updatedAt) })}</span>
           </span>
         }

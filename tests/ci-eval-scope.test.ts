@@ -38,6 +38,7 @@ describe('isEvalScopePath', () => {
     'src/lib/hold-replies-text.ts',
     'src/lib/model-visible-result.ts',
     'src/lib/inbound-redact.ts',
+    'src/lib/legal/error-notice-drafts.ts',
     'src/lib/ai-provenance.ts',
     'scripts/eval-bot.ts',
     'scripts/eval-bot-cases.ts',

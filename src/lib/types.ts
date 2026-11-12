@@ -1,3 +1,6 @@
+import type { RegClass } from './reg-clocks';
+import type { ResidenceSource, UsStateCode } from './licence-matrix';
+
 // 'usdc' = a stablecoin payout to the seller's verified wallet address (B2B
 // cross-border sellers only; chosen at onboarding). NON-CUSTODIAL: the licensed
 // partner executes the USDC transfer — SmartRemit never holds crypto or fiat.
@@ -402,6 +405,11 @@ export interface Ticket {
   createdAt: string;
   updatedAt: string;
   closedAt?: string;
+  // Fix pack 8 (0042, R44, P6): set only on a regulatory case; the class never changes and the
+  // due date never moves later; staff triage cannot change priority or category (setTriage SQL guard).
+  regClass?: RegClass;
+  firstNoticeAt?: string;      // ISO
+  dueAt?: string;              // ISO
 }
 
 export interface TicketMessage {
@@ -713,6 +721,13 @@ export interface Customer {
   esignConsentVersion?: string;
   esignConsentedAt?: string;
   esignWithdrawnAt?: string;
+  // Fix pack 8 (0042, R12, P7): READ-ONLY here (mapped in rowToCustomer only,
+  // never in customerToRow): setResidenceState is the only writer, so no
+  // whole-row save can set or clear a state. A state never comes from chat
+  // words, a phone area code or an IP (D8).
+  residenceState?: UsStateCode;
+  residenceStateSource?: ResidenceSource;
+  residenceStateAt?: string;
   kycSubmittedAt?: string;  // ISO — inquiry created / customer entered the hosted flow
   kycApprovedBy?: string;    // staff username who approved (audit)
   kycApprovedAt?: string;    // ISO

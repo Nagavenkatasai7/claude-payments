@@ -70,6 +70,8 @@ import ContactPage from '@/app/partner/(app)/support/contact/page';
 import { createCustomerRepo } from '@/db/repos/customer-repo';
 import { createAuditRepo } from '@/db/repos/aux-repos';
 import { seedPartnerTransfer } from './helpers-partner-app';
+import { regCaseFor } from './helpers-pack8';
+import { formatDueDate } from '@/lib/reg-case-view';
 
 const PA = 'ptn-alpha3';
 const PB = 'ptn-bravo9';
@@ -506,5 +508,30 @@ describe('A12: team questions on the pages', () => {
     await signInAs({ role: 'support', username: 'sup1' });
     html = await contact();
     expect(checked(html)).toEqual(['team']);
+  });
+});
+
+// Fix pack 8 T16 (P14): the support list and detail show the class and the due date of a
+// regulatory case; an unclassed ticket shows neither.
+describe('a regulatory case on the partner support pages (T16)', () => {
+  it('the list shows the class, the due date and Overdue past the due date', async () => {
+    const late = await regCaseFor(db, PA, { regClass: 'error_notice', dueInMs: -86_400_000, phone: PHONE_A });
+    await signInAs({ role: 'support', username: 'sup1' });
+    const html = await list();
+    expect(html).toContain('Error notice');
+    expect(html).toContain(`Due ${formatDueDate(late.dueAt!)}`);
+    expect(html).toContain('Overdue');
+  });
+  it('the detail shows class, first notice and due date; an unclassed ticket shows none', async () => {
+    const c = await regCaseFor(db, PA, { regClass: 'complaint', dueInMs: 86_400_000, phone: PHONE_A });
+    await signInAs({ role: 'support', username: 'sup1' });
+    const html = await ticket(c.id);
+    expect(html).toContain('Complaint');
+    expect(html).toContain(`First notice ${formatDueDate(c.firstNoticeAt!)}`);
+    expect(html).toContain(`Due ${formatDueDate(c.dueAt!)}`);
+    expect(html).not.toContain('Overdue');
+    const plain = await ticket('tk_a1');
+    expect(plain).not.toContain('First notice');
+    expect(plain).not.toMatch(/Due [A-Z][a-z]{2} \d/);
   });
 });

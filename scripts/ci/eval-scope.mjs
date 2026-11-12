@@ -33,6 +33,7 @@ export const EVAL_SCOPE_FILES = Object.freeze([
   'src/lib/hold-replies-text.ts',
   'src/lib/inbound-redact.ts',
   'src/lib/untrusted-text.ts',
+  'src/lib/legal/error-notice-drafts.ts',
   // Tool schemas, tool results and what of them the model sees.
   'src/lib/tools.ts',
   'src/lib/tool-context.ts',

@@ -55,6 +55,7 @@ import { auditEvents, outbox, tickets, ticketMessages, partnerSites, partnerPort
 import { resetCustomerPortalOriginCache } from '@/lib/customer-portal-url';
 import { internalNoteAction, replyAction, setStatusAction } from '@/app/partner/(app)/support/[ticketId]/actions';
 import { contactFollowUpAction, contactSmartRemitAction } from '@/app/partner/(app)/support/contact/actions';
+import { regCaseFor } from './helpers-pack8';
 
 const PA = 'ptn-alpha3';
 const PB = 'ptn-bravo9';
@@ -525,5 +526,25 @@ describe('contactFollowUpAction (the opener follows up on their own thread)', ()
     await createTicketRepo(db).updateStatus('tk_ai', 'closed');
     expect((await contactFollowUpAction(followForm('tk_ai'))).ok).toBe(false);
     expect(await audits()).toHaveLength(0);
+  });
+});
+
+// Fix pack 8 T16 (critic R6): the ticket.status row of a classed ticket records the clock; an
+// unclassed ticket's meta stays exactly as before.
+describe('setStatusAction on a regulatory case (T16)', () => {
+  it('a classed status change records regClass, dueAt and beforeDue', async () => {
+    await signInAs({ role: 'admin' });
+    const t = await regCaseFor(db, PA, { regClass: 'error_notice', dueInMs: 86_400_000, phone: PHONE });
+    expect((await setStatusAction(statusForm(t.id))).ok).toBe(true);
+    const row = (await audits()).find((a) => a.subjectId === t.id && a.action === 'ticket.status');
+    expect(row!.meta).toEqual({
+      actorScope: 'partner', status: 'resolved', from: 'open', regClass: 'error_notice', dueAt: t.dueAt, beforeDue: true,
+    });
+  });
+  it('an unclassed status change keeps the meta byte-identical', async () => {
+    await signInAs({ role: 'admin' });
+    await setStatusAction(statusForm('tk_a2'));
+    const row = (await audits()).find((a) => a.subjectId === 'tk_a2');
+    expect(row!.meta).toEqual({ actorScope: 'partner', status: 'resolved', from: 'open' });
   });
 });

@@ -295,6 +295,13 @@
       "when": 1794462575908,
       "tag": "0041_hold_reviews",
       "breakpoints": true
+    },
+    {
+      "idx": 42,
+      "version": "7",
+      "when": 1794492338727,
+      "tag": "0042_partner_corridors",
+      "breakpoints": true
     }
   ]
 }

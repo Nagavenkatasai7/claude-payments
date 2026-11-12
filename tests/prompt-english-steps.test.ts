@@ -83,9 +83,10 @@ describe('ENGLISH TRANSACTION STEPS section (pack 6 P12)', () => {
 // Review round 1 (RC2): frozen sha256 of the flag-off prompts, computed on fix pack 5's final tree
 // (d9411d9) and again on this branch. The pins above compare the code with itself; these compare it
 // with the text that shipped. They change only with a deliberate change of the prompt text: when the
-// prompt is changed on purpose, update both literals in the same commit.
-const SHA_DEFAULT = '7a1dbf7d955edb3ae79e53f1eb10dfdc92f7731fe463a956bf85e1595583bed1'; // 44302 characters
-const SHA_BRANDED = '78ef9039aeed19d5a4b198a3fafbc9351edd4da30d0fa0a721e9d2c1a090241e'; // 44895 characters
+// prompt is changed on purpose, update both literals in the same commit. Recomputed on fix pack 8 T21 (the REFUNDS
+// section, the EXCEPTION list, the location rule and the request_human_help relay clause, P16).
+const SHA_DEFAULT = '2ef64765cd5e636ac622ae2fb9ed079ed4c42a5337cc81274df6381582478222'; // 44479 characters
+const SHA_BRANDED = '667c0a5d79b73b46fba07bd87bc1073ab7243127df425ea867759988570212bb'; // 45072 characters
 
 describe('flag-off prompts match the frozen pack 5 text (RC2)', () => {
   const sha = (text: string) => createHash('sha256').update(text, 'utf8').digest('hex');
@@ -93,10 +94,10 @@ describe('flag-off prompts match the frozen pack 5 text (RC2)', () => {
   it('default and branded prompts hash to the frozen literals, with the flag absent, false or undefined', () => {
     for (const flag of [{}, { englishTransactionSteps: false }, { englishTransactionSteps: undefined }]) {
       const def = buildSystemPrompt({ brand: 'SmartRemit', ...flag });
-      expect(def.length).toBe(44302);
+      expect(def.length).toBe(44479);
       expect(sha(def)).toBe(SHA_DEFAULT);
       const branded = buildSystemPrompt({ ...BRANDED, ...flag });
-      expect(branded.length).toBe(44895);
+      expect(branded.length).toBe(45072);
       expect(sha(branded)).toBe(SHA_BRANDED);
     }
     expect(sha(SYSTEM_PROMPT)).toBe(SHA_DEFAULT);

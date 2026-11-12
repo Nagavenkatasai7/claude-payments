@@ -46,6 +46,9 @@ const ROOTS: readonly string[] = [
   'src/lib/live-certified.ts',
   'src/lib/partner-decision-scope.ts',
   'src/lib/hold-queue.ts',
+  'src/lib/reg-clocks.ts',
+  'src/lib/error-notice.ts',
+  'src/lib/reg-case-view.ts',
   ...readdirSync(join(SRC, 'lib/legal'))
     .filter((f) => f.endsWith('.ts') && !LEGAL_SERVER_ONLY.has(f))
     .sort()
@@ -166,7 +169,7 @@ describe('client-reachable modules never reach node:* (P0 rule 13)', { retry: 0 
     expect(ROOTS).toEqual(expect.arrayContaining([
       'src/lib/risk-signals.ts', 'src/lib/compliance-config.ts', 'src/lib/partner-reviews.ts', 'src/lib/aml-rules.ts',
       'src/lib/pay-outcome.ts', 'src/lib/legal/disclosure-drafts.ts', 'src/lib/legal/esign-consent.ts',
-      'src/lib/legal/risk-warning.ts', 'src/lib/legal/drafts.ts',
+      'src/lib/legal/risk-warning.ts', 'src/lib/legal/drafts.ts', 'src/lib/legal/error-notice-drafts.ts',
       'src/lib/live-certified.ts', 'src/lib/partner-decision-scope.ts', 'src/lib/hold-queue.ts',
     ]));
     for (const r of ROOTS) expect(existsSync(join(ROOT, r)), r).toBe(true);

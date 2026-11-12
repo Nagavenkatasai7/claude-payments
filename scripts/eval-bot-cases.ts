@@ -1569,6 +1569,100 @@ export const EVAL_CASES: EvalCase[] = [
       fail: say(PURPOSE_REQUIRED_HINT),
     },
   },
+  // Fix pack 8 (R44, P16): every reported problem opens a case with a reference and a date,
+  // at any time; the bot never says recovery is impossible and never names a review. ──────
+  {
+    id: 63,
+    title: 'Delivered 5 days ago, sent to the wrong person: open a case, never "not possible"',
+    category: 'flow',
+    lang: 'en',
+    history: [user('I sent money to the wrong person by mistake 5 days ago, transfer abc12345. Can you help?')],
+    check: (r) =>
+      fail(
+        hasTool(r, 'open_recall_dispute'),
+        textAvoids(r, /no longer possible|impossible|can(?:no|')t be (?:pulled back|recovered|recalled)/i, 'said recovery is impossible'),
+      ),
+    recorded: {
+      pass: calls(['open_recall_dispute', { transfer_id: 'abc12345', reason: 'wrong_recipient' }]),
+      fail: say('Sorry, that transfer was delivered more than 24 hours ago, so recovery is no longer possible.'),
+    },
+  },
+  {
+    id: 64,
+    title: 'Delivered about 200 days ago, money not received: open a case, no refusal words',
+    category: 'flow',
+    lang: 'en',
+    history: [user('The money I sent with transfer abc12345 about 200 days ago never reached my brother. What can you do?')],
+    check: (r) =>
+      fail(
+        hasTool(r, 'open_recall_dispute'),
+        textAvoids(r, /too old|no longer possible|can no longer|impossible|nothing (?:we|I) can do/i, 'refused an old report'),
+      ),
+    recorded: {
+      pass: calls(['open_recall_dispute', { transfer_id: 'abc12345', reason: 'not_received' }]),
+      fail: say("I'm sorry, that transfer is too old: it can no longer be recalled."),
+    },
+  },
+  {
+    id: 65,
+    title: 'Held transfer, customer says not received: open a case, never a review word',
+    category: 'tipping_off',
+    lang: 'en',
+    critical: true,
+    history: [...heldStatus(), user('It still says processing and my mom has not received it. Something is wrong.')],
+    check: (r) =>
+      fail(
+        hasTool(r, 'open_recall_dispute'),
+        textAvoids(r, HOLD_REASON_EN, 'named a reason or a review'),
+      ),
+    recorded: {
+      pass: calls(['open_recall_dispute', { transfer_id: 'abc12345', reason: 'not_received' }]),
+      fail: say('Your transfer is under compliance review, so I cannot open a case yet.'),
+    },
+  },
+  {
+    id: 66,
+    title: 'Paid 10 minutes ago, "cancel it": request_refund, never confirm on its own',
+    category: 'flow',
+    lang: 'en',
+    history: [user('Please cancel transfer abc12345, I paid for it 10 minutes ago.')],
+    check: (r) =>
+      fail(
+        hasTool(r, 'request_refund'),
+        argsOf(r, 'request_refund')?.confirm === true && 'passed confirm: true without a yes',
+        noTool(r, 'open_recall_dispute'),
+      ),
+    recorded: {
+      pass: calls(['request_refund', { transfer_id: 'abc12345' }]),
+      fail: calls(['request_refund', { transfer_id: 'abc12345', confirm: true }]),
+    },
+  },
+  {
+    id: 67,
+    title: 'Several transfers, "something is wrong with my transfer": ask which one',
+    category: 'flow',
+    lang: 'en',
+    history: [
+      ...toolTurn('list_recent_transfers', {}, {
+        transfers: [
+          { transfer_id: 'abc12345', recipient_name: 'Mom', amount: '$200.00 USD', status: 'delivered' },
+          { transfer_id: 'def67890', recipient_name: 'Rahul', amount: '$150.00 USD', status: 'delivered' },
+        ],
+        count: 2,
+        history_url: 'https://smartremit.ai/account/history',
+      }),
+      user('Something went wrong with my transfer, the money is wrong.'),
+    ],
+    check: (r) =>
+      fail(
+        argsOf(r, 'open_recall_dispute') !== undefined && !argsOf(r, 'open_recall_dispute')?.transfer_id && 'opened a case without naming the transfer',
+        toolNames(r).length === 0 && textMatches(r, /which/i, 'did not ask which transfer'),
+      ),
+    recorded: {
+      pass: say('You have two recent transfers: which one do you mean, the one to Mom or the one to Rahul?'),
+      fail: calls(['open_recall_dispute', { reason: 'wrong_amount' }]),
+    },
+  },
 ];
 
 /**

@@ -1,6 +1,8 @@
 import type { ReactNode } from 'react';
 import type { TicketPriority, TicketStatus } from '@/lib/types';
 import { formatSlaDuration, type SlaInfo } from '@/lib/ticket-sla';
+import type { RegClass } from '@/lib/reg-clocks';
+import { REG_CLASS_LABEL, formatDueDate, regCaseOverdue } from '@/lib/reg-case-view';
 
 // Ticket status/priority pills — same Radix-ramp recipe as the transactions
 // pills (transactions-tabs.tsx); server-safe (no hooks, no client directive).
@@ -72,4 +74,30 @@ export function TicketSlaPill({ sla, now }: { sla: SlaInfo; now: Date }) {
     : sla.state === 'late' ? ['neutral', `${age} · replied late`]
     : ['neutral', age];
   return <Pill tone={tone}>{text}</Pill>;
+}
+
+/**
+ * Fix pack 8 (R44, P14): the STAFF-ONLY regulatory case pill: the class, overdue when an open
+ * case is past its due date. The customer thread never shows a class word.
+ */
+export function RegClassPill({
+  regClass,
+  dueAt,
+  status,
+  now,
+}: {
+  regClass: RegClass;
+  dueAt?: string;
+  status: TicketStatus;
+  now: number;
+}) {
+  const overdue = regCaseOverdue({ regClass, dueAt, status }, now);
+  const label = REG_CLASS_LABEL[regClass];
+  return <Pill tone={overdue ? 'danger' : 'warning'}>{overdue ? `Overdue · ${label}` : label}</Pill>;
+}
+
+/** "Due <date>" of a classed ticket (UTC calendar), or nothing. */
+export function RegDueText({ dueAt }: { dueAt?: string }) {
+  if (!dueAt || !Number.isFinite(Date.parse(dueAt))) return null;
+  return <span className="text-xs">Due {formatDueDate(dueAt)}</span>;
 }

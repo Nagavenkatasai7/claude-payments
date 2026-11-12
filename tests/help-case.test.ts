@@ -97,7 +97,7 @@ describe('openHelpCase(tx): ticket + triage + one deduped alert, in the caller t
     const base = { partnerId: 'default', phone: PHONE, channel: 'whatsapp', source: 'keyword' } as const;
     const a = await db.transaction((tx) => openHelpCase(tx, { ...base, reason: 'question' }));
     const b = await db.transaction((tx) => openHelpCase(tx, { ...base, reason: 'unauthorised' }));
-    expect(b).toEqual({ caseId: a.caseId, partnerId: 'default', created: false });
+    expect(b).toEqual({ caseId: a.caseId, partnerId: 'default', created: false, regClass: 'fraud_report', dueAt: expect.any(String), caseCreatedOrStamped: true });
     const msgs = await createTicketRepo(db).listMessages(a.caseId, { includeInternal: true });
     expect(msgs).toHaveLength(2);
     expect(msgs[1]).toMatchObject({ actorType: 'system', internal: true });

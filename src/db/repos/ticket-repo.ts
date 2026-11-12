@@ -1,4 +1,4 @@
-import { and, desc, eq, asc, sql, count, inArray, notInArray, or } from 'drizzle-orm';
+import { and, desc, eq, asc, sql, count, inArray, notInArray, or, isNull, isNotNull } from 'drizzle-orm';
 import { tickets, ticketMessages } from '@/db/schema';
 import type { DbOrTx } from '@/db/client';
 import { HUMAN_HELP_CATEGORY, HUMAN_HELP_SUBJECT, MFA_RECOVERY_CATEGORY } from '@/lib/ticket-category';
@@ -6,6 +6,7 @@ import { FIRST_RESPONSE_DUE_HOURS } from '@/lib/ticket-sla';
 import { decryptField, defaultProvider, encryptField, type EncryptionKeyProvider } from '@/lib/field-crypto';
 import { ctx } from '@/lib/crypto-context';
 import { logWarn } from '@/lib/log';
+import { isRegClass, type RegClass } from '@/lib/reg-clocks';
 import type {
   PartnerId,
   Ticket,
@@ -47,6 +48,14 @@ function rowToTicket(row: TicketRow): Ticket {
   if (row.category) t.category = row.category;
   if (row.assignedTo) t.assignedTo = row.assignedTo;
   if (row.closedAt) t.closedAt = row.closedAt.toISOString();
+  // Fix pack 8 (P6): the regulatory fields, only when set. reg_class has no CHECK in the DB, so an
+  // unknown stored text is dropped here (logged with the ticket id only).
+  if (row.regClass != null) {
+    if (isRegClass(row.regClass)) t.regClass = row.regClass;
+    else logWarn('ticket.reg_class_unknown', 'unknown class', { ticketId: row.id });
+  }
+  if (row.firstNoticeAt) t.firstNoticeAt = row.firstNoticeAt.toISOString();
+  if (row.dueAt) t.dueAt = row.dueAt.toISOString();
   return t;
 }
 
@@ -97,6 +106,25 @@ export interface CreateTicketInput {
   priority?: TicketPriority;
   category?: string;
   body: string;             // the first message
+  /**
+   * Fix pack 8 (R44, P6): a regulatory case. All three or none (a partial set, or a class that
+   * is not a RegClass, throws before any write); when given, priority is forced 'urgent'.
+   */
+  regClass?: RegClass;
+  firstNoticeAt?: Date;
+  dueAt?: Date;
+}
+
+const OPEN_STATUSES = ['open', 'pending', 'waiting_admin'] as const;
+
+/** The all-or-none rule of a regulatory case input (P6); null = not a regulatory case. */
+function regFields(input: CreateTicketInput): { regClass: RegClass; firstNoticeAt: Date; dueAt: Date } | null {
+  const given = [input.regClass, input.firstNoticeAt, input.dueAt].filter((v) => v !== undefined).length;
+  if (given === 0) return null;
+  if (given !== 3 || !isRegClass(input.regClass)) {
+    throw new TypeError('reg case needs class, first notice and due');
+  }
+  return { regClass: input.regClass, firstNoticeAt: input.firstNoticeAt!, dueAt: input.dueAt! };
 }
 
 export interface TicketRepoOptions {
@@ -140,6 +168,7 @@ export function createTicketRepo(db: DbOrTx, opts: TicketRepoOptions = {}) {
   const repo = {
     /** Create the ticket + its first message in ONE transaction. */
     async createTicket(input: CreateTicketInput): Promise<Ticket> {
+      const reg = regFields(input); // throws before any write
       const run = async (tx: DbOrTx) => {
         const rows = await tx
           .insert(tickets)
@@ -152,8 +181,9 @@ export function createTicketRepo(db: DbOrTx, opts: TicketRepoOptions = {}) {
             transferId: input.transferId ?? null,
             subject: input.subject,
             status: 'open',
-            priority: input.priority ?? 'normal',
+            priority: reg ? 'urgent' : (input.priority ?? 'normal'),
             category: input.category ?? null,
+            ...(reg ? { regClass: reg.regClass, firstNoticeAt: reg.firstNoticeAt, dueAt: reg.dueAt } : {}),
           })
           .returning();
         await insertSealedMessage(
@@ -269,6 +299,115 @@ export function createTicketRepo(db: DbOrTx, opts: TicketRepoOptions = {}) {
         )
         .limit(1);
       return rows[0] ? rowToTicket(rows[0]) : null;
+    },
+
+    /**
+     * Fix pack 8 (P6): the newest OPEN regulatory case of one transfer and class under ONE tenant
+     * (partnerId in the WHERE); customer tickets only.
+     */
+    async findOpenRegCase(partnerId: PartnerId, transferId: string, regClass: RegClass): Promise<Ticket | null> {
+      const rows = await db
+        .select()
+        .from(tickets)
+        .where(
+          and(
+            eq(tickets.partnerId, partnerId),
+            eq(tickets.transferId, transferId),
+            eq(tickets.regClass, regClass),
+            eq(tickets.kind, 'customer'),
+            inArray(tickets.status, [...OPEN_STATUSES]),
+          ),
+        )
+        .orderBy(desc(tickets.createdAt), desc(tickets.id))
+        .limit(1);
+      return rows[0] ? rowToTicket(rows[0]) : null;
+    },
+
+    /**
+     * Fix pack 8 (P6, critics M5/P8/R5): the customer's newest OPEN complaint case with no transfer
+     * under ONE tenant (one open transfer-less complaint per customer; T15 reuses it).
+     */
+    async findOpenComplaintNoTransfer(partnerId: PartnerId, phone: string): Promise<Ticket | null> {
+      const rows = await db
+        .select()
+        .from(tickets)
+        .where(
+          and(
+            eq(tickets.partnerId, partnerId),
+            eq(tickets.customerPhone, phone),
+            isNull(tickets.transferId),
+            eq(tickets.regClass, 'complaint'),
+            eq(tickets.kind, 'customer'),
+            inArray(tickets.status, [...OPEN_STATUSES]),
+          ),
+        )
+        .orderBy(desc(tickets.createdAt), desc(tickets.id))
+        .limit(1);
+      return rows[0] ? rowToTicket(rows[0]) : null;
+    },
+
+    /**
+     * Fix pack 8 (P6, D3/D4): move a regulatory case's due date EARLIER, never later (one UPDATE
+     * with LEAST). An unclassed ticket or another tenant's id is not touched.
+     */
+    async tightenDueAt(id: string, partnerId: PartnerId, dueAt: Date): Promise<void> {
+      await db
+        .update(tickets)
+        .set({ dueAt: sql`LEAST(${tickets.dueAt}, ${dueAt.toISOString()}::timestamptz)`, updatedAt: new Date() })
+        .where(and(eq(tickets.id, id), eq(tickets.partnerId, partnerId), isNotNull(tickets.regClass)));
+    },
+
+    /**
+     * Fix pack 8 (P6, fix F2, early review FC2): lock ONE tenant's ticket row (`SELECT ... FOR
+     * UPDATE`; drizzle pg-core `select().for('update')`, node_modules/drizzle-orm/pg-core/
+     * query-builders/select.d.ts:586) and return the FRESH row when it is still open (open, pending
+     * or waiting_admin), else null (also null for an unknown id or another tenant's). A case writer
+     * calls it right after a find returns a case and continues with ITS result, so a staff resolve
+     * that committed in between makes the writer create a new case (owner question 14). The row lock
+     * lasts until the caller's transaction ends (with a pool handle it ends at once).
+     */
+    async lockOpenCase(id: string, partnerId: PartnerId): Promise<Ticket | null> {
+      const rows = await db
+        .select()
+        .from(tickets)
+        .where(and(eq(tickets.id, id), eq(tickets.partnerId, partnerId)))
+        .for('update');
+      const row = rows[0];
+      if (!row || !(OPEN_STATUSES as readonly string[]).includes(row.status)) return null;
+      return rowToTicket(row);
+    },
+
+    /**
+     * Fix pack 8 (P6): stamp a class and its clock on an UNCLASSED case of ONE tenant, once (one
+     * UPDATE ... WHERE reg_class IS NULL). True when a row was stamped; a classed case is never
+     * re-classed and its clock never moves. Fix F2 (FC2): the WHERE also requires an OPEN status, a
+     * second guard behind `lockOpenCase`, so a resolved or closed case is never stamped.
+     */
+    async stampRegClass(
+      id: string,
+      partnerId: PartnerId,
+      f: { regClass: RegClass; firstNoticeAt: Date; dueAt: Date },
+    ): Promise<boolean> {
+      if (!isRegClass(f.regClass)) throw new TypeError('reg case needs class, first notice and due');
+      const rows = await db
+        .update(tickets)
+        .set({
+          regClass: f.regClass,
+          firstNoticeAt: f.firstNoticeAt,
+          dueAt: f.dueAt,
+          priority: 'urgent',
+          updatedAt: new Date(),
+        })
+        .where(
+          and(
+            eq(tickets.id, id),
+            eq(tickets.partnerId, partnerId),
+            isNull(tickets.regClass),
+            inArray(tickets.status, [...OPEN_STATUSES]),
+          ),
+        )
+        .returning({ id: tickets.id });
+      return rows.length === 1;
     },
 
     /**
@@ -444,18 +583,24 @@ export function createTicketRepo(db: DbOrTx, opts: TicketRepoOptions = {}) {
     /**
      * Set the triage fields. A two-step recovery request keeps its category whatever the caller
      * passes (checked in the same UPDATE): the recovery card and the action locks key on it.
+     * Fix pack 8 (P6): a regulatory case (reg_class set) keeps BOTH its priority and its category,
+     * in the same UPDATE. `applied` is true only when the row exists and is unclassed.
      */
-    async setTriage(id: string, fields: { category?: string; priority?: TicketPriority }): Promise<void> {
-      await db
+    async setTriage(id: string, fields: { category?: string; priority?: TicketPriority }): Promise<{ applied: boolean }> {
+      const rows = await db
         .update(tickets)
         .set({
           ...(fields.category !== undefined
-            ? { category: sql`CASE WHEN ${tickets.category} = ${MFA_RECOVERY_CATEGORY} THEN ${tickets.category} ELSE ${fields.category} END` }
+            ? { category: sql`CASE WHEN ${tickets.regClass} IS NOT NULL OR ${tickets.category} = ${MFA_RECOVERY_CATEGORY} THEN ${tickets.category} ELSE ${fields.category} END` }
             : {}),
-          ...(fields.priority !== undefined ? { priority: fields.priority } : {}),
+          ...(fields.priority !== undefined
+            ? { priority: sql`CASE WHEN ${tickets.regClass} IS NOT NULL THEN ${tickets.priority} ELSE ${fields.priority} END` }
+            : {}),
           updatedAt: new Date(),
         })
-        .where(eq(tickets.id, id));
+        .where(eq(tickets.id, id))
+        .returning({ regClass: tickets.regClass });
+      return { applied: rows.length === 1 && rows[0].regClass === null };
     },
 
     /** Append a message and bump the ticket's updatedAt together. */
@@ -575,6 +720,40 @@ export function createTicketRepo(db: DbOrTx, opts: TicketRepoOptions = {}) {
           priority: r.priority as TicketPriority,
           createdAt: r.createdAt.toISOString(),
         })),
+      };
+    },
+
+    /**
+     * Fix pack 8 (P6, P15): regulatory cases of ANY tenant (platform sweep for the daily digest)
+     * still open and due by `now + withinMs`: the window total, how many are already overdue,
+     * and the ids of the `limit` earliest due (ids only: no subject, phone or text).
+     */
+    async listRegClockDue(opts: { now: Date; withinMs: number; limit?: number }): Promise<{
+      total: number;
+      overdue: number;
+      ids: string[];
+    }> {
+      const nowIso = opts.now.toISOString();
+      const horizonIso = new Date(opts.now.getTime() + opts.withinMs).toISOString();
+      const rows = await db
+        .select({
+          id: tickets.id,
+          total: sql<number>`count(*) over ()`,
+          overdue: sql<number>`count(*) filter (where ${tickets.dueAt} < ${nowIso}::timestamptz) over ()`,
+        })
+        .from(tickets)
+        .where(and(
+          isNotNull(tickets.regClass),
+          inArray(tickets.status, [...OPEN_STATUSES]),
+          sql`${tickets.dueAt} <= ${horizonIso}::timestamptz`,
+        ))
+        .orderBy(asc(tickets.dueAt), asc(tickets.id))
+        .limit(opts.limit ?? 5);
+      const first = rows[0];
+      return {
+        total: Number(first?.total ?? 0),
+        overdue: Number(first?.overdue ?? 0),
+        ids: rows.map((r) => r.id),
       };
     },
 

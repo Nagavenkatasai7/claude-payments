@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import type { PortalSite } from '@/lib/portal-site';
-import { eq } from 'drizzle-orm';
+import { eq, sql } from 'drizzle-orm';
 import type { Db } from '@/db/client';
 import { auditEvents, customerPortalPrefs, outbox, tickets, transfers } from '@/db/schema';
 import { encryptField } from '@/lib/field-crypto';
@@ -208,17 +208,20 @@ describe('requestRefundPortalAction', () => {
   });
 });
 
+// Fix pack 8 (T14): a consumer report opens its case; the state carries the case text.
+const OPENED = { notice: 'portal.report.opened', text: expect.stringContaining('tk_') };
+
 describe('requestRecallPortalAction', () => {
   it("A's delivered transfer → one ticket on A (session partner + phone); a replay opens no second", async () => {
     const f = fd({ reason: 'not_received' });
-    expect(await requestRecallPortalAction(A.transferIds[1], null, f)).toEqual({ notice: 'portal.recall.opened' });
-    expect(await requestRecallPortalAction(A.transferIds[1], null, f)).toEqual({ notice: 'portal.recall.opened' });
+    expect(await requestRecallPortalAction(A.transferIds[1], null, f)).toEqual(OPENED);
+    expect(await requestRecallPortalAction(A.transferIds[1], null, f)).toEqual(OPENED);
     const rows = await db.select().from(tickets).where(eq(tickets.transferId, A.transferIds[1]));
     expect(rows).toHaveLength(1);
     expect(rows[0].partnerId).toBe('pa');
   });
   it('a forged reason → bad-reason copy', async () => {
-    expect(await requestRecallPortalAction(A.transferIds[1], null, fd({ reason: 'x' }))).toEqual({ error: 'portal.recall.bad_reason' });
+    expect(await requestRecallPortalAction(A.transferIds[1], null, fd({ reason: 'x' }))).toEqual({ error: 'portal.report.bad_reason' });
   });
   it("B's transfer → not found", async () => {
     expect(await requestRecallPortalAction(B.transferIds[1], null, fd({ reason: 'not_received' }))).toEqual({ error: 'portal.transfer.not_found' });
@@ -228,24 +231,38 @@ describe('requestRecallPortalAction', () => {
       requestRecallPortalAction(A.transferIds[1], null, fd({ reason: 'not_received' })),
       requestRecallPortalAction(A.transferIds[1], null, fd({ reason: 'wrong_amount' })),
     ]);
-    expect(r1).toEqual({ notice: 'portal.recall.opened' });
-    expect(r2).toEqual({ notice: 'portal.recall.opened' });
-    expect(await requestRecallPortalAction(A.transferIds[1], null, fd({ reason: 'other' }))).toEqual({ notice: 'portal.recall.opened' });
+    expect(r1).toEqual(OPENED);
+    expect(r2).toEqual(OPENED);
+    expect(await requestRecallPortalAction(A.transferIds[1], null, fd({ reason: 'other' }))).toEqual(OPENED);
     expect(await db.select().from(tickets).where(eq(tickets.transferId, A.transferIds[1]))).toHaveLength(1);
   });
-  it('M2-14 (#397 L1): the cap still counts THIS tenant: 5 open tickets on A cap A', async () => {
+  // Fix pack 8 (T14): the cap applies only to the unclassed b2b recall (a consumer case is never
+  // capped), so the cap pins run on A's delivered transfer turned b2b inside the 24h window.
+  const b2b = async (id: string) => {
+    await db.execute(sql`UPDATE transfers SET transfer_type = 'b2b', delivered_at = now() - interval '1 hour' WHERE id = ${id}`);
+  };
+  it('M2-14 (#397 L1): the cap still counts THIS tenant: 5 open tickets on A cap A (b2b)', async () => {
+    await b2b(A.transferIds[1]);
     const repo = createTicketRepo(db);
     for (let i = 0; i < 5; i++) {
       await repo.createTicket({ id: `tk_capa${i}`, partnerId: 'pa', kind: 'customer', customerPhone: phone, subject: 's', body: 'b' });
     }
-    expect(await requestRecallPortalAction(A.transferIds[1], null, fd({ reason: 'not_received' }))).toEqual({ error: 'portal.recall.cap' });
+    expect(await requestRecallPortalAction(A.transferIds[1], null, fd({ reason: 'not_received' }))).toEqual({ error: 'portal.report.cap' });
   });
-  it("the open-ticket cap counts THIS tenant only: 5 open tickets on B do not cap A", async () => {
+  it("the open-ticket cap counts THIS tenant only: 5 open tickets on B do not cap A (b2b)", async () => {
+    await b2b(A.transferIds[1]);
     const repo = createTicketRepo(db);
     for (let i = 0; i < 5; i++) {
       await repo.createTicket({ id: `tk_capb${i}`, partnerId: 'pb', kind: 'customer', customerPhone: phone, subject: 's', body: 'b' });
     }
-    expect(await requestRecallPortalAction(A.transferIds[1], null, fd({ reason: 'not_received' }))).toEqual({ notice: 'portal.recall.opened' });
+    expect(await requestRecallPortalAction(A.transferIds[1], null, fd({ reason: 'not_received' }))).toEqual({ notice: 'portal.report.opened' });
+  });
+  it('a consumer report is never capped: 5 open tickets on A still open the case', async () => {
+    const repo = createTicketRepo(db);
+    for (let i = 0; i < 5; i++) {
+      await repo.createTicket({ id: `tk_capc${i}`, partnerId: 'pa', kind: 'customer', customerPhone: phone, subject: 's', body: 'b' });
+    }
+    expect(await requestRecallPortalAction(A.transferIds[1], null, fd({ reason: 'not_received' }))).toEqual(OPENED);
   });
 });
 

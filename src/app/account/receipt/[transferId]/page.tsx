@@ -25,6 +25,11 @@ import { resolvePartnerDisclosure } from '@/lib/partner-config';
 import { buildReceiptDisclosure, formatRateLine } from '@/lib/remittance-disclosure';
 import { providerLineFor } from '@/lib/legal/provider-line';
 import { ReceiptDisclosureCard } from './disclosure-card';
+import { getDb } from '@/db/client';
+import { createTicketRepo } from '@/db/repos/ticket-repo';
+import { caseBannerFor } from '@/lib/report-banner';
+import { RECALL_REASON_VALUES } from '@/lib/receipt-cores';
+import { t as tr, type MessageKey } from '@/lib/i18n';
 
 export const metadata = { title: 'Receipt · SmartRemit' };
 
@@ -42,6 +47,18 @@ const RECALL_REASONS: { value: string; label: string }[] = [
   { value: 'unauthorized', label: "I didn't authorize this transfer" },
   { value: 'other', label: 'Something else' },
 ];
+
+// Fix pack 8 (R44, P11, T14): the consumer "Report a problem" card's reasons (catalogue keys).
+const REPORT_REASON_KEY: Record<(typeof RECALL_REASON_VALUES)[number], MessageKey> = {
+  not_received: 'receipt.report.reason.not_received',
+  wrong_recipient: 'receipt.report.reason.wrong_recipient',
+  wrong_amount: 'receipt.report.reason.wrong_amount',
+  unauthorized: 'receipt.report.reason.unauthorized',
+  other: 'receipt.report.reason.other',
+};
+
+/** A `?case=` value worth one ticket read (a ticket id shape; anything else reads nothing). */
+const CASE_ID_RE = /^tk_[A-Za-z0-9_-]{1,64}$/;
 
 // Friendly messages for the redirect-with-code refusals the recall action emits.
 const RECALL_ERROR_MSG: Record<string, string> = {
@@ -130,14 +147,14 @@ export default async function ReceiptPage({
   searchParams,
 }: {
   params: Promise<{ transferId: string }>;
-  searchParams: Promise<{ error?: string; cancel?: string }>;
+  searchParams: Promise<{ error?: string; cancel?: string; case?: string; added?: string }>;
 }) {
   const { transferId } = await params;
   const customer = await requireCustomer({
     portalPath: `/portal/transfers/${encodeURIComponent(transferId)}`,
     signedOutTo: `/account/continue/receipt/${encodeURIComponent(transferId)}`,
   });
-  const { error, cancel } = await searchParams;
+  const { error, cancel, case: caseParam, added } = await searchParams;
   const store = getStore();
   const t = await store.getTransfer(transferId);
   if (!t || t.phone !== customer.senderPhone || t.partnerId !== customer.partnerId) notFound();
@@ -174,6 +191,9 @@ export default async function ReceiptPage({
   // CTA). refundDisposition already requires refundStatus 'none', so this never
   // collides with the refund block above.
   const canRecall = isRecallEligible(t, Date.now());
+  // Fix pack 8 (R44, P11, T14): a consumer, non-test transfer can always be reported (the action
+  // opens its case, no code asked); b2b and sandbox rows keep the 24h card above (canRecall).
+  const consumerReport = !isB2b && (t.environment ?? 'live') !== 'test';
   const stepUpErrorMsg = error ? STEP_UP_ERROR_MSG[error] : undefined;
   const recallErrorMsg = error ? (RECALL_ERROR_MSG[error] ?? stepUpErrorMsg) : undefined;
   // Program-Fix 49D: with two-step verification on, both requests ask for a
@@ -217,6 +237,17 @@ export default async function ReceiptPage({
     resolved,
     Date.now(),
   );
+
+  // The case text after a report (`?case=<ticketId>[&added=1]`): ONE ticket read; caseBannerFor
+  // shows it only for the viewer's own classed case on THIS transfer (a forged id shows nothing).
+  const caseId = typeof caseParam === 'string' && CASE_ID_RE.test(caseParam) ? caseParam : null;
+  const caseText = caseId
+    ? caseBannerFor(
+        await createTicketRepo(getDb()).getTicket(caseId),
+        { partnerId: customer.partnerId, phone: customer.senderPhone },
+        { transferId: t.id, reused: added === '1', providerLine: providerLineFor(resolved) },
+      )
+    : null;
 
   return (
     <AccountShell active="transfers" customer={customer}>
@@ -398,8 +429,62 @@ export default async function ReceiptPage({
           </Card>
         )}
 
-        {/* Report a problem — delivered transfer inside the 24h recall window. */}
-        {canRecall && (
+        {caseText && (
+          <Alert className="sm:col-span-2" role="status">
+            <AlertTitle>{tr('receipt.report.opened')}</AlertTitle>
+            <AlertDescription>{caseText}</AlertDescription>
+          </Alert>
+        )}
+
+        {/* Fix pack 8: report a problem with a consumer transfer (any time; opens a case). */}
+        {consumerReport && (
+          <Card className="sm:col-span-2">
+            <CardHeader>
+              <CardTitle>{tr('receipt.report.title')}</CardTitle>
+            </CardHeader>
+            <CardContent>
+              {recallErrorMsg ? (
+                <Alert variant="destructive" className="mb-4">
+                  <AlertTitle>We couldn&rsquo;t report that</AlertTitle>
+                  <AlertDescription>{recallErrorMsg}</AlertDescription>
+                </Alert>
+              ) : null}
+              <form action={requestRecallAction} className="flex flex-col gap-4">
+                <input type="hidden" name="transferId" value={t.id} />
+                <div className="flex flex-col gap-1.5">
+                  <label htmlFor="report-reason" className="text-sm font-medium text-foreground">
+                    What went wrong?
+                  </label>
+                  <select
+                    id="report-reason"
+                    name="reason"
+                    defaultValue=""
+                    required
+                    className="h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-base shadow-xs outline-none transition-[color,box-shadow] focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50 md:text-sm"
+                  >
+                    <option value="" disabled>
+                      Choose a reason…
+                    </option>
+                    {RECALL_REASON_VALUES.map((value) => (
+                      <option key={value} value={value}>
+                        {tr(REPORT_REASON_KEY[value])}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <p className="max-w-prose text-sm text-muted-foreground">{tr('receipt.report.intro')}</p>
+                  <Button type="submit" variant="destructive" className="shrink-0">
+                    {tr('receipt.report.submit')}
+                  </Button>
+                </div>
+              </form>
+            </CardContent>
+          </Card>
+        )}
+
+        {/* Report a problem — b2b / sandbox: delivered transfer inside the 24h recall window. */}
+        {!consumerReport && canRecall && (
           <Card className="sm:col-span-2">
             <CardHeader>
               <CardTitle>Report a problem with this transfer</CardTitle>
