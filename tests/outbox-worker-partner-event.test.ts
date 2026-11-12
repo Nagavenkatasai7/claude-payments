@@ -120,6 +120,34 @@ function deepKeys(v: unknown, out: string[] = []): string[] {
   return out;
 }
 
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const ISO_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{3})?Z$/;
+/** The body id (randomUUID) and the clock values are checked by FORMAT only (O10). */
+const TIME_KEYS = new Set(['screened_at', 'decided_at']);
+/** Every key and every other string or number of a POSTed body misses every leak value. */
+function scanBodyValues(v: unknown, leaks: string[], path: string): void {
+  if (v && typeof v === 'object') {
+    for (const [k, x] of Object.entries(v)) {
+      for (const l of leaks) expect(k, path).not.toContain(l);
+      if (path === 'body' && k === 'id') {
+        expect(x, `${path}.${k}`).toMatch(UUID_RE);
+        continue;
+      }
+      if (path === 'body' && k === 'created') {
+        expect(Number.isSafeInteger(x), `${path}.${k}`).toBe(true);
+        continue;
+      }
+      if (TIME_KEYS.has(k)) {
+        expect(x, `${path}.${k}`).toMatch(ISO_RE);
+        continue;
+      }
+      scanBodyValues(x, leaks, `${path}.${k}`);
+    }
+  } else if (typeof v === 'string' || typeof v === 'number') {
+    for (const l of leaks) expect(String(v), path).not.toContain(l);
+  }
+}
+
 async function heldMatch(partnerId = 'acme', id?: string): Promise<Transfer> {
   return heldRowFor(db, partnerId, 'sanctions_review', id ? { id } : {});
 }
@@ -435,7 +463,8 @@ describe('partner.event worker case (P18)', { retry: 0 }, () => {
     expect(await alerts()).toEqual([]);
   });
 
-  it('deep scan of every POSTed body: no name, phone, amount, reference, payout, hash or reason key', async () => {
+  /** Queues one match and one disposition event, drains, and scans both POSTed bodies. */
+  async function deepScanPosted(): Promise<void> {
     const t = await heldMatch();
     await db.execute(sql`UPDATE transfers SET client_reference = 'ord-9' WHERE id = ${t.id}`);
     await queueMatch(t.id);
@@ -451,11 +480,28 @@ describe('partner.event worker case (P18)', { retry: 0 }, () => {
       for (const banned of ['name', 'phone', 'amount', 'reference', 'payout', 'inputHash', 'listHash', 'listBaseHash', 'reason']) {
         expect(keys).not.toContain(banned);
       }
-      for (const leak of ['Test Recipient', '15551239876', '919800000999', '123456789012', 'Reason text']) {
-        expect(String(init.body)).not.toContain(leak);
-      }
+      scanBodyValues(JSON.parse(String(init.body)), ['Test Recipient', '15551239876', '919800000999', '123456789012', 'Reason text'], 'body');
+    }
+  }
+
+  it('deep scan of every POSTed body: no name, phone, amount, reference, payout, hash or reason key', async () => {
+    await deepScanPosted();
+  });
+
+  it('a random event id that happens to contain a leak digit run still passes the deep scan (F5)', async () => {
+    let n = 0;
+    // Every id the code draws here ends in '123456789012'; each is still unique.
+    const spy = vi
+      .spyOn(globalThis.crypto, 'randomUUID')
+      .mockImplementation(() => `${(++n).toString(16).padStart(8, '0')}-0000-4000-8000-123456789012` as `${string}-${string}-${string}-${string}-${string}`);
+    try {
+      await deepScanPosted();
+      expect(posted().map(([, init]) => (JSON.parse(String(init.body)) as { id: string }).id).every((id) => id.endsWith('123456789012'))).toBe(true);
+    } finally {
+      spy.mockRestore();
     }
   });
+
 
   it('unknown event type (O7): no POST, no record, released uncharged; one unknownkind alert per day', async () => {
     await outbox.enqueue('partner.event', { type: 'complaint.opened', transferId: 'tr_x', eventId: 'e1' }, { dedupeKey: 'complaint.opened:tr_x' });

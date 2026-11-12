@@ -467,6 +467,31 @@ describe('staff release re-screen (P21 site 4)', { retry: 0 }, () => {
   });
 });
 
+const HYGIENE_FORBIDDEN = [PHONE, '919000000322', 'Mom', 'Alex Sender', '200', '17000', '0.9', 'test:1', 'test-list', 'mom@upi'];
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+/** Ids drawn from randomUUID: checked by FORMAT only (O10); a UUID cannot carry a name, phone, amount, score or list id. */
+const RANDOM_ID_KEYS = new Set(['eventId', 'reviewId']);
+
+/**
+ * Every key passes the key-name regex. A random id key must be a UUID; every
+ * other string or number misses every forbidden fixture value.
+ */
+function hygieneWalk(v: unknown, path: string): void {
+  if (v && typeof v === 'object') {
+    for (const [k, x] of Object.entries(v)) {
+      expect(k, path).not.toMatch(/name|phone|amount|score|entry|list|hash|reason|payout/i);
+      if (RANDOM_ID_KEYS.has(k)) {
+        expect(x, `${path}.${k}`).toMatch(UUID_RE);
+        continue;
+      }
+      hygieneWalk(x, `${path}.${k}`);
+    }
+  } else if (typeof v === 'string' || typeof v === 'number') {
+    for (const f of HYGIENE_FORBIDDEN) expect(String(v), path).not.toContain(f);
+  }
+}
+
 describe('payload hygiene', { retry: 0 }, () => {
   it('no enqueued payload carries a name, phone, amount, score or list id', async () => {
     const { db, store, partnerStore, mvs } = await makeStores();
@@ -475,20 +500,32 @@ describe('payload hygiene', { retry: 0 }, () => {
     const t = await createTransfer(store, partnerStore, mvs, { ...base, partnerId: 'acme', id: 'tr_pm_scan' });
     const rows = await eventRows(db);
     expect(rows.length).toBeGreaterThan(0);
-    const forbidden = [PHONE, '919000000322', 'Mom', 'Alex Sender', '200', '17000', '0.9', 'test:1', 'test-list', 'mom@upi'];
-    const walk = (v: unknown, path: string) => {
-      if (v && typeof v === 'object') {
-        for (const [k, x] of Object.entries(v)) {
-          expect(k, path).not.toMatch(/name|phone|amount|score|entry|list|hash|reason|payout/i);
-          walk(x, `${path}.${k}`);
-        }
-      } else if (typeof v === 'string' || typeof v === 'number') {
-        for (const f of forbidden) expect(String(v), path).not.toContain(f);
-      }
-    };
     for (const r of rows) {
-      walk(r.payload, 'payload');
+      hygieneWalk(r.payload, 'payload');
       expect(r.payload.transferId).toBe(t.id);
+    }
+  });
+
+  it('a random eventId that happens to contain a forbidden digit run (200) still passes the walk (F5)', async () => {
+    const { db, store, partnerStore, mvs } = await makeStores();
+    await mockRailPartner(db, 'acme', { certify: true });
+    screenerMode = 'possible';
+    let n = 0;
+    // Every id the code draws in this test contains '200'; each is still unique.
+    const spy = vi
+      .spyOn(globalThis.crypto, 'randomUUID')
+      .mockImplementation(() => `20000000-0000-4000-8000-${String(++n).padStart(9, '0')}200` as `${string}-${string}-${string}-${string}-${string}`);
+    try {
+      const t = await createTransfer(store, partnerStore, mvs, { ...base, partnerId: 'acme', id: 'tr_pm_scan_id' });
+      const rows = await eventRows(db);
+      expect(rows.length).toBeGreaterThan(0);
+      for (const r of rows) {
+        expect(String(r.payload.eventId)).toContain('200');
+        hygieneWalk(r.payload, 'payload');
+        expect(r.payload.transferId).toBe(t.id);
+      }
+    } finally {
+      spy.mockRestore();
     }
   });
 });

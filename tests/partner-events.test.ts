@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { certifiedLiveControls } from './helpers-live';
@@ -176,7 +176,8 @@ describe('partner-events (P16)', () => {
     expect(platform.data).toMatchObject({ actor_scope: 'platform', step: 2 });
   });
 
-  it('no PII or hash reaches the body, even when a caller object carries extra fields', () => {
+  /** Builds both bodies from callers that carry planted extra fields; nothing planted may come out. */
+  function scanPlanted(): void {
     const planted = {
       inputHash: 'PLANTED-HASH-1', listHash: 'PLANTED-HASH-2', name: 'PLANTED-NAME', phone: '+15550001111',
       amount: 987654, reference: 'PLANTED-REF', payout: 'PLANTED-PAYOUT', reason: 'PLANTED-REASON',
@@ -198,10 +199,48 @@ describe('partner-events (P16)', () => {
       const body = buildPartnerEventBody(input);
       const keys = allKeys(body);
       for (const k of [...banned, 'screened']) expect(keys).not.toContain(k);
-      const raw = JSON.stringify(body);
-      for (const v of Object.values(planted)) expect(raw).not.toContain(String(v));
+      scanValues(body, Object.values(planted).map(String), 'body');
+    }
+  }
+
+  const ISO_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{3})?Z$/;
+  /** Clock values: checked by FORMAT only (O10); a time cannot carry a name, phone, amount or hash. */
+  const TIME_KEYS = new Set(['screened_at', 'decided_at']);
+  /** Every key and every other string or number misses every planted value. */
+  function scanValues(v: unknown, planted: string[], path: string): void {
+    if (v && typeof v === 'object') {
+      for (const [k, x] of Object.entries(v)) {
+        for (const p of planted) expect(k, path).not.toContain(p);
+        if (k === 'created') {
+          expect(Number.isSafeInteger(x), `${path}.${k}`).toBe(true);
+          continue;
+        }
+        if (TIME_KEYS.has(k)) {
+          expect(x, `${path}.${k}`).toMatch(ISO_RE);
+          continue;
+        }
+        scanValues(x, planted, `${path}.${k}`);
+      }
+    } else if (typeof v === 'string' || typeof v === 'number') {
+      for (const p of planted) expect(String(v), path).not.toContain(p);
+    }
+  }
+
+  it('no PII or hash reaches the body, even when a caller object carries extra fields', () => {
+    scanPlanted();
+  });
+
+  it('a clock whose seconds contain a planted digit run (987654) still passes the scan (F5)', () => {
+    const sec = Math.floor(Date.now() / 1000);
+    vi.spyOn(Date, 'now').mockReturnValue((sec - (sec % 1_000_000) + 987_654) * 1000 + 321);
+    try {
+      expect(String((buildPartnerEventBody(matchInput()) as { created: number }).created)).toContain('987654');
+      scanPlanted();
+    } finally {
+      vi.restoreAllMocks();
     }
   });
+
 
   it('a screening that is not possible_match throws; an unknown type throws', () => {
     for (const decision of ['clear', 'match', 'list_unavailable'] as const) {
