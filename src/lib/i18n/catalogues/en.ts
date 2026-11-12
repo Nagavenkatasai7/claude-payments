@@ -432,7 +432,9 @@ export const en = {
   'partner.transfers.holdRelease': 'SmartRemit compliance reviews and releases this hold.',
   'partner.transfers.holdIdentity': 'This transfer cannot be released without the account holder name. It can only be rejected or refunded.',
   // Review R3-Y2 P1: the page line (no Reject or Refund control there); holdIdentity stays the release refusal.
-  'partner.transfers.holdIdentityPage': 'This transfer cannot be released without the account holder name. SmartRemit compliance rejects and refunds it.',
+  // Fix pack 7 T11 (P10, P31): the hold decision's originator refusal (holdIdentity's twin). DRAFT.
+  'partner.transfers.holdOriginator': "This transfer cannot be released without the sender's address and date of birth.",
+  'partner.transfers.holdIdentityPage':'This transfer cannot be released without the account holder name. SmartRemit compliance rejects and refunds it.',
   'partner.transfers.reason.screening': 'Name screening needs manual review',
   'partner.transfers.reason.identity': 'Sender identity missing',
   'partner.transfers.reason.recipientIdentity': 'Recipient identity missing',
@@ -873,6 +875,18 @@ export const en = {
   'partner.release.reasonHasNumber': 'Remove phone or account numbers from the reason.',
   'partner.release.adminOnly': 'An admin on your team can release this hold.',
   'partner.release.notAllowed': 'This hold cannot be released here. SmartRemit compliance reviews it.',
+  // Fix pack 7 T11 (P10, P31): the partner hold decision action's refusals. DRAFT texts.
+  'partner.holdDecision.notAllowed': 'This hold cannot be decided here.',
+  'partner.holdDecision.notCompliance': 'Only your named compliance users can decide holds.',
+  'partner.holdDecision.mfaRequired': 'Turn on two-step verification to decide holds.',
+  'partner.holdDecision.invalid': 'Choose a decision and try again.',
+  'partner.holdDecision.changed': 'This hold changed since the page loaded. Reload the page and decide again.',
+  'partner.holdDecision.notYours': 'SmartRemit decides this part of the hold.',
+  'partner.holdDecision.waitsList': 'This hold waits for the sanctions list to be live again.',
+  'partner.holdDecision.waitsData': 'This hold waits for missing details.',
+  'partner.holdDecision.waitsPlatform': 'SmartRemit must decide its part of this hold first.',
+  'partner.holdDecision.closed': 'This part of the hold is already decided.',
+  'partner.holdDecision.sameActor': 'A second person must make this decision.',
   // M3-14: Integrations: API keys (one contiguous block).
   'partner.keys.title': 'API keys',
   'partner.keys.sub': 'Keys for the partner API. A key is shown once, when it is created.',
