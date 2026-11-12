@@ -116,11 +116,23 @@ const fundingGate = () =>
  * Fix pack 2 review F2 (A2, B1): AND no stamped screening hold that a LATER clear does not cover
  * (a tie stays held) — the SQL twin of isScreeningCustomerHold (compliance-config.ts), pinned
  * equal by tests/sender-screening-hold-parity.test.ts. Also guards cancelInReviewForPartner.
+ * Fix pack 7 (P22, T9): exported for that parity test only; `o.pepClearable` is the twin of
+ * isScreeningCustomerHold's option. No production caller passes it in pack 7 (markPaidIfInReview
+ * and cancelInReviewForPartner call it with no option: the SQL text is byte-identical).
  */
-const senderClearForPartnerRelease = (partnerId: PartnerId) => [
-  eq(transfers.partnerId, partnerId),
-  sql`EXISTS (SELECT 1 FROM ${customers} WHERE ${customers.partnerId} = ${transfers.partnerId} AND ${customers.phone} = ${transfers.phone} AND ${customers.pepHit} IS NOT TRUE AND ${customers.watchlistHit} IS NOT TRUE AND (${customers.screeningFlaggedAt} IS NULL OR (${customers.screeningClearedAt} IS NOT NULL AND ${customers.screeningClearedAt} > ${customers.screeningFlaggedAt})))`,
-];
+export const senderClearForPartnerRelease = (partnerId: PartnerId, o?: { pepClearable?: boolean }) =>
+  o?.pepClearable === true
+    ? [
+        eq(transfers.partnerId, partnerId),
+        // Fix pack 7 (P22, P23, T9): the exact negation of isScreeningCustomerHold(c, { pepClearable: true }):
+        // no watchlist hit; no PEP hit or stamp left uncovered by a later clear; no watchlist stamp left
+        // uncovered by a strictly later clear.
+        sql`EXISTS (SELECT 1 FROM ${customers} WHERE ${customers.partnerId} = ${transfers.partnerId} AND ${customers.phone} = ${transfers.phone} AND ${customers.watchlistHit} IS NOT TRUE AND ((${customers.pepHit} IS NOT TRUE AND ${customers.screeningFlaggedAt} IS NULL) OR (${customers.screeningClearedAt} IS NOT NULL AND (${customers.screeningFlaggedAt} IS NULL OR ${customers.screeningClearedAt} > ${customers.screeningFlaggedAt}))) AND (${customers.screeningWatchlistAt} IS NULL OR (${customers.screeningClearedAt} IS NOT NULL AND ${customers.screeningClearedAt} > ${customers.screeningWatchlistAt})))`,
+      ]
+    : [
+        eq(transfers.partnerId, partnerId),
+        sql`EXISTS (SELECT 1 FROM ${customers} WHERE ${customers.partnerId} = ${transfers.partnerId} AND ${customers.phone} = ${transfers.phone} AND ${customers.pepHit} IS NOT TRUE AND ${customers.watchlistHit} IS NOT TRUE AND (${customers.screeningFlaggedAt} IS NULL OR (${customers.screeningClearedAt} IS NOT NULL AND ${customers.screeningClearedAt} > ${customers.screeningFlaggedAt})))`,
+      ];
 
 /**
  * Program-Fix 7 — "never charged AND no debit possibly in flight": the void /

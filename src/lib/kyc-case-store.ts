@@ -207,7 +207,8 @@ export function createKycCaseStore(
         // clear on the locked row, so a clear that won the lock first never
         // outranks this match.
         if (delta.pepHit === true || delta.watchlistHit === true) {
-          await txCustomers.stampScreeningFlagged(partnerId, phone, new Date(now()));
+          // Fix pack 7 (R2): a watchlist match also records screening_watchlist_at.
+          await txCustomers.stampScreeningFlagged(partnerId, phone, new Date(now()), delta.watchlistHit === true ? 'watchlist' : 'pep');
         }
         if (event.matchKind !== undefined && opts.alertMessage) {
           const message =

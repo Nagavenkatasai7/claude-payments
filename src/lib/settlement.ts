@@ -27,14 +27,16 @@ import { sanctionsAuditEvent } from '@/lib/sanctions/evidence';
 import { originatorInfoMissing } from '@/lib/originator-info';
 import { identityMissingForRelease, originatorMissingForRelease } from '@/lib/release-data-checks';
 import {
+  applyPepClear,
   insertReview,
   lockAndRouteReview,
-  refuseUnwiredPepClear,
+  pepClearRefusal,
   routeLockedReview,
   type HoldRefusedWhy,
   type HoldReviewInput,
 } from '@/lib/hold-review-tx';
 import { rowReasonsFp } from '@/lib/hold-queue';
+import { KycScreeningChangedError } from '@/lib/sender-screening';
 import { isOpaqueTransferId } from '@/lib/id';
 import { payUrlFor } from '@/lib/pay-url';
 import { logWarn } from '@/lib/log';
@@ -434,7 +436,6 @@ export async function releaseHold(
 ): Promise<ReleaseResult> {
   if (review) {
     if (partnerRelease) throw new Error('releaseHold: review and partnerRelease are exclusive');
-    refuseUnwiredPepClear(review);
     return releaseHoldWithReview(db, transfer.id, integrations, review);
   }
   return db.transaction(async (tx): Promise<ReleaseResult> => {
@@ -475,6 +476,8 @@ async function runReviewTx<R>(db: Db, body: (tx: Parameters<Parameters<Db['trans
     return await db.transaction(body);
   } catch (err) {
     if (err instanceof ReviewNotMoved) return err.result as R;
+    // T9 (P23): the locked customer row no longer matches the reviewed PEP hit (rolled back).
+    if (err instanceof KycScreeningChangedError) return { kind: 'changed', why: 'changed' } as R;
     throw err;
   }
 }
@@ -516,9 +519,13 @@ async function releaseHoldWithReview(
     const r = await lockAndRouteReview(tx, transferId, review, 'release', integrations);
     if (r.kind !== 'ok') throw notMoved(r);
     const { t } = r;
+    const pepRefused = pepClearRefusal(r, review);
+    if (pepRefused) throw notMoved({ kind: 'changed', why: pepRefused });
     if (await identityMissingForRelease(tx, t, integrations)) throw notMoved({ kind: 'identity_missing' });
     if (await originatorMissingForRelease(tx, t, integrations)) throw notMoved({ kind: 'originator_missing' });
-    // T9 (P23): clearPepInTx goes HERE, after identity / originator and right before the sender rule.
+    // T9 (P9 step 6, M5): the partner's PEP clear, after identity / originator and right before
+    // the sender rule; every later refusal is thrown, so the clear rolls back with it.
+    await applyPepClear(tx, t, review);
     if (await platformSenderHoldLocked(tx, t, integrations, undefined)) throw notMoved({ kind: 'sender_hold' });
     const paid = await createTransferRepo(tx).markPaidIfInReview(t.id);
     if (!paid) throw notMoved({ kind: 'already' });
@@ -551,11 +558,15 @@ export type RecordHoldStepResult =
  * written; a failed insert throws HoldReviewChangedError (rolled back).
  */
 export async function recordHoldStep(db: Db, review: HoldReviewInput & { transferId: string }): Promise<RecordHoldStepResult> {
-  refuseUnwiredPepClear(review);
   return runReviewTx(db, async (tx): Promise<RecordHoldStepResult> => {
     const r = await lockAndRouteReview(tx, review.transferId, review, 'record');
     if (r.kind === 'already' || r.kind === 'changed') throw new ReviewNotMoved<RecordHoldStepResult>(r);
     if (r.kind !== 'ok') throw new ReviewNotMoved<RecordHoldStepResult>({ kind: 'changed', why: 'changed' });
+    // T9 (P9 step 6): a final partner sender_pep release recorded while another class is open
+    // clears the PEP hit here (it releases nothing); a failed insert rolls the clear back.
+    const pepRefused = pepClearRefusal(r, review);
+    if (pepRefused) throw new ReviewNotMoved<RecordHoldStepResult>({ kind: 'changed', why: pepRefused });
+    await applyPepClear(tx, r.t, review);
     const reviewId = await insertReview(tx, r, review);
     await recordStaffTransferAudit(
       tx,
@@ -649,7 +660,6 @@ export async function releaseHoldAfterRescreen(
   const { result, uncovered, audit, partnerRelease, review } = input;
   if (review) {
     if (partnerRelease) throw new Error('releaseHoldAfterRescreen: review and partnerRelease are exclusive');
-    refuseUnwiredPepClear(review);
   }
   const pin = review ? { partnerId: review.ownerId } : partnerRelease ? { partnerId: partnerRelease.partnerId } : {};
   return db.transaction(async (tx): Promise<StaffRescreenReleaseResult> => {
@@ -712,15 +722,41 @@ export async function releaseHoldAfterRescreen(
     // screen's evidence stays: it is a true record).
     const routed = review ? await routeLockedReview(tx, t, review, 'release', input.railIntegrations) : null;
     if (routed && routed.kind !== 'ok') return routed;
+    if (routed && review) {
+      const pepRefused = pepClearRefusal(routed, review);
+      if (pepRefused) return { kind: 'changed', why: pepRefused };
+    }
 
     // Fix pack 4 (C19, critic C2): after the evidence, the block and the held
     // branches, right before the claim; the evidence row stays (a true record).
     if (await identityMissingForRelease(tx, t, input.railIntegrations)) return { kind: 'identity_missing' };
     if (await originatorMissingForRelease(tx, t, input.railIntegrations)) return { kind: 'originator_missing' };
-    // Review R1 (H2): the row is already locked (getTransferForUpdate above).
-    if (await platformSenderHoldLocked(tx, t, input.railIntegrations, partnerRelease)) return { kind: 'sender_hold' };
-    const paid = await repo.markPaidIfInReview(t.id, partnerRelease);
-    if (!paid) return { kind: 'already' };
+    let paid: Transfer | null;
+    if (routed && review?.pepClear) {
+      // T9 (P9 step 6, M5): the PEP clear, the sender rule and the claim in a SAVEPOINT: a
+      // refusal after the clear rolls the clear back while the re-screen's evidence row stays
+      // (a true record). Drizzle nested transaction = SAVEPOINT (src/lib/delivery-receipt.ts:140).
+      try {
+        paid = await tx.transaction(async (sp) => {
+          await applyPepClear(sp, t, review);
+          if (await platformSenderHoldLocked(sp, t, input.railIntegrations, undefined)) {
+            throw new ReviewNotMoved<StaffRescreenReleaseResult>({ kind: 'sender_hold' });
+          }
+          const claimed = await createTransferRepo(sp).markPaidIfInReview(t.id);
+          if (!claimed) throw new ReviewNotMoved<StaffRescreenReleaseResult>({ kind: 'already' });
+          return claimed;
+        });
+      } catch (err) {
+        if (err instanceof ReviewNotMoved) return err.result as StaffRescreenReleaseResult;
+        if (err instanceof KycScreeningChangedError) return { kind: 'changed', why: 'changed' };
+        throw err;
+      }
+    } else {
+      // Review R1 (H2): the row is already locked (getTransferForUpdate above).
+      if (await platformSenderHoldLocked(tx, t, input.railIntegrations, partnerRelease)) return { kind: 'sender_hold' };
+      paid = await repo.markPaidIfInReview(t.id, partnerRelease);
+      if (!paid) return { kind: 'already' };
+    }
     if (routed && review) {
       // P9 steps 8-9: the review row AFTER the claim (a failed insert rolls it back), then the audit.
       const reviewId = await insertReview(tx, routed, review);

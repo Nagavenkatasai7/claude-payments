@@ -306,11 +306,19 @@ describe('the reject seam with a review (P9)', { retry: 0 }, () => {
     expect(await why(rejectTransfer(store, db, a.id, partnerAudit(), undefined, partnerReview(a, 'kyc', 'customer_not_verified')))).toBe('waits_platform');
     expect(await snapshot(a.id)).toEqual(before);
 
+    // T9 (R2): readSenderScreeningFlags now reads screening_watchlist_at, so a PEP hit with an
+    // uncleared stamp is PEP-only (senderPepOnly) and no longer waits for the platform on an owner
+    // whose partner decides KYC (b2 below). An unattributable stamp (no boolean) still waits.
     const b = await heldRowFor(db, 'acme', 'kyc', { id: 'rj_stamp' });
-    await db.execute(sql`UPDATE customers SET watchlist_hit = false, pep_hit = true, screening_flagged_at = now() WHERE partner_id = 'acme' AND phone = ${b.phone}`);
+    await db.execute(sql`UPDATE customers SET watchlist_hit = false, pep_hit = NULL, screening_flagged_at = now() WHERE partner_id = 'acme' AND phone = ${b.phone}`);
     before = await snapshot(b.id);
     expect(await why(rejectTransfer(store, db, b.id, partnerAudit(), undefined, partnerReview(b, 'kyc', 'customer_not_verified')))).toBe('waits_platform');
     expect(await snapshot(b.id)).toEqual(before);
+
+    const b2 = await heldRowFor(db, 'acme', 'kyc', { id: 'rj_pep' });
+    await db.execute(sql`UPDATE customers SET watchlist_hit = false, pep_hit = true, screening_flagged_at = now() WHERE partner_id = 'acme' AND phone = ${b2.phone}`);
+    await rejectTransfer(store, db, b2.id, partnerAudit(), undefined, partnerReview(b2, 'kyc', 'customer_not_verified'));
+    expect((await store.getTransfer(b2.id))?.status).toBe('cancelled');
 
     // A watchlist hit whose stamp a platform clear covers adds no sender class, so the route
     // alone would let it through: the partner reject stance (P9 step 4) still refuses it.

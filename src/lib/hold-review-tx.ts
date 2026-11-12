@@ -14,6 +14,7 @@ import {
   classifyHold,
   classReasonsFp,
   decisionRoute,
+  dispositionReleases,
   nextStep,
   rowReasonsFp,
   senderPepOnly,
@@ -27,6 +28,7 @@ import {
 import { holdQueueApplies, partnerDecidesKyc, reviewRecordApplies } from './partner-decision-scope';
 import { identityMissingForRelease, originatorMissingForRelease } from './release-data-checks';
 import { realMoneyRail } from './live-gate';
+import { clearPepInTx } from './sender-screening';
 import { logWarn } from './log';
 import type { PartnerIntegrations } from './partner-integrations';
 import type { Partner, PartnerId, Transfer } from './types';
@@ -53,7 +55,7 @@ export interface HoldReviewInput {
   evidence: HoldReviewEvidence;
   /** R6: the plan's step.final; the locked step must match. */
   expectFinal: boolean;
-  /** sender_pep release only (P23); wired in pack 7 T9. */
+  /** A partner's final releasing sender_pep step only (P23, T9: clearPepInTx in the seam's transaction). */
   pepClear?: { reviewedFlaggedAt: string };
 }
 
@@ -86,9 +88,38 @@ export type ReviewRouteResult =
 
 export type ReviewWant = 'release' | 'reject' | 'record';
 
-/** The pepClear wiring arrives with T9: until then a review carrying one is a programming error. */
-export function refuseUnwiredPepClear(review: Pick<HoldReviewInput, 'pepClear'>): void {
-  if (review.pepClear) throw new Error('review.pepClear is wired in pack 7 T9');
+/**
+ * P9 step 6 (T9): the PEP-clear rule on a routed review, checked BEFORE anything
+ * is written. A partner's final releasing sender_pep step needs `pepClear`
+ * (without it: 'disposition'); `pepClear` on any other review is a programming
+ * error (throws). Returns null when the review may go on.
+ */
+export function pepClearRefusal(r: Pick<RoutedReview, 'cls' | 'step'>, review: HoldReviewInput): HoldRefusedWhy | null {
+  const partnerPepRelease =
+    r.cls.holdClass === 'sender_pep' && review.actorScope === 'partner' && dispositionReleases(review.disposition) && r.step.final;
+  if (review.pepClear) {
+    if (!partnerPepRelease) throw new Error('hold review: pepClear is for a final partner sender_pep release only');
+    return null;
+  }
+  return partnerPepRelease ? 'disposition' : null;
+}
+
+/**
+ * P9 step 6 (T9, P23): the partner's PEP clear in the caller's transaction, on
+ * the LOCKED row (clearPepInTx re-checks the locked customer flags and throws
+ * KycScreeningChangedError, which the caller maps to 'changed' after the
+ * rollback). Call pepClearRefusal first; a no-op without `pepClear`.
+ */
+export async function applyPepClear(tx: DbOrTx, t: Pick<Transfer, 'id' | 'partnerId' | 'phone'>, review: HoldReviewInput): Promise<void> {
+  if (!review.pepClear) return;
+  await clearPepInTx(tx, {
+    partnerId: t.partnerId,
+    phone: t.phone,
+    reviewedFlaggedAt: review.pepClear.reviewedFlaggedAt,
+    actor: review.actor,
+    via: 'hold_review',
+    transferId: t.id,
+  });
 }
 
 function hasDataMissingReason(t: Pick<Transfer, 'complianceReasons'>): boolean {

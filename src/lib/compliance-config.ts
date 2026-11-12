@@ -255,9 +255,31 @@ export interface CustomerScreeningFlags {
  * boolean hit still refuses partner staff. The SQL twin is
  * senderClearForPartnerRelease (transfer-repo.ts); a table-driven test
  * (tests/sender-screening-hold-parity.test.ts) runs both on the same cases.
+ *
+ * Fix pack 7 (P22, T9): `o.pepClearable` is ONLY for an owner whose partner
+ * decides KYC (partnerDecidesKyc): a PEP-only hit lifted by a later clear (the
+ * partner's own clearPepInTx, or a platform clear) no longer refuses its
+ * compliance users; a watchlist hit always does, and so does a watchlist stamp
+ * (screeningWatchlistAt) that no readable, strictly later clear covers (a stale
+ * save may have nulled watchlistHit). The SQL twin takes the same option.
+ * Absent or false: today's rule, unchanged.
  */
-export function isScreeningCustomerHold(c: CustomerScreeningFlags): boolean {
+export function isScreeningCustomerHold(c: CustomerScreeningFlags, o?: { pepClearable?: boolean }): boolean {
+  if (o?.pepClearable === true) {
+    return c.watchlistHit === true || senderScreeningHoldActive(c) || watchlistStampActive(c);
+  }
   return c.watchlistHit === true || c.pepHit === true || senderScreeningHoldActive(c);
+}
+
+/** A watchlist stamp that no readable, strictly later clear covers (an unreadable time stays held). */
+function watchlistStampActive(c: CustomerScreeningFlags): boolean {
+  const wl = c.screeningWatchlistAt ?? null;
+  if (wl == null) return false;
+  const cleared = c.screeningClearedAt ?? null;
+  if (cleared == null) return true;
+  const cl = toMs(cleared);
+  const w = toMs(wl);
+  return !(Number.isFinite(cl) && Number.isFinite(w) && cl > w);
 }
 
 /**

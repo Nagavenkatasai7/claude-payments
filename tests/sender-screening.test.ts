@@ -18,7 +18,8 @@ import type { Db } from '@/db/client';
 // M3-10 follow-up: the SENDER customer's PEP / watchlist flags for the partner hold release. A
 // narrow, tenant-scoped read (no PII column, no decrypt); the lib wrapper fails CLOSED to null.
 const PHONE = '14155550101';
-const NO_TIMES = { screeningFlaggedAt: null, screeningClearedAt: null };
+// Fix pack 7 (R2): readSenderScreeningFlags also reads screening_watchlist_at (null when no watchlist stamp).
+const NO_TIMES = { screeningFlaggedAt: null, screeningClearedAt: null, screeningWatchlistAt: null };
 let db: Db;
 
 const seedCustomer = async (partnerId: string, phone: string, flags: { pep?: boolean | null; watch?: boolean | null } = {}) => {
@@ -102,11 +103,11 @@ describe('sender screening hold times (fix pack 2 R06)', () => {
     await seedCustomer('pa', PHONE, { watch: true });
     const flagged = new Date(Date.now() - 2 * HOUR);
     const cleared = new Date(Date.now() - HOUR);
-    expect(await repo().stampScreeningFlagged('pa', PHONE, flagged)).toBe(true);
+    expect(await repo().stampScreeningFlagged('pa', PHONE, flagged, 'pep')).toBe(true);
     const r = await repo().clearScreeningHold('pa', PHONE, cleared);
     expect(r).toEqual({ found: true, previous: { pepHit: null, watchlistHit: true, screeningFlaggedAt: flagged, screeningClearedAt: null } });
     expect(await readSenderScreeningFlags(db, 'pa', PHONE)).toEqual({
-      pepHit: null, watchlistHit: true, screeningFlaggedAt: flagged, screeningClearedAt: cleared,
+      pepHit: null, watchlistHit: true, screeningFlaggedAt: flagged, screeningClearedAt: cleared, screeningWatchlistAt: null,
     });
     const c = await repo().getCustomer('pa', PHONE);
     expect(c?.screeningFlaggedAt).toBe(flagged.toISOString());
@@ -118,12 +119,12 @@ describe('sender screening hold times (fix pack 2 R06)', () => {
   // later (re-arms); a clear committed after a stamp always sorts later (lifts).
   it('a stamp whose time was read before a committed clear still re-arms the hold', async () => {
     await seedCustomer('pa', PHONE, { watch: true });
-    await repo().stampScreeningFlagged('pa', PHONE, new Date(Date.now() - 2 * HOUR));
+    await repo().stampScreeningFlagged('pa', PHONE, new Date(Date.now() - 2 * HOUR), 'pep');
     const cleared = new Date();
     await repo().clearScreeningHold('pa', PHONE, cleared);
     expect(senderScreeningHoldActive(await readSenderScreeningFlags(db, 'pa', PHONE))).toBe(false);
     // The webhook read its clock (an hour ago) before the clear won the lock.
-    await repo().stampScreeningFlagged('pa', PHONE, new Date(Date.now() - HOUR));
+    await repo().stampScreeningFlagged('pa', PHONE, new Date(Date.now() - HOUR), 'pep');
     const after = await readSenderScreeningFlags(db, 'pa', PHONE);
     expect(after!.screeningFlaggedAt!.getTime()).toBeGreaterThan(cleared.getTime());
     expect(senderScreeningHoldActive(after)).toBe(true);
@@ -132,7 +133,7 @@ describe('sender screening hold times (fix pack 2 R06)', () => {
   it('a clear whose time was read before the flag it locked still lifts that flag', async () => {
     await seedCustomer('pa', PHONE, { watch: true });
     const flagged = new Date(Date.now() + HOUR); // a stamp ahead of the clearing clock
-    await repo().stampScreeningFlagged('pa', PHONE, flagged);
+    await repo().stampScreeningFlagged('pa', PHONE, flagged, 'pep');
     await repo().clearScreeningHold('pa', PHONE, new Date());
     const after = await readSenderScreeningFlags(db, 'pa', PHONE);
     expect(after!.screeningClearedAt!.getTime()).toBeGreaterThan(flagged.getTime());
@@ -141,7 +142,7 @@ describe('sender screening hold times (fix pack 2 R06)', () => {
 
   it('a clear with no time takes it after the FOR UPDATE read', async () => {
     await seedCustomer('pa', PHONE, { watch: true });
-    await repo().stampScreeningFlagged('pa', PHONE, new Date(Date.now() - HOUR));
+    await repo().stampScreeningFlagged('pa', PHONE, new Date(Date.now() - HOUR), 'pep');
     const before = Date.now();
     await repo().clearScreeningHold('pa', PHONE);
     const after = await readSenderScreeningFlags(db, 'pa', PHONE);
@@ -154,11 +155,11 @@ describe('sender screening hold times (fix pack 2 R06)', () => {
     await seedCustomer('pa', PHONE, { watch: true });
     await seedCustomer('pb', PHONE, { watch: true });
     const at = new Date(Date.now() - HOUR);
-    await repo().stampScreeningFlagged('pa', PHONE, at);
+    await repo().stampScreeningFlagged('pa', PHONE, at, 'pep');
     await repo().clearScreeningHold('pa', PHONE, new Date());
     expect(await readSenderScreeningFlags(db, 'pb', PHONE)).toEqual({ pepHit: null, watchlistHit: true, ...NO_TIMES });
     // A tenant without the row: nothing written, nothing found.
-    expect(await repo().stampScreeningFlagged('pb', '19995550000', at)).toBe(false);
+    expect(await repo().stampScreeningFlagged('pb', '19995550000', at, 'pep')).toBe(false);
     expect(await repo().clearScreeningHold('pb', '19995550000', at)).toEqual({ found: false, previous: null });
   });
 
@@ -167,7 +168,7 @@ describe('sender screening hold times (fix pack 2 R06)', () => {
     const stale = (await repo().getCustomer('pa', PHONE))!; // read BEFORE the stamp and the clear
     const flagged = new Date(Date.now() - 2 * HOUR);
     const cleared = new Date(Date.now() - HOUR);
-    await repo().stampScreeningFlagged('pa', PHONE, flagged);
+    await repo().stampScreeningFlagged('pa', PHONE, flagged, 'pep');
     await repo().clearScreeningHold('pa', PHONE, cleared);
     await repo().saveCustomer({ ...stale, updatedAt: new Date().toISOString() });
     const after = await readSenderScreeningFlags(db, 'pa', PHONE);
@@ -175,7 +176,7 @@ describe('sender screening hold times (fix pack 2 R06)', () => {
     expect(after?.screeningClearedAt).toEqual(cleared);
     // And a copy that carries other times is ignored too.
     await repo().saveCustomer({ ...stale, screeningFlaggedAt: undefined, screeningClearedAt: new Date().toISOString() });
-    expect(await readSenderScreeningFlags(db, 'pa', PHONE)).toEqual({ pepHit: true, watchlistHit: null, screeningFlaggedAt: flagged, screeningClearedAt: cleared });
+    expect(await readSenderScreeningFlags(db, 'pa', PHONE)).toEqual({ pepHit: true, watchlistHit: null, screeningFlaggedAt: flagged, screeningClearedAt: cleared, screeningWatchlistAt: null });
   });
 
   it('a stale saveCustomer nulls watchlist_hit after the stamp -> hold still active; an http mint still holds', async () => {
@@ -186,7 +187,7 @@ describe('sender screening hold times (fix pack 2 R06)', () => {
     await db.execute(sql`UPDATE customers SET kyc_status = 'verified', first_seen_at = now() - interval '10 days' WHERE partner_id = 'pa' AND phone = ${PHONE}`);
     const stale = (await repo().getCustomer('pa', PHONE))!; // read before the Persona match landed
     await db.execute(sql`UPDATE customers SET watchlist_hit = true WHERE partner_id = 'pa' AND phone = ${PHONE}`);
-    await repo().stampScreeningFlagged('pa', PHONE, new Date(Date.now() - HOUR));
+    await repo().stampScreeningFlagged('pa', PHONE, new Date(Date.now() - HOUR), 'pep');
     await repo().saveCustomer({ ...stale, updatedAt: new Date().toISOString() });
     const flags = await readSenderScreeningFlags(db, 'pa', PHONE);
     expect(flags?.watchlistHit).toBeNull(); // the stale upsert nulled the boolean

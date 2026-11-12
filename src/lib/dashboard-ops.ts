@@ -24,7 +24,7 @@ import { screenHeldOnFile } from './list-hold-rescreen';
 import { createPartnerRepo } from '@/db/repos/partner-repo';
 import { classifyHold } from './hold-queue';
 import { holdQueueApplies, partnerDecidesKyc, reviewRecordApplies } from './partner-decision-scope';
-import { HoldReviewChangedError, insertReview, lockAndRouteReview, refuseUnwiredPepClear, type HoldReviewInput } from './hold-review-tx';
+import { HoldReviewChangedError, insertReview, lockAndRouteReview, type HoldReviewInput } from './hold-review-tx';
 
 /**
  * Fix pack 2 T4 (R02): the refusal for a hold waiting on a fresh sanctions list
@@ -425,7 +425,6 @@ export async function releaseTransfer(
   // Fix pack 7 (P9): programming errors, before any read.
   if (review) {
     if (partnerRelease) throw new Error('releaseTransfer: review and partnerRelease are exclusive');
-    refuseUnwiredPepClear(review);
     if (audit?.actor !== review.actor || audit.reason !== review.reason) {
       throw new Error("releaseTransfer: the audit context must be the review's actor and reason");
     }
@@ -473,8 +472,11 @@ export async function releaseTransfer(
   // right before the claim ('sender_hold' below), so a stamp in between refuses. The partner path is already
   // refused in markPaidIfInReview (partnerRelease) for a flagged sender, a
   // stamp-only hold included (pack 2 review F2: senderClearForPartnerRelease).
+  // Fix pack 7 T9 (P9 step 6): a review with pepClear skips this unlocked read: the locked
+  // transaction clears the PEP hit first, then re-checks with platformSenderHoldLocked.
   if (
     !partnerRelease &&
+    !review?.pepClear &&
     realMoneyRail({ environment: transfer.environment, railProviderType: railIntegrations.payment.providerType ?? null }) &&
     senderScreeningHoldActive(await readSenderScreeningFlags(db, transfer.partnerId, transfer.phone))
   ) {

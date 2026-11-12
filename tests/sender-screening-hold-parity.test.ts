@@ -1,7 +1,8 @@
 import { describe, it, expect, beforeEach } from 'vitest';
-import { sql } from 'drizzle-orm';
+import { and, eq, sql } from 'drizzle-orm';
 import { createStore } from '@/lib/store';
-import { createTransferRepo } from '@/db/repos/transfer-repo';
+import { createTransferRepo, senderClearForPartnerRelease } from '@/db/repos/transfer-repo';
+import { transfers } from '@/db/schema';
 import { createCustomerRepo, readSenderScreeningFlags } from '@/db/repos/customer-repo';
 import { releaseHold } from '@/lib/settlement';
 import {
@@ -59,21 +60,31 @@ interface Case {
   flaggedMin: number | null;
   clearedMin: number | null;
   held: boolean;
+  /** Fix pack 7 (P22, T9): the rule with { pepClearable: true } (a cleared PEP-only hit lifts). */
+  heldPepClearable: boolean;
+  /** Fix pack 7 (R2): screening_watchlist_at, minutes from now (absent = NULL). */
+  watchlistMin?: number | null;
 }
 
 const CASES: Case[] = [
-  { name: 'clean row (all NULL)', pep: null, watchlist: null, flaggedMin: null, clearedMin: null, held: false },
-  { name: 'explicit false booleans, no stamp', pep: false, watchlist: false, flaggedMin: null, clearedMin: null, held: false },
-  { name: 'pep_hit true', pep: true, watchlist: null, flaggedMin: null, clearedMin: null, held: true },
-  { name: 'watchlist_hit true', pep: null, watchlist: true, flaggedMin: null, clearedMin: null, held: true },
-  { name: 'stamp only, booleans NULL (stale upsert), no clear', pep: null, watchlist: null, flaggedMin: -10, clearedMin: null, held: true },
-  { name: 'stamp only, booleans false, no clear', pep: false, watchlist: false, flaggedMin: -10, clearedMin: null, held: true },
-  { name: 'stamp then a LATER clear', pep: null, watchlist: null, flaggedMin: -10, clearedMin: -5, held: false },
-  { name: 'stamp after an EARLIER clear (re-flagged)', pep: null, watchlist: null, flaggedMin: -5, clearedMin: -10, held: true },
-  { name: 'stamp and clear at the same instant (tie stays held)', pep: null, watchlist: null, flaggedMin: -7, clearedMin: -7, held: true },
-  { name: 'a clear with no stamp, booleans NULL', pep: null, watchlist: null, flaggedMin: null, clearedMin: -5, held: false },
-  { name: 'pep_hit true, stamp covered by a later clear (a boolean still holds for partner staff)', pep: true, watchlist: null, flaggedMin: -10, clearedMin: -5, held: true },
-  { name: 'watchlist_hit true, a clear with no stamp', pep: null, watchlist: true, flaggedMin: null, clearedMin: -5, held: true },
+  { name: 'clean row (all NULL)', pep: null, watchlist: null, flaggedMin: null, clearedMin: null, held: false, heldPepClearable: false },
+  { name: 'explicit false booleans, no stamp', pep: false, watchlist: false, flaggedMin: null, clearedMin: null, held: false, heldPepClearable: false },
+  { name: 'pep_hit true', pep: true, watchlist: null, flaggedMin: null, clearedMin: null, held: true, heldPepClearable: true },
+  { name: 'watchlist_hit true', pep: null, watchlist: true, flaggedMin: null, clearedMin: null, held: true, heldPepClearable: true },
+  { name: 'stamp only, booleans NULL (stale upsert), no clear', pep: null, watchlist: null, flaggedMin: -10, clearedMin: null, held: true, heldPepClearable: true },
+  { name: 'stamp only, booleans false, no clear', pep: false, watchlist: false, flaggedMin: -10, clearedMin: null, held: true, heldPepClearable: true },
+  { name: 'stamp then a LATER clear', pep: null, watchlist: null, flaggedMin: -10, clearedMin: -5, held: false, heldPepClearable: false },
+  { name: 'stamp after an EARLIER clear (re-flagged)', pep: null, watchlist: null, flaggedMin: -5, clearedMin: -10, held: true, heldPepClearable: true },
+  { name: 'stamp and clear at the same instant (tie stays held)', pep: null, watchlist: null, flaggedMin: -7, clearedMin: -7, held: true, heldPepClearable: true },
+  { name: 'a clear with no stamp, booleans NULL', pep: null, watchlist: null, flaggedMin: null, clearedMin: -5, held: false, heldPepClearable: false },
+  { name: 'pep_hit true, stamp covered by a later clear (a boolean still holds for partner staff)', pep: true, watchlist: null, flaggedMin: -10, clearedMin: -5, held: true, heldPepClearable: false },
+  { name: 'watchlist_hit true, a clear with no stamp', pep: null, watchlist: true, flaggedMin: null, clearedMin: -5, held: true, heldPepClearable: true },
+  // Fix pack 7 (P22, R2, T9): the pepClearable rule. A watchlist hit always holds; a PEP-only hit lifts with a later clear.
+  { name: 'pep_hit true, a clear with no stamp', pep: true, watchlist: null, flaggedMin: null, clearedMin: -5, held: true, heldPepClearable: false },
+  { name: 'watchlist_hit true and pep_hit true, stamp then a later clear', pep: true, watchlist: true, flaggedMin: -10, clearedMin: -5, held: true, heldPepClearable: true },
+  { name: 'pep_hit true, a watchlist stamp covered by a later clear', pep: true, watchlist: null, flaggedMin: -10, watchlistMin: -10, clearedMin: -5, held: true, heldPepClearable: false },
+  { name: 'pep_hit true, a stale save nulled watchlist_hit, its watchlist stamp not cleared', pep: true, watchlist: null, flaggedMin: -5, watchlistMin: -5, clearedMin: -10, held: true, heldPepClearable: true },
+  { name: 'pep_hit true, a watchlist stamp and a clear at the same instant (tie stays held)', pep: true, watchlist: null, flaggedMin: -10, watchlistMin: -7, clearedMin: -7, held: true, heldPepClearable: true },
 ];
 
 let db: Db;
@@ -85,7 +96,8 @@ const at = (min: number | null) => (min === null ? null : new Date(base + min * 
 async function seedSender(c: Case, phone = SENDER): Promise<void> {
   await createCustomerRepo(db, async () => null).ensureCustomer('pa', phone);
   await db.execute(sql`UPDATE customers SET pep_hit = ${c.pep}, watchlist_hit = ${c.watchlist},
-    screening_flagged_at = ${at(c.flaggedMin)}, screening_cleared_at = ${at(c.clearedMin)}
+    screening_flagged_at = ${at(c.flaggedMin)}, screening_cleared_at = ${at(c.clearedMin)},
+    screening_watchlist_at = ${at(c.watchlistMin ?? null)}
     WHERE partner_id = 'pa' AND phone = ${phone}`);
 }
 const status = async (id = 'ssp_t1') => (await store.getTransfer(id))?.status;
@@ -129,6 +141,46 @@ describe('sender screening hold: the SQL claim and the TypeScript rule agree', (
     const claimed = await createTransferRepo(db).markPaidIfInReview('ssp_t1', { partnerId: 'pa' });
     expect(claimed === null).toBe(c.held);
     expect(await status()).toBe(c.held ? 'in_review' : 'paid');
+  });
+});
+
+// Fix pack 7 (P22, T9): the pepClearable twin. The TS rule with the option and the exported SQL
+// twin with the option run the same table; without the option the SQL text is byte-identical.
+describe('sender screening hold with pepClearable: the SQL twin and the TypeScript rule agree', () => {
+  it.each(CASES)('$name -> pepClearable held=$heldPepClearable', async (c) => {
+    await seedSender(c);
+    const flags = await readSenderScreeningFlags(db, 'pa', SENDER);
+    const customer = await createCustomerRepo(db, async () => null).getCustomer('pa', SENDER);
+    expect(isScreeningCustomerHold(flags!, { pepClearable: true })).toBe(c.heldPepClearable);
+    expect(isScreeningCustomerHold(customer!, { pepClearable: true })).toBe(c.heldPepClearable);
+    // The option absent or false: today's rule.
+    expect(isScreeningCustomerHold(flags!, { pepClearable: false })).toBe(c.held);
+    expect(isScreeningCustomerHold(flags!, {})).toBe(c.held);
+    const rows = await db
+      .select({ id: transfers.id })
+      .from(transfers)
+      .where(and(eq(transfers.id, 'ssp_t1'), ...senderClearForPartnerRelease('pa', { pepClearable: true })));
+    expect(rows).toHaveLength(c.heldPepClearable ? 0 : 1);
+    // The tenant term stays: another partner never selects the row.
+    const other = await db
+      .select({ id: transfers.id })
+      .from(transfers)
+      .where(and(eq(transfers.id, 'ssp_t1'), ...senderClearForPartnerRelease('pb', { pepClearable: true })));
+    expect(other).toHaveLength(0);
+  });
+
+  it("without the option the twin's SQL text is unchanged", () => {
+    const q = (o?: { pepClearable?: boolean }) =>
+      db.select({ id: transfers.id }).from(transfers).where(and(eq(transfers.id, 'ssp_t1'), ...senderClearForPartnerRelease('pa', o))).toSQL().sql;
+    const pinned =
+      '"customers"."pep_hit" IS NOT TRUE AND "customers"."watchlist_hit" IS NOT TRUE AND ("customers"."screening_flagged_at" IS NULL OR ("customers"."screening_cleared_at" IS NOT NULL AND "customers"."screening_cleared_at" > "customers"."screening_flagged_at"))';
+    expect(q()).toContain(pinned);
+    expect(q()).not.toContain('IS TRUE AND');
+    expect(q()).not.toContain('screening_watchlist_at');
+    expect(q({ pepClearable: false })).toBe(q());
+    expect(q({})).toBe(q());
+    expect(q({ pepClearable: true })).not.toContain('"customers"."pep_hit" IS NOT TRUE AND "customers"."watchlist_hit"');
+    expect(q({ pepClearable: true })).toContain('screening_watchlist_at');
   });
 });
 

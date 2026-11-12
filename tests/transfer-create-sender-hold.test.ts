@@ -64,7 +64,7 @@ async function senderOn(db: Db, partnerId: string, rail?: string, o: { certify?:
 async function flagSender(db: Db, partnerId: string, opts: { flaggedAgoMs?: number; clearedAgoMs?: number } = {}) {
   await db.execute(sql`UPDATE customers SET watchlist_hit = true WHERE partner_id = ${partnerId} AND phone = ${PHONE}`);
   const repo = createCustomerRepo(db, async () => null);
-  if (opts.flaggedAgoMs !== undefined) await repo.stampScreeningFlagged(partnerId, PHONE, new Date(Date.now() - opts.flaggedAgoMs));
+  if (opts.flaggedAgoMs !== undefined) await repo.stampScreeningFlagged(partnerId, PHONE, new Date(Date.now() - opts.flaggedAgoMs), 'pep');
   if (opts.clearedAgoMs !== undefined) await repo.clearScreeningHold(partnerId, PHONE, new Date(Date.now() - opts.clearedAgoMs));
 }
 
@@ -129,7 +129,7 @@ describe('mint sender screening hold (fix pack 2 R06)', { retry: 0 }, () => {
     const { db, store, partnerStore, mvs } = await makeStores();
     await senderOn(db, 'acme', 'http');
     await flagSender(db, 'acme', { flaggedAgoMs: 2 * HOUR, clearedAgoMs: HOUR });
-    await createCustomerRepo(db, async () => null).stampScreeningFlagged('acme', PHONE, new Date());
+    await createCustomerRepo(db, async () => null).stampScreeningFlagged('acme', PHONE, new Date(), 'pep');
     primeOfacSource({ checkedAgoMs: HOUR });
     const t = await createTransfer(store, partnerStore, mvs, { ...base, partnerId: 'acme' });
     expect(t.complianceReasons).toEqual([SENDER_SCREENING_REASON]);
@@ -216,6 +216,6 @@ describe('mint sender screening hold (fix pack 2 R06)', { retry: 0 }, () => {
     await seedSender(db, { partnerId: 'other', phone: PHONE });
     await db.execute(sql`UPDATE customers SET pep_hit = true WHERE partner_id = 'other' AND phone = ${PHONE}`);
     const flags = await store.mintUnderSenderLock('acme', PHONE, (ops) => ops.senderScreeningFlags());
-    expect(flags).toEqual({ watchlistHit: null, pepHit: null, screeningFlaggedAt: null, screeningClearedAt: null });
+    expect(flags).toEqual({ watchlistHit: null, pepHit: null, screeningFlaggedAt: null, screeningClearedAt: null, screeningWatchlistAt: null });
   });
 });

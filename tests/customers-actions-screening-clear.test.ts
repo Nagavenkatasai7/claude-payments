@@ -246,13 +246,13 @@ describe('clearSenderScreeningHoldAction — the clear', () => {
   it('a second match after a floored clear gets a later flag time, so a clear of the first is refused', async () => {
     const repo = createCustomerRepo(db, async () => null);
     const T = Date.now();
-    await repo.stampScreeningFlagged('A', PHONE, new Date(T + 10_000)); // match 1, a clock 10 s ahead
+    await repo.stampScreeningFlagged('A', PHONE, new Date(T + 10_000), 'pep'); // match 1, a clock 10 s ahead
     await repo.clearScreeningHold('A', PHONE, new Date(T + 1_000)); // floored to flag1 + 1 ms
-    await repo.stampScreeningFlagged('A', PHONE, new Date(T + 2_000)); // match 2
+    await repo.stampScreeningFlagged('A', PHONE, new Date(T + 2_000), 'pep'); // match 2
     const f2 = (await readSenderScreeningFlags(db, 'A', PHONE))!.screeningFlaggedAt!;
     const stale = await reviewed(); // the admin opens the page on match 2
     expect(stale.get('screeningFlaggedAt')).toBe(f2.toISOString());
-    await repo.stampScreeningFlagged('A', PHONE, new Date(T + 3_000)); // match 3, unreviewed
+    await repo.stampScreeningFlagged('A', PHONE, new Date(T + 3_000), 'pep'); // match 3, unreviewed
     const before = await readSenderScreeningFlags(db, 'A', PHONE);
     expect(before!.screeningFlaggedAt!.getTime()).toBeGreaterThan(f2.getTime());
     await expect(clearSenderScreeningHoldAction(stale)).rejects.toThrow(
@@ -266,7 +266,7 @@ describe('clearSenderScreeningHoldAction — the clear', () => {
   it('a stamp never moves the flag back', async () => {
     const repo = createCustomerRepo(db, async () => null);
     const first = (await readSenderScreeningFlags(db, 'A', PHONE))!.screeningFlaggedAt!;
-    await repo.stampScreeningFlagged('A', PHONE, new Date(first.getTime() - H)); // a clock running behind
+    await repo.stampScreeningFlagged('A', PHONE, new Date(first.getTime() - H), 'pep'); // a clock running behind
     const after = (await readSenderScreeningFlags(db, 'A', PHONE))!.screeningFlaggedAt!;
     expect(after.getTime()).toBe(first.getTime() + 1);
     expect(await held()).toBe(true);

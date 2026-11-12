@@ -27,8 +27,10 @@ import {
 import { HoldReviewChangedError, type HoldReviewInput } from '@/lib/hold-review-tx';
 import { classReasonsFp, classifyHold, rowReasonsFp, type HoldClass, type HoldDisposition } from '@/lib/hold-queue';
 import {
-  LARGE_AMOUNT_REASON, LIST_UNAVAILABLE_REASON, ORIGINATOR_INFO_MISSING_REASON, POSSIBLE_MATCH_REASON,
+  LARGE_AMOUNT_REASON, LIST_UNAVAILABLE_REASON, ORIGINATOR_INFO_MISSING_REASON, POSSIBLE_MATCH_REASON, SENDER_SCREENING_REASON,
 } from '@/lib/compliance-config';
+import { readSenderScreeningFlags } from '@/db/repos/customer-repo';
+import { auditSubjectId } from '@/lib/customer-ref';
 import { createIntegrationsRepo } from '@/db/repos/integrations-repo';
 import { writeOriginatorInfo } from '@/lib/originator-info';
 import { sweepListUnavailableHolds } from '@/lib/list-hold-rescreen';
@@ -326,14 +328,15 @@ describe('the release seam with a review (P9)', { retry: 0 }, () => {
     }
   });
 
-  it('15: review with partnerRelease, and review.pepClear, throw before any read; review.ownerId != the row owner: HoldReviewChangedError', async () => {
+  it('15: review with partnerRelease throws before any read; review.pepClear no longer does (T9 wired it); review.ownerId != the row owner: HoldReviewChangedError', async () => {
     await delegated();
     const t = await heldRowFor(db, 'acme', 'kyc');
     const rv = review(t, 'kyc', 'documents_verified');
     ownerRead.mode = 'throw';
     await expect(releaseTransfer(store, db, 'no_such_row', REL, { partnerId: 'acme' }, rv)).rejects.toThrow(/exclusive/);
+    // T9: the placeholder throw is gone; the call reads on (and finds no row).
     await expect(releaseTransfer(store, db, 'no_such_row', REL, undefined, { ...rv, pepClear: { reviewedFlaggedAt: new Date().toISOString() } }))
-      .rejects.toThrow('review.pepClear is wired in pack 7 T9');
+      .rejects.toThrow('Transfer not found');
     await expect(releaseTransfer(store, db, 'no_such_row', { actor: 'someone-else', reason: REASON }, undefined, rv)).rejects.toThrow(/audit context/);
     ownerRead.mode = 'real';
     const before = await snapshot(t.id);
@@ -428,6 +431,128 @@ async function heldStale(id: string, recipientName = 'Anita'): Promise<Transfer>
 }
 const screens = async (id: string) => (await audits(id, 'sanctions.screen')).length;
 
+// Fix pack 7 T9 (P9 step 6, P23): a partner that decides KYC lifts a PEP-only sender hold with
+// its release decision: clearPepInTx runs in the seam's transaction after identity / originator
+// and right before the platform sender rule; every refusal after it rolls the clear back (M5).
+describe('the PEP clear in the release seam (T9)', { retry: 0 }, () => {
+  type Cust = { c: string | Date | null };
+  async function clearedAt(phone: string): Promise<number | null> {
+    const r = (await db.execute(sql`SELECT screening_cleared_at AS c FROM customers WHERE partner_id = 'acme' AND phone = ${phone}`)) as unknown as Rows<Cust>;
+    return r.rows[0]?.c == null ? null : new Date(r.rows[0].c).getTime();
+  }
+  async function clearAudits(phone: string): Promise<AuditRow[]> {
+    return audits(auditSubjectId('acme', phone), 'customer.screening_hold.clear');
+  }
+  async function pepRelease(t: Transfer, o: Partial<HoldReviewInput> = {}): Promise<HoldReviewInput> {
+    const f = (await readSenderScreeningFlags(db, 'acme', t.phone))!;
+    return review(t, 'sender_pep', 'pep_accepted_with_edd', {
+      actor: 'co-a', actorScope: 'partner', expectFinal: true,
+      pepClear: { reviewedFlaggedAt: f.screeningFlaggedAt ? f.screeningFlaggedAt.toISOString() : '' }, ...o,
+    });
+  }
+  const CO_A = { actor: 'co-a', reason: REASON };
+
+  it('8: queue + partnerDecidesKyc owner, a PEP-only sender: the partner release clears and releases in ONE transaction (the unlocked pre-read skipped)', async () => {
+    await certifiedQueuePartner(db);
+    const t = await heldRowFor(db, 'acme', 'sender_pep');
+    const rv = await pepRelease(t);
+    await releaseTransfer(store, db, t.id, CO_A, undefined, rv);
+    expect((await store.getTransfer(t.id))?.status).toBe('paid');
+    expect(await clearedAt(t.phone)).not.toBeNull();
+    const clear = await clearAudits(t.phone);
+    expect(clear).toHaveLength(1);
+    expect(clear[0].actor).toBe('co-a');
+    expect(clear[0].meta).toMatchObject({ pepHit: true, watchlistHit: false, actorScope: 'partner', via: 'hold_review', transferId: t.id });
+    expect((await reviewRows(t.id)).map((r) => [r.hold_class, r.disposition, r.actor_scope])).toEqual([['sender_pep', 'pep_accepted_with_edd', 'partner']]);
+    expect(await audits(t.id, 'transfer.release')).toHaveLength(1);
+  });
+
+  it('9: a watchlist sender, or a newer match than the reviewed one: changed (KycScreeningChangedError mapped), not released, not cleared', async () => {
+    await certifiedQueuePartner(db);
+    const t = await heldRowFor(db, 'acme', 'sender_pep');
+    const stale = await pepRelease(t, {
+      pepClear: { reviewedFlaggedAt: new Date(Date.now() - 5 * H).toISOString() },
+    });
+    let before = await snapshot(t.id);
+    expect(await releaseHold(db, t, await rail(), undefined, undefined, stale)).toEqual({ kind: 'changed', why: 'changed' });
+    expect(await snapshot(t.id)).toEqual(before);
+    expect(await clearedAt(t.phone)).toBeNull();
+    expect(await clearAudits(t.phone)).toEqual([]);
+
+    const rv = await pepRelease(t);
+    await db.execute(sql`UPDATE customers SET watchlist_hit = true WHERE partner_id = 'acme' AND phone = ${t.phone}`);
+    before = await snapshot(t.id);
+    expect(await releaseHold(db, t, await rail(), undefined, undefined, rv)).toEqual({ kind: 'changed', why: 'changed' });
+    const err = await releaseTransfer(store, db, t.id, CO_A, undefined, rv).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(HoldReviewChangedError);
+    expect(await snapshot(t.id)).toEqual(before);
+    expect(await clearedAt(t.phone)).toBeNull();
+    expect(await clearAudits(t.phone)).toEqual([]);
+  });
+
+  it('10: a partner sender_pep release without pepClear is disposition; pepClear on a kyc review throws; a platform sender_pep release without pepClear meets the sender rule', async () => {
+    await certifiedQueuePartner(db);
+    // A kyc row first (heldRowFor rows share one sender; the sender_pep row below flags it).
+    const k = await heldRowFor(db, 'acme', 'kyc', { id: 'pep_on_kyc' });
+    const kycWithClear = { ...partnerReview(k, 'co-a', true), pepClear: { reviewedFlaggedAt: '' } };
+    await expect(releaseHold(db, k, await rail(), undefined, undefined, kycWithClear)).rejects.toThrow(/pepClear is for a final partner sender_pep release only/);
+    expect((await store.getTransfer(k.id))?.status).toBe('in_review');
+    expect(await count('hold_reviews', k.id)).toBe(0);
+    const t = await heldRowFor(db, 'acme', 'sender_pep');
+    const before = await snapshot(t.id);
+    const noClear = { ...(await pepRelease(t)), pepClear: undefined };
+    expect(await releaseHold(db, t, await rail(), undefined, undefined, noClear)).toEqual({ kind: 'changed', why: 'disposition' });
+    expect(await recordHoldStep(db, { ...noClear, transferId: t.id })).toEqual({ kind: 'changed', why: 'changed' });
+    expect(await snapshot(t.id)).toEqual(before);
+
+
+    db = await freshDb();
+    store = createStore(fakeRedis(), db);
+    await delegated();
+    const p = await heldRowFor(db, 'acme', 'sender_pep');
+    const platform = review(p, 'sender_pep', 'pep_accepted_with_edd');
+    expect(await releaseHold(db, p, await rail(), undefined, undefined, platform)).toEqual({ kind: 'sender_hold' });
+    expect(await clearedAt(p.phone)).toBeNull();
+    expect(await count('hold_reviews', p.id)).toBe(0);
+  });
+
+  it('11: recordHoldStep on a mixed row (sender_pep + kyc): the final partner sender_pep release with pepClear is recorded and clears the sender; the row stays in_review', async () => {
+    await certifiedQueuePartner(db);
+    const t = await setReasons((await heldRowFor(db, 'acme', 'sender_pep')).id, [LARGE_AMOUNT_REASON, SENDER_SCREENING_REASON]);
+    const rv = await pepRelease(t);
+    expect(await recordHoldStep(db, { ...rv, transferId: t.id })).toEqual({ kind: 'recorded', reviewId: expect.any(String), final: true });
+    expect((await store.getTransfer(t.id))?.status).toBe('in_review');
+    expect(await clearedAt(t.phone)).not.toBeNull();
+    expect(await clearAudits(t.phone)).toHaveLength(1);
+    expect(await audits(t.id, 'transfer.hold.review')).toHaveLength(1);
+
+    // The kyc class then releases the row (the sender is cleared).
+    await releaseTransfer(store, db, t.id, CO_A, undefined, partnerReview(t, 'co-a', true));
+    expect((await store.getTransfer(t.id))?.status).toBe('paid');
+  });
+
+  it('12: M5: identity or originator missing on a sender_pep release with pepClear: their refusal, the customer row NOT cleared, no clear audit', async () => {
+    await certifiedQueuePartner(db);
+    const a = await heldRowFor(db, 'acme', 'sender_pep', { id: 'pep_ident' });
+    await db.execute(sql`UPDATE transfers SET recipient_legal_name_enc = NULL WHERE id = ${a.id}`);
+    let rv = await pepRelease(a);
+    let before = await snapshot(a.id);
+    expect(await releaseHold(db, a, await rail(), undefined, undefined, rv)).toEqual({ kind: 'identity_missing' });
+    expect(await snapshot(a.id)).toEqual(before);
+    expect(await clearedAt(a.phone)).toBeNull();
+    expect(await clearAudits(a.phone)).toEqual([]);
+
+    const b = await heldRowFor(db, 'acme', 'sender_pep', { id: 'pep_orig' });
+    await db.execute(sql`UPDATE customers SET residential_address_enc = NULL, date_of_birth_enc = NULL WHERE partner_id = 'acme' AND phone = ${b.phone}`);
+    rv = await pepRelease(b);
+    before = await snapshot(b.id);
+    expect(await releaseHold(db, b, await rail(), undefined, undefined, rv)).toEqual({ kind: 'originator_missing' });
+    expect(await snapshot(b.id)).toEqual(before);
+    expect(await clearedAt(b.phone)).toBeNull();
+    expect(await clearAudits(b.phone)).toEqual([]);
+  });
+});
+
 describe('releaseHoldAfterRescreen with a review (DP2)', { retry: 0 }, () => {
   it('14a: 40 h old screen, list live, clear: released, the review row written with the release', async () => {
     primeOfacSource({ checkedAgoMs: H });
@@ -467,6 +592,48 @@ describe('releaseHoldAfterRescreen with a review (DP2)', { retry: 0 }, () => {
       .rejects.toBeInstanceOf(HoldReviewChangedError);
     expect(await screens(t.id)).toBe(1);
     expect(await snapshot(t.id)).toEqual(before);
+  });
+});
+
+describe('releaseHoldAfterRescreen with a pepClear review (T9)', { retry: 0 }, () => {
+  async function pepRow(id: string): Promise<{ t: Transfer; flaggedAt: string }> {
+    const held = await heldStale(id);
+    // The re-screen re-derives LARGE (1 500 USD), so the row keeps it: the partner's kyc step is
+    // recorded first, the sender_pep release then closes the row.
+    const t = await setReasons(held.id, [LARGE_AMOUNT_REASON, SENDER_SCREENING_REASON]);
+    const flagged = new Date(Date.now() - H);
+    await db.execute(sql`UPDATE customers SET pep_hit = true, screening_flagged_at = ${flagged} WHERE partner_id = 'acme' AND phone = ${t.phone}`);
+    expect(await recordHoldStep(db, { ...partnerReview(t, 'co-b', true), transferId: t.id })).toMatchObject({ kind: 'recorded', final: true });
+    return { t, flaggedAt: flagged.toISOString() };
+  }
+  const cleared = async (phone: string) =>
+    ((await db.execute(sql`SELECT screening_cleared_at AS c FROM customers WHERE partner_id = 'acme' AND phone = ${phone}`)) as unknown as Rows<{ c: unknown }>).rows[0].c;
+  const pepReview = (t: Transfer, reviewedFlaggedAt: string) =>
+    review(t, 'sender_pep', 'pep_accepted_with_edd', { actor: 'co-a', actorScope: 'partner', pepClear: { reviewedFlaggedAt } });
+
+  it('14e: a 40 h old screen, list live, clear: the PEP clear and the release commit together', async () => {
+    primeOfacSource({ checkedAgoMs: H });
+    await certifiedQueuePartner(db);
+    const { t, flaggedAt } = await pepRow('rs_pep');
+    await releaseTransfer(store, db, t.id, { actor: 'co-a', reason: REASON }, undefined, pepReview(t, flaggedAt));
+    expect((await store.getTransfer(t.id))?.status).toBe('paid');
+    expect(await screens(t.id)).toBe(2);
+    expect(await cleared(t.phone)).not.toBeNull();
+    expect((await reviewRows(t.id)).map((r) => [r.hold_class, r.actor_scope])).toEqual([['kyc', 'partner'], ['sender_pep', 'partner']]);
+  });
+
+  it('14f: a newer match than the reviewed one: changed; the clear rolls back (savepoint), the re-screen evidence stays', async () => {
+    primeOfacSource({ checkedAgoMs: H });
+    await certifiedQueuePartner(db);
+    const { t } = await pepRow('rs_pep_stale');
+    const err = await releaseTransfer(store, db, t.id, { actor: 'co-a', reason: REASON }, undefined, pepReview(t, new Date(Date.now() - 5 * H).toISOString()))
+      .catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(HoldReviewChangedError);
+    expect((err as HoldReviewChangedError).why).toBe('changed');
+    expect((await store.getTransfer(t.id))?.status).toBe('in_review');
+    expect(await screens(t.id)).toBe(2);
+    expect(await cleared(t.phone)).toBeNull();
+    expect(await count('hold_reviews', t.id)).toBe(1); // the kyc step only
   });
 });
 
