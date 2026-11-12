@@ -1497,19 +1497,26 @@ export const EVAL_CASES: EvalCase[] = [
       // line is in English.
       const hinglishAt = lines.map((l, i) => (ROMAN_HINDI.test(l) ? i : -1)).filter((i) => i >= 0);
       const body = hinglishAt[0] === 0 ? lines.slice(1) : lines;
-      // F4-D1: the confirmation question is not the quote lead line ("Shall I go ahead with this
-      // quote?"); on the question's own line only the text before the question CLAUSE counts:
-      // inside the last question sentence, from its FIRST question opener to the end (R2-D1:
-      // "Here is your quote, shall I go ahead?" keeps its lead; R3 F7-D1: a second opener in the
-      // question, "..., or would you like to change it?", never keeps the question's own words),
-      // or, with no opener, the whole last question sentence.
+      // The quote lead is an English declarative clause that names the quote; a question is never
+      // the lead. Per sentence of every body line: a statement counts whole; a sentence ending in
+      // "?" counts only when it starts with a declarative lead start, up to its first clause
+      // boundary or question opener, and only when that text names the quote; other questions add nothing.
+      // Known limits: a Hinglish statement the ROMAN_HINDI list misses that holds "quote" still
+      // counts; a question with no "?" counts as a statement; a comma-joined lead without a
+      // declarative start ("You can check the quote below, shall I go ahead?") does not count.
+      const LEAD_NOUN = /\b(?:quote|details|summary|breakdown)\b/i;
+      const DECLARATIVE_START = /^\s*(?:(?:ok(?:ay)?|great|sure|alright|perfect|thanks|thank you)[,!\s]+)?(?:here(?:'s| is| are)|(?:this|below) is|(?:these|below) are|(?:your|the) (?:quote|details|summary|breakdown) (?:is|are)|i(?:'ve| have))\b/i;
       const QUESTION_OPENER = /\b(?:shall|should|can|could|may|would you like|do you want|want me to|ready to)\b/i;
-      const leadText = (l: string) => {
-        if (l !== question) return l;
-        const sentStart = l.match(/[^.!?]*\?\s*$/)?.index ?? l.length;
-        const opener = l.slice(sentStart).search(QUESTION_OPENER);
-        return l.slice(0, opener >= 0 ? sentStart + opener : sentStart);
+      const leadOf = (s: string) => {
+        if (!s.trim().endsWith('?')) return s;
+        const start = s.match(DECLARATIVE_START);
+        if (!start) return '';
+        const rest = s.slice(start[0].length);
+        const ends = [rest.search(/[,;:—–]|\s-\s/), rest.search(QUESTION_OPENER)].filter((i) => i >= 0);
+        const kept = ends.length ? s.slice(0, start[0].length + Math.min(...ends)) : '';
+        return LEAD_NOUN.test(kept) ? kept : '';
       };
+      const leadText = (l: string) => l.split(/(?<=[.!?])\s+/).map(leadOf).join(' ');
       const quoteLead = body.find((l) => /\b(?:quote|here(?:'s| is| are)|details|summary|breakdown)\b/i.test(leadText(l)));
       return fail(
         hinglishAt.some((i) => i !== 0) && 'a Hinglish line is not the first line',

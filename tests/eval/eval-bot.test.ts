@@ -370,6 +370,43 @@ describe('cases 60 and 61 check the lead-in line their titles promise (review ro
     expect(await failuresOf(61, 'Here is your quote, shall I go ahead?')).toEqual([]);
     expect(await failuresOf(61, 'Aapka quote neeche hai, aage ka hissa English mein hai.\nHere is your quote, shall I go ahead?')).toEqual([]);
   });
+
+  // Final check R4 R3-D1: the lead is decided per sentence; a question counts only from a
+  // declarative lead start, up to its first clause boundary or opener, and only when that names the quote.
+  const H = 'Aapka quote neeche hai.\n';
+  it.each([
+    ['Shall I go ahead?'],
+    [`${H}Is this quote okay, or shall I change it?`],
+    [`${H}Are these details correct, shall I go ahead?`],
+    [`${H}Do these details look right, or should I change something?`],
+    [`${H}Happy with this quote, or should I change the amount?`],
+    [`${H}Want to go ahead with this quote, or shall I change it?`],
+    [`${H}Shall I go ahead with this quote? Or should I change it?`],
+    [`${H}Is this quote okay?\nShall I go ahead?`],
+    [`${H}Here is what I need to know: is this quote okay, shall I go ahead?`],
+    [`${H}This quote okay, or shall I change it?`],
+    [`${H}These details look right, shall I go ahead?`],
+    [`${H}Your quote okay, shall I go ahead?`],
+    [`${H}Quote looks right, shall I go ahead?`],
+    [`${H}Does the quote above look right? Should I confirm?`],
+    [`${H}Can you see the quote above? Shall I go ahead?`],
+    ['Here is your quote.\nAapka quote theek hai?\nShall I go ahead?'],
+  ])('case 61 fails when no English statement or declarative lead names the quote (final check R4 R3-D1): %j', async (text) => {
+    expect(await failuresOf(61, text)).not.toEqual([]);
+  });
+  it.each([
+    ['Here are the details you can check, shall I go ahead?'],
+    ['You can review the quote below. Shall I go ahead?'],
+    ['Here is your quote.\nShall I go ahead?'],
+    [`${H}Your quote is ready, shall I go ahead?`],
+    [`${H}Okay, here's the breakdown - shall I go ahead?`],
+    [`${H}I've prepared your quote, should I confirm it?`],
+    [`${H}Here is your quote. Does everything look right? Shall I go ahead?`],
+    [`${H}Here is your quote so shall I go ahead?`],
+    [`${H}Below are the details. Shall I proceed?`],
+  ])('case 61 passes with an English statement or declarative lead that names the quote (final check R4 R3-D1): %j', async (text) => {
+    expect(await failuresOf(61, text)).toEqual([]);
+  });
 });
 
 describe('the recorded cases prove their own checks', () => {
