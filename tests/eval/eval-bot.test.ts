@@ -425,9 +425,32 @@ describe('cases 60 and 61 check the lead-in line their titles promise (review ro
     [`${H}You can see the quote below (in USD).Shall I go ahead?`],
     [`${H}You can see the quote below...Shall I go ahead?`],
     [`${H}You can see the quote below.OK to go ahead?`],
+    // Control: the same ellipsis with a space still ends the statement (the space split, unchanged).
     [`${H}You can see the quote below... Shall I go ahead?`],
   ])('case 61 passes when a missing space follows a capital, a digit, a bracket or an ellipsis (final check R6 R5-1): %j', async (text) => {
     expect(await failuresOf(61, text)).toEqual([]);
+  });
+  // Truth check R6-1: with no space, the next sentence may also start with the word "I", and
+  // after a lowercase letter and a mark with any capital ("above.USD"), as it did at 36ca861.
+  it.each([
+    [`${H}You can see the quote below.I can go ahead if you confirm, shall I?`],
+    [`${H}Please review the quote above.I'll send it once you confirm, shall I go ahead?`],
+    [`${H}Please review the quote above.I hope it looks good, shall I go ahead?`],
+    [`${H}Please review the quote above.USD 200 goes to mummy, shall I go ahead?`],
+    [`${H}Check the quote in USD.I can go ahead if you confirm, shall I?`],
+  ])('case 61 passes when a missing space comes before "I" or, after a lowercase letter, before any capital (truth check R6-1): %j', async (text) => {
+    expect(await failuresOf(61, text)).toEqual([]);
+  });
+  // The documented limits of the sentence splitter (scripts/eval-bot-cases.ts, the comment of case
+  // 61). They are pinned so that a later change of the splitter has to decide about them.
+  it('case 61 keeps the documented limits of its sentence splitter (truth check R6-1, R6-2)', async () => {
+    const LEAD = 'the quote lead line is not in English';
+    // A statement that ends with a bracketed question counts as a question.
+    expect(await failuresOf(61, `${H}You can see the quote below (any questions?). Shall I go ahead?`)).toContain(LEAD);
+    // With no space, an all-capitals word starts a sentence only after a lowercase letter and a mark.
+    expect(await failuresOf(61, `${H}Check the quote in USD.USD 200 goes to mummy, shall I go ahead?`)).toContain(LEAD);
+    // An abbreviation's full stop ends a sentence, so the first part of this question counts as a statement.
+    expect(await failuresOf(61, `${H}Do you want this quote in U.S. dollars? Shall I go ahead?`)).not.toContain(LEAD);
   });
   // Final check R6 R5-1, the other side: the wider split makes no question a statement. A
   // sentence is a question when its closing run of marks holds a "?" ("?!", "?...", "?)."), and a

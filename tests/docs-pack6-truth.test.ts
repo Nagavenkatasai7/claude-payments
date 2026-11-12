@@ -245,9 +245,14 @@ describe('pack 6 documents say what the code does', () => {
 
   it('go-live.mdx names AML holds before payout, the three rules in plain words and the Settings page with two-step verification; the pack 3 sentences stay', () => {
     const s = section(GO_LIVE, '### Live money on your own rail');
-    for (const x of ['AML holds before payout', 'structuring', 'a first transfer', 'a first transfer to a new recipient', 'Settings page', 'two-step verification', 'waits for review before payout']) {
+    for (const x of ['AML holds before payout', 'structuring', 'a large first transfer', 'a large transfer to a new recipient', 'Settings page', 'two-step verification', 'waits for review before payout']) {
       expect(s, x).toContain(x);
     }
+    // Truth check TC-T3: the two amount rules hold a LARGE send only (aml-rules.ts firstUsd), and the
+    // new-recipient rule is a later send, not a first one.
+    expect(s).not.toContain('a first transfer to a new recipient');
+    expect(read('src/content/docs/changelog.mdx')).toContain('for structuring, a large first transfer, or a large transfer to a new recipient.');
+    expect(read('src/content/docs/changelog.mdx')).not.toContain('a first transfer to a new recipient');
     expect(s).not.toMatch(/\bcertified\b/i);
     // pack 3 pins (tests/docs-pack3-truth.test.ts), re-asserted.
     expect(s).toContain('Going live with your own settlement rail needs a second SmartRemit approval after go-live.');
