@@ -1423,8 +1423,12 @@ async function handle(
               {
                 message:
                   `⚠️ SmartRemit ops: the refund of transfer ${transferId} (partner ${transfer.partnerId}, rail ${railPartnerId}) was NOT sent: ` +
-                  'the partner collected the money, and SmartRemit has no rail record, delivery log or provider reference of a payout instruction for this transfer, so there is nothing to reverse on the rail. ' +
-                  "The refund stays pending, SmartRemit sends no payout instruction for it, and the customer was not told; a person must arrange the return of the sender's money with the partner.",
+                  // Truth check 2 (F12-1): no evidence is not proof. An older build writes
+                  // its delivery log after the POST, best-effort, so the text asks staff to
+                  // check with the partner before the money is returned.
+                  'the partner collected the money, and SmartRemit finds no rail record, delivery log or provider reference of a payout instruction for this transfer. ' +
+                  'An older build, which keeps no rail record, can have sent an instruction without leaving a delivery log (it writes the log after the POST and can lose it), so the rail may still hold one. ' +
+                  "No reverse was sent, the refund stays pending, SmartRemit sends no payout instruction for it, and the customer was not told; ask the partner whether the rail holds an instruction for this transfer before a person arranges the return of the sender's money with them.",
               },
               { dedupeKey: `refundheld:${transferId}` },
             );

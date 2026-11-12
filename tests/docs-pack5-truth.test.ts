@@ -334,7 +334,8 @@ describe('pack 5 documents say what the code does', () => {
       // Truth check F10 (F2): what SmartRemit recorded, and the unrecorded case.
       'for a partner-collected row that is not routed, Issue refund sends nothing to the rail when SmartRemit has no record of an instruction for the transfer and leaves the refund `pending` with one `refundheld:<id>` alert (or `refundunrecorded:<id>` when its delivery log or provider reference shows an instruction sent without a record; roll back only after that alert is raised, so the worker has drained the refund), and no build (an older one included) instructs a row whose refund is pending; a person then arranges the return of the sender\'s money with the partner',
       // Truth check R5 (F10-D2): only the unrouted real-money partner-collected row with no record.
-      'After the roll forward, a refund of a real-money partner-collected transfer that is not routed, was paid at or after its rail went live, was instructed by the older build and was never recorded by this build sends no reverse and raises `refundunrecorded:<id>` (the refund stays `pending`): ask the partner whether the rail still holds the instruction before anyone returns the money. A partner-pulled transfer still gets its signed reverse.',
+      // Truth check 2 (F12-1): the older build's delivery log is best-effort, so such a row can also raise refundheld:<id>.
+      'After the roll forward, a refund of a real-money partner-collected transfer that is not routed, was paid at or after its rail went live, was instructed by the older build and was never recorded by this build sends no reverse. It raises `refundunrecorded:<id>` when the older build left a delivery log row or a provider reference, and `refundheld:<id>` when it left neither (the older build writes the delivery log after the POST and can lose it). Either way the refund stays `pending`: ask the partner whether the rail still holds the instruction before anyone returns the money. A partner-pulled transfer still gets its signed reverse.',
       'Issue refund is not available for a routed partner-collected row, so do not roll back while such a row is paid and held',
       // Review round 2 GD1: what else a build serving without 0039 breaks.
       // Review round 2 R2 (F7-D1): only the paths that send a reverse; a sandbox row
@@ -455,6 +456,11 @@ describe('pack 5 documents say what the code does', () => {
     }
     expect(held).not.toContain('refund_waits_for_running_instruct` and retries');
     expect(held).not.toContain('the transfer is not paid out');
+    // Truth check 2 (F12-1): no evidence is not proof; staff ask the partner first.
+    for (const s of ['so the rail may still hold one', 'ask the partner whether the rail holds an instruction for this transfer before a person arranges the return', 'Ask the partner whether the rail holds an instruction for the transfer first']) {
+      expect(held, s).toContain(s);
+    }
+    expect(held).not.toContain('so there is nothing to reverse on the rail');
     const unrec = other.find((l) => l.startsWith('| `refundunrecorded:<id>`'))!;
     for (const s of ['no reverse', 'the refund stays `pending`', 'no customer message', 'provider reference', 'delivery log', 'may still pay it out']) {
       expect(unrec, s).toContain(s);
