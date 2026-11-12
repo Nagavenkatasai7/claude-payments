@@ -307,14 +307,16 @@ describe('the retry FormData helpers (client)', () => {
 });
 
 describe('StepUpTarget (fix pack 3, contract 12)', () => {
-  it("StepUpTarget accepts the pack 3 names and the pack 5 'sanctions_list.upload'", () => {
+  it("StepUpTarget accepts the pack 3 names, the pack 5 'sanctions_list.upload' and the pack 7 'hold.decide', 'kyc.decide', 'refund.record'", () => {
     // tsc is the real proof: each literal must be a StepUpTarget for this file to compile.
     const names: StepUpTarget[] = [
       'live.certify', 'live.revoke', 'live.contract', 'optin.counsel', 'optin.approve', 'posture.sign',
       'compliance_user.set', 'switch.resume',
       'licence.save', 'corridor.save', 'funding.save', 'aml_rule.save', 'risk_signal.save',
       'sanctions_list.upload',
+      // Fix pack 7 (P3): partner compliance decisions and the outside refund record.
+      'hold.decide', 'kyc.decide', 'refund.record',
     ];
-    expect(new Set(names).size).toBe(14);
+    expect(new Set(names).size).toBe(17);
   });
 });
