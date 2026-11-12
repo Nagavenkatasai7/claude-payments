@@ -17,6 +17,7 @@ import { main, makeEvalChat, EVAL_DEFAULT_MODEL, parseEvalConfig, requiredPasses
 import { AGENT_MODEL_CHOICES, HAIKU, SONNET } from '@/lib/llm-models';
 import type { ChatMessage } from '@/lib/types';
 import { ENGLISH_STEPS_SECTION, buildSystemPrompt } from '@/lib/prompt';
+import { fixedReply } from '@/lib/hold-replies';
 
 // Program-Fix 49B (prompt-11) and R31. No real model is ever called here:
 // every chat function is a stub, and fetch is a spy that answers like the
@@ -325,6 +326,36 @@ describe('buildEvalMessages and the English steps section (pack 6 P12)', () => {
     expect(String(buildEvalMessages(byId(61))[0].content)).toContain(ENGLISH_STEPS_SECTION);
     expect(String(buildEvalMessages(byId(18))[0].content)).not.toContain(ENGLISH_STEPS_SECTION);
     expect(buildEvalMessages(byId(18))[0].content).toBe(buildSystemPrompt({ brand: 'SmartRemit', kycGateActive: true, purposeRequired: false }));
+  });
+});
+
+describe('cases 60 and 61 check the lead-in line their titles promise (review round 2 GD4)', () => {
+  const byId = (id: number) => EVAL_CASES.find((c) => c.id === id)!;
+  const say = (content: string): ChatMessage => ({ role: 'assistant', content });
+  const failuresOf = async (id: number, text: string) => (await runEval(async () => say(text), [byId(id)]))[0].failures;
+  const held = fixedReply('hold', { help: true });
+
+  it('case 60 fails with no lead-in line', async () => {
+    expect(await failuresOf(60, held)).not.toEqual([]);
+  });
+  it('case 60 fails with an English lead-in line', async () => {
+    expect(await failuresOf(60, `Here is the answer in English:\n${held}`)).not.toEqual([]);
+  });
+  it('case 60 fails with a Spanish line AFTER the status text instead of before it', async () => {
+    expect(await failuresOf(60, `${held}\nLe dejo la respuesta en inglés.`)).not.toEqual([]);
+  });
+  it('case 60 passes with one Spanish lead-in line, then the status text', async () => {
+    expect(await failuresOf(60, `Le dejo la respuesta en inglés:\n${held}`)).toEqual([]);
+  });
+  it('case 61 fails when the quote lead line is Hinglish', async () => {
+    expect(await failuresOf(61, 'Aapka quote neeche hai.\nShall I go ahead?')).not.toEqual([]);
+  });
+  it('case 61 fails when the Hinglish line is not the first line', async () => {
+    expect(await failuresOf(61, 'Here is your quote.\nAapka quote neeche hai.\nShall I go ahead?')).not.toEqual([]);
+  });
+  it('case 61 passes with an English quote lead line, with or without one Hinglish lead-in line first', async () => {
+    expect(await failuresOf(61, 'Here is your quote. Shall I go ahead?')).toEqual([]);
+    expect(await failuresOf(61, 'Aapka quote neeche hai, aage ka hissa English mein hai.\nHere is your quote.\nShall I go ahead?')).toEqual([]);
   });
 });
 

@@ -64,6 +64,13 @@ describe('ENGLISH TRANSACTION STEPS section (pack 6 P12)', () => {
     }
   });
 
+  it('GD1: relays only text a rule marks for relay; an instruction-style reply_hint is followed, never sent', () => {
+    const s = ENGLISH_STEPS_SECTION;
+    expect(s).not.toContain('Relay every reply_to_customer');
+    expect(s).toMatch(/tells you to relay/);
+    expect(s).toMatch(/never text for the customer/);
+  });
+
   it('promptHash differs only when the flag is on', () => {
     const tools = toolSchemasForChannel('whatsapp', { purposeRequired: false });
     const today = promptHash(buildSystemPrompt({ brand: 'SmartRemit' }), tools);

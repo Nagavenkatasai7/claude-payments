@@ -8,7 +8,7 @@ import { createPartnerStore, getPartnerStore } from '@/lib/partner-store';
 import { createAuditRepo } from '@/db/repos/aux-repos';
 import { DEFAULT_PARTNER_ID } from '@/lib/defaults';
 import { isLiveCertified } from '@/lib/live-gate';
-import { notifyLiveChange } from '@/lib/live-controls-write';
+import { lockPartner, notifyLiveChange } from '@/lib/live-controls-write';
 import { AML_HOLD_RULES, amlHoldRulesEntry, isAmlHoldRule, type AmlHoldRule } from '@/lib/aml-hold';
 import { resolveAmlHoldRules } from '@/lib/compliance-config';
 import type { CountryCode } from '@/lib/types';
@@ -161,7 +161,7 @@ function parseAmlHoldRulesForm(formData: FormData): { country: CountryCode; rule
  * SmartRemit review before payout (structuring, first_transfer, new_beneficiary). Order:
  * site host -> admin gate -> two-step sign-in enrolled (else refused, no step-up asked) -> the
  * step-up on EVERY save (target aml_rule.save) -> strict parse -> the default (demo) tenant is
- * refused (it is never held) -> ONE transaction: the partner read, the corridor must be one it
+ * refused (it is never held) -> ONE transaction: the partner row lock, then the partner read (on the locked row), the corridor must be one it
  * serves, the row-locked corridor write (amlHoldRulesEntry: no rule ticked DELETES amlHolds and
  * stores [], never amlHolds:false, so an older build reads it as off), the aml.hold_rules_set
  * audit row (from/to are the RESOLVED rule lists) and, on a live-certified partner, the live
@@ -181,6 +181,10 @@ export async function setAmlHoldRulesAction(_prev: ActionResult | null, formData
   let outcome: 'ok' | 'not_found' | 'invalid';
   try {
     outcome = await getDb().transaction(async (tx) => {
+      // GB1: the row lock first (FOR NO KEY UPDATE, the order certifyLiveAction and
+      // updatePartnerAction take), so the served-corridor check and isLiveCertified decide on
+      // the LOCKED partner: a certify that commits while this waits is seen, and its notice sent.
+      if (!(await lockPartner(tx, ctx.partnerId))) return 'not_found' as const;
       const store = createPartnerStore(tx);
       const p = await store.getPartner(ctx.partnerId);
       if (!p) return 'not_found' as const;

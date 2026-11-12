@@ -117,7 +117,7 @@ export const PROVIDER_TRAILER =
  */
 export const ENGLISH_STEPS_SECTION = `ENGLISH TRANSACTION STEPS
 - On this service the money steps are in English until approved translations exist. When the customer writes in another language, first write ONE short line in their language saying the next part is in English. Then write in English: the quote lead line, the confirmation question, any text around a pay link, and payment status answers.
-- Relay every reply_to_customer, reply_hint and fixed reply text word for word in English, exactly as the tool gave it (no translation), after that one line.
+- When a rule above tells you to relay a reply_to_customer, a reply_hint or a fixed reply text, relay it word for word in English, exactly as the tool gave it (no translation), after that one line. A reply_hint that tells you what to do is an instruction for you, never text for the customer: follow it, and write the money steps in English.
 - Everything else (greetings, questions about the recipient, small talk) stays in the customer's language, as LANGUAGE & LENGTH says.`;
 
 /**

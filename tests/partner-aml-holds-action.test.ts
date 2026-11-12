@@ -41,9 +41,40 @@ vi.mock('@/lib/auth-store', async () => {
   const actual = await vi.importActual<typeof import('@/lib/auth-store')>('@/lib/auth-store');
   return { ...actual, getAuthStore: () => actual.createAuthStore(redis) };
 });
+// GB1 (review round 2): a certify that commits while the save waits for the partner row lock.
+// When `race.atFirstLock` is set, it runs (on the save's own transaction) at the FIRST row-lock
+// statement of the save, whichever that is: lockPartner, or updateCorridorCompliance's FOR UPDATE.
+// So a read taken BEFORE the lock sees the pre-certify row, and a read taken after it sees the
+// certified one, as under READ COMMITTED.
+const race = vi.hoisted(() => ({ atFirstLock: null as null | ((tx: unknown) => Promise<void>) }));
+async function fireRace(tx: unknown): Promise<void> {
+  const f = race.atFirstLock;
+  race.atFirstLock = null;
+  if (f) await f(tx);
+}
 vi.mock('@/lib/partner-store', async () => {
   const actual = await vi.importActual<typeof import('@/lib/partner-store')>('@/lib/partner-store');
-  return { ...actual, getPartnerStore: () => actual.createPartnerStore(db) };
+  const createPartnerStore = (dbOrTx: Parameters<typeof actual.createPartnerStore>[0]) => {
+    const s = actual.createPartnerStore(dbOrTx);
+    return {
+      ...s,
+      updateCorridorCompliance: async (...a: Parameters<typeof s.updateCorridorCompliance>) => {
+        await fireRace(dbOrTx);
+        return s.updateCorridorCompliance(...a);
+      },
+    };
+  };
+  return { ...actual, createPartnerStore, getPartnerStore: () => actual.createPartnerStore(db) };
+});
+vi.mock('@/lib/live-controls-write', async (orig) => {
+  const actual = await orig<typeof import('@/lib/live-controls-write')>();
+  return {
+    ...actual,
+    lockPartner: async (...a: Parameters<typeof actual.lockPartner>) => {
+      await fireRace(a[0]);
+      return actual.lockPartner(...a);
+    },
+  };
 });
 // The action's enrolled read and the step-up's factor read agree on one flag (TOTP when enrolled).
 const mfa = vi.hoisted(() => ({ enrolled: true, code: '123456' }));
@@ -324,6 +355,40 @@ describe('setAmlHoldRulesAction: audit, notice and poke', () => {
     expect(pokeSpy).toHaveBeenCalledTimes(1);
     // No rule name, username or country in the notices.
     for (const v of ['structuring', 'first_transfer', 'pa-admin', '"US"']) expect(JSON.stringify(o)).not.toContain(v);
+  });
+
+  it('GB1: a certify that commits while the save waits for the row lock -> the save decides on the LOCKED (certified) row and writes the live notice', async () => {
+    await db.update(partners).set({ supportConfig: { complianceAlertEmail: 'compliance@pa.example' } }).where(eq(partners.id, 'pa'));
+    race.atFirstLock = async (tx) => certifyPartnerForTest(tx as Db, 'pa');
+    try {
+      expect(await save(form('US', []))).toEqual({ ok: true });
+    } finally {
+      race.atFirstLock = null;
+    }
+    const o = await outboxRows();
+    expect(o.map((r) => r.kind)).toEqual(['ops.alert', 'email.send']);
+    expect(o[0].dedupe_key).toMatch(new RegExp(`^livectl:amlHoldRules:pa:${UUID}$`));
+    expect(o[1].dedupe_key).toMatch(new RegExp(`^livectlmail:amlHoldRules:pa:${UUID}$`));
+    expect(await ruleAudits()).toHaveLength(1);
+    expect(pokeSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('GB1: the partner row vanishing before the lock -> partner.settings.notFound, nothing written', async () => {
+    race.atFirstLock = async (tx) => {
+      await (tx as Db).execute(sql`UPDATE partners SET id = 'pa-gone' WHERE id = 'pa'`);
+    };
+    let r: Awaited<ReturnType<typeof save>>;
+    try {
+      r = await save(form('US', ['structuring']));
+    } finally {
+      race.atFirstLock = null;
+    }
+    expect(r).toEqual({ ok: false, error: t('partner.settings.notFound') });
+    // The row moved away under the lock: nothing of the save landed anywhere.
+    expect(await cc('pa-gone')).toBeNull();
+    expect(await ruleAudits()).toEqual([]);
+    expect(await outboxRows()).toEqual([]);
+    expect(pokeSpy).not.toHaveBeenCalled();
   });
 
   it('a DB error inside the transaction -> partner.settings.failed, logged by error name, nothing written', async () => {
