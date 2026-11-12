@@ -16,7 +16,7 @@ import { approveRefundAction, dismissRefundAction, retryRefundAction } from '../
 import { SenderCell, FundingRefs } from '../sender-cell';
 import { resolveSenderNames, senderNameKey } from '@/lib/sender-names';
 import type { RefundStatus, Transfer } from '@/lib/types';
-import { cardRefundBlockedIds } from '@/lib/refund-row-flags';
+import { cardRefundBlockedIds, refundHoldRefusals } from '@/lib/refund-row-flags';
 import { CARD_REFUND_UNAVAILABLE } from '@/lib/funding-class';
 
 // /admin-dashboard/refunds — the always-on refund ledger. Unlike the Operations
@@ -60,6 +60,9 @@ export default async function RefundsPage() {
   // here; its row shows the reason instead. Admins only (others see no buttons),
   // and a rail read per listed requested / failed card row only.
   const cardBlocked = isAdmin ? await cardRefundBlockedIds(getDb(), all) : new Set<string>();
+  // Fix pack 7 T16b (P14, D7): a sanctions hold on a real-money row, or a certified owner's held
+  // row, shows the refusal text in place of Approve / Retry (the cores re-check). Admins only.
+  const holdBlocked = isAdmin ? await refundHoldRefusals(getDb(), all) : new Map<string, string>();
 
   const counts = {
     requested: all.filter((t) => t.refundStatus === 'requested').length,
@@ -164,6 +167,8 @@ export default async function RefundsPage() {
                               <>
                                 {cardBlocked.has(t.id) ? (
                                   <span className="max-w-xs text-left text-xs text-muted-foreground">Cannot approve: {CARD_REFUND_UNAVAILABLE}</span>
+                                ) : holdBlocked.has(t.id) ? (
+                                  <span className="max-w-xs text-left text-xs text-muted-foreground">{holdBlocked.get(t.id)}</span>
                                 ) : (
                                   <form action={approveRefundAction} className="flex items-center gap-1">
                                     <input type="hidden" name="id" value={t.id} />
@@ -180,6 +185,8 @@ export default async function RefundsPage() {
                             )}
                             {isAdmin && t.refundStatus === 'failed' && (cardBlocked.has(t.id) ? (
                               <span className="max-w-xs text-left text-xs text-muted-foreground">Cannot retry: {CARD_REFUND_UNAVAILABLE}</span>
+                            ) : holdBlocked.has(t.id) ? (
+                              <span className="max-w-xs text-left text-xs text-muted-foreground">{holdBlocked.get(t.id)}</span>
                             ) : (
                               <form action={retryRefundAction} className="flex items-center gap-1">
                                 <input type="hidden" name="id" value={t.id} />

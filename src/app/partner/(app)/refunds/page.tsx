@@ -5,6 +5,7 @@ import { requirePartnerStaff } from '@/lib/auth';
 import { getDb } from '@/db/client';
 import { listPartnerRefunds } from '@/db/repos/partner-transfer-reads';
 import { refundCounts, toPartnerRefundRow, type PartnerRefundRow, type RefundCounts } from '@/lib/partner-refunds';
+import { refundHoldBlockedIds } from '@/lib/refund-row-flags';
 import { t, type MessageKey } from '@/lib/i18n';
 import { Badge, EmptyState, Money, PageHeader } from '@/components/ds';
 import type { Tone } from '@/lib/ui/transfer-status';
@@ -64,8 +65,11 @@ export default async function PartnerRefundsPage() {
   const ctx = await requirePartnerStaff(PARTNER_ROUTES.refunds.policy);
   const list = await listPartnerRefunds(getDb(), ctx.partnerId);
   const counts = refundCounts(list);
-  const rows = list.map((tr) => toPartnerRefundRow(tr, ctx.role));
   const isAdmin = ctx.role === 'admin';
+  // Fix pack 7 T16b (P14, D7): Approve and Retry hide for a sanctions hold on a real-money row or a
+  // certified owner's held row (the action re-checks through the cores). Admins only (no buttons else).
+  const holdBlocked = isAdmin ? await refundHoldBlockedIds(getDb(), list) : new Set<string>();
+  const rows = list.map((tr) => toPartnerRefundRow(tr, ctx.role, { holdBlocked: holdBlocked.has(tr.id) }));
 
   return (
     <>

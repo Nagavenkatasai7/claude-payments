@@ -12,7 +12,7 @@ import { isSandbox, releaseHold, releaseHoldAfterRescreen, recordStaffTransferAu
 import { buildRejectContactMessage } from './payment';
 import { SANCTIONS_FUNDS_RULE } from './sanctions/notices';
 export type { StaffAuditCtx } from './settlement';
-import type { Db } from '@/db/client';
+import type { Db, DbOrTx } from '@/db/client';
 import type { Store } from './store';
 import type { Scope } from './staff-scope';
 import type { Partner, PartnerId, Transfer } from './types';
@@ -926,6 +926,42 @@ function loadForRefund(repo: ReturnType<typeof createTransferRepo>, id: string, 
 }
 
 /**
+ * Fix pack 7 T16b (P14 "Refund back doors", D7, M1): why approveRefund, retryRefund and
+ * issueRefund refuse a real-money row that carries a sanctions hold class. Staff-facing; the
+ * exit is the partner's own return plus "Record refund made outside SmartRemit" (P26).
+ */
+export const REFUND_SANCTIONS_REFUSAL =
+  'Cannot refund: a sanctions hold is on this transfer. The partner\'s compliance officer decides; record an approved return with "Record refund made outside SmartRemit".';
+
+/** Fix pack 7 T16b (P14, D5/D6): a certified owner's held (in_review) row is decided in the review first. */
+export const REFUND_HOLD_FIRST_REFUSAL = 'Decide this hold in the review first.';
+
+/**
+ * Fix pack 7 T16b (P14, D7): the refund back-door guard, inside each refund core's transaction.
+ * `realMoney` was read BEFORE the claim (`realMoneyFor`: one rail read, a 'test' row reads
+ * nothing); false = today's path, nothing else is read. On real money it runs AFTER the core's
+ * guarded claim (the claim UPDATE holds the transfer row lock, so the sender flags are locked
+ * transfer -> customer, the order rejectTransfer uses; a throw rolls the claim back), on the
+ * CLAIMED row: the sender flags under the lock (a thrown read is null: fail closed; no customer
+ * row is undefined, nothing to read, as rejectTransfer), the classes, and `hasSanctionsHold` ->
+ * REFUND_SANCTIONS_REFUSAL in both scopes. Then an in_review row of a certified owner
+ * (`reviewRecordApplies`) -> REFUND_HOLD_FIRST_REFUSAL (a refund on a held row would race a later
+ * release). A missing owner refuses with the generic permission text. Uncertified owners: unchanged.
+ */
+async function refundHoldGuard(tx: DbOrTx, t: Transfer, realMoney: boolean): Promise<void> {
+  if (!realMoney) return;
+  const flags = await readSenderScreeningFlags(tx, t.partnerId, t.phone, { forUpdate: true }).then(
+    (f) => f ?? undefined,
+    () => null,
+  );
+  if (hasSanctionsHold(fundsRuleClasses(t, flags))) throw new Error(REFUND_SANCTIONS_REFUSAL);
+  if (t.status !== 'in_review') return;
+  const owner = await createPartnerRepo(tx).getPartner(t.partnerId);
+  if (!owner) throw new Error('You do not have permission to perform this action.');
+  if (reviewRecordApplies(owner)) throw new Error(REFUND_HOLD_FIRST_REFUSAL);
+}
+
+/**
  * PROACTIVELY issue a refund on a PAID or DELIVERED transfer that was actually
  * charged (fundingRef set) — admin-initiated, no prior customer request needed.
  * none → pending + the durable funding.refund effect, one transaction, with the
@@ -987,12 +1023,17 @@ export async function issueRefund(db: Db, id: string, audit?: StaffAuditCtx, sco
     if ((transfer.refundStatus ?? 'none') !== 'none') {
       throw new Error('Cannot refund: a refund is already in progress or complete for this transfer.');
     }
+    // Fix pack 7 T16b (P14): real money before the claim (reads only).
+    const realMoney = await realMoneyFor(tx, transfer);
     // The guarded write is the claim, from exactly 'none': a concurrent decision that committed
     // after the read above leaves nothing to claim, so this throws (rolls back) instead of
     // flipping a row that moved.
-    if (!(await repo.updateRefund(id, { refundStatus: 'pending' }, { from: 'none' }))) {
+    const claimed = await repo.updateRefund(id, { refundStatus: 'pending' }, { from: 'none' });
+    if (!claimed) {
       throw new Error('Cannot refund: a refund is already in progress or complete for this transfer.');
     }
+    // Fix pack 7 T16b (P14, D7): no refund of a sanctions-held or review-held row (rolls back).
+    await refundHoldGuard(tx, claimed, realMoney);
     // Review round 1 RC3: the issue-time real-money decision rides the payload,
     // so a rail that is no longer real money at the drain never sends this
     // refund down the mock path. Absent for every other row (unchanged payload).
@@ -1033,12 +1074,17 @@ export async function approveRefund(db: Db, id: string, audit?: StaffAuditCtx, s
     if (await cardRefundUnavailableFor(tx, transfer)) {
       throw new Error(`Cannot approve: ${CARD_REFUND_UNAVAILABLE}`);
     }
+    // Fix pack 7 T16b (P14): real money before the claim (reads only).
+    const realMoney = await realMoneyFor(tx, transfer);
     // The guarded write is the claim, from exactly 'requested': a concurrent decision that committed
     // after the read above (a dismiss to 'none', another approve) leaves nothing to claim, so this
     // call throws (rolls back) instead of starting a refund or auditing a no-op.
-    if (!(await repo.updateRefund(id, { refundStatus: 'pending' }, { from: 'requested' }))) {
+    const claimed = await repo.updateRefund(id, { refundStatus: 'pending' }, { from: 'requested' });
+    if (!claimed) {
       throw new Error('Cannot approve: refund is not awaiting approval.');
     }
+    // Fix pack 7 T16b (P14, D7): no refund of a sanctions-held or review-held row (rolls back).
+    await refundHoldGuard(tx, claimed, realMoney);
     // Review round 1 RC3: carry the real-money decision (as issueRefund). No
     // admission here: a row that fails it is closed by the worker (RC2, RF1).
     const collectedOnRealMoney = await collectedOnRealMoneyFor(tx, transfer);
@@ -1110,12 +1156,17 @@ export async function retryRefund(db: Db, id: string, audit?: StaffAuditCtx, sco
     if (await cardRefundUnavailableFor(tx, transfer)) {
       throw new Error(`Cannot retry: ${CARD_REFUND_UNAVAILABLE}`);
     }
+    // Fix pack 7 T16b (P14): real money before the claim (reads only).
+    const realMoney = await realMoneyFor(tx, transfer);
     // The guarded write is the claim, from exactly 'failed'. Each retry mints a UNIQUE dedupe key, so
     // this check (not the key) is what keeps a concurrent second retry from enqueueing a second
     // refund effect.
-    if (!(await repo.updateRefund(id, { refundStatus: 'pending' }, { from: 'failed' }))) {
+    const claimed = await repo.updateRefund(id, { refundStatus: 'pending' }, { from: 'failed' });
+    if (!claimed) {
       throw new Error('Cannot retry: refund is not in a failed state.');
     }
+    // Fix pack 7 T16b (P14, D7): no refund of a sanctions-held or review-held row (rolls back).
+    await refundHoldGuard(tx, claimed, realMoney);
     // Review round 1 RC3: carry the real-money decision (as issueRefund).
     const collectedOnRealMoney = await collectedOnRealMoneyFor(tx, transfer);
     await createOutboxRepo(tx).enqueue(

@@ -7,7 +7,7 @@ import { PARTNER_ADMIN } from '@/lib/partner-access';
 import { scopeOf } from '@/lib/staff-scope';
 import { getDb } from '@/db/client';
 import { createTransferRepo } from '@/db/repos/transfer-repo';
-import { approveRefund, dismissRefund, retryRefund, type StaffAuditCtx } from '@/lib/dashboard-ops';
+import { approveRefund, dismissRefund, REFUND_HOLD_FIRST_REFUSAL, retryRefund, type StaffAuditCtx } from '@/lib/dashboard-ops';
 import { parseRefundOp, refundControls, refundStepUpTarget } from '@/lib/partner-refunds';
 import { gatePartnerStepUp } from '@/lib/partner-step-up-gate';
 import { requireStaffReason, STAFF_REASON_MIN } from '@/lib/send-limits';
@@ -93,6 +93,9 @@ export async function refundOpAction(formData: FormData): Promise<ActionResult |
       return CARD_REFUND_REFUSAL;
     }
     if (err instanceof Error && err.message.startsWith('Cannot ')) return notAllowed;
+    // Fix pack 7 T16b (P14): a certified owner's held row is decided in the review first. Its
+    // sanctions refusal starts with 'Cannot ' (above); both are fixed refusals, nothing was written.
+    if (err instanceof Error && err.message === REFUND_HOLD_FIRST_REFUSAL) return notAllowed;
     // The error NAME only: a failed query's message carries its bound params.
     logWarn('partner.refunds', errName(err), { transferId: transfer.id, op });
     return refused('partner.common.failed');
