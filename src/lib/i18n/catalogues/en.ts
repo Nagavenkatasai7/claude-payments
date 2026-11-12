@@ -2198,7 +2198,7 @@ export const en = {
   'partner.customers.trail.reason': 'Reason: {reason}',
   // Fix pack 6 truth check TC-T1: staff record a withdrawal of the electronic records consent.
   'partner.customers.esign.title': 'Electronic records',
-  'partner.customers.esign.sub': 'The next pay-page payment asks the customer again.',
+  'partner.customers.esign.sub': 'After a withdrawal, the next card or bank-transfer payment on the pay page asks the customer again. ACH debit and bill payments are not asked.',
   'partner.customers.esign.none': 'No consent on file.',
   'partner.customers.esign.on': 'Consent on file (text {version}), given {date}.',
   'partner.customers.esign.withdrawn': 'Consent withdrawn {date}.',

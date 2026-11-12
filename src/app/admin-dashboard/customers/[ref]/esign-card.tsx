@@ -48,7 +48,7 @@ export function EsignConsentCard({
     <Card className="mb-6">
       <CardHeader>
         <CardTitle>Electronic records</CardTitle>
-        <CardDescription>The next pay-page payment asks the customer again.</CardDescription>
+        <CardDescription>After a withdrawal, the next card or bank-transfer payment on the pay page asks the customer again. ACH debit and bill payments are not asked.</CardDescription>
       </CardHeader>
       <CardContent className="space-y-3 text-sm">
         {view === null ? (

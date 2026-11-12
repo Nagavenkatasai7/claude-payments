@@ -2,7 +2,9 @@
 // The consent text (src/lib/legal/esign-consent.ts) tells the customer to withdraw "in Profile if
 // your provider offers one, or contact the provider named on your receipt"; this module is the
 // provider route: partner staff (/partner/customers/[ref]) and SmartRemit staff
-// (/admin-dashboard/customers/[ref]) record it, and the next pay-page payment asks again.
+// (/admin-dashboard/customers/[ref]) record it, and the next pay-page payment that the consent
+// gate covers asks again (an ACH debit payment is exempt in src/lib/pay-esign-gate.ts and the bill
+// route never calls the gate, so those are not asked: the staff texts say so, truth check 2 P6T2-1).
 //
 // SERVER module (it imports the customer repo and the audit repo): a 'use client' file must never
 // import it. No step-up: recording a withdrawal weakens no control, it only makes the next

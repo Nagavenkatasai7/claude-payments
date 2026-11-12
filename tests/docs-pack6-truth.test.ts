@@ -300,7 +300,7 @@ describe('pack 6 documents say what the code does', () => {
 
   it('truth check TC-T1: the docs say staff record a withdrawal of the electronic records consent, and the code agrees', () => {
     const STAFF =
-      "When a customer asks you to withdraw the consent to electronic records, record it on the customer's page (Customers, then the customer, then Electronic records, then Record withdrawal). The next pay-page payment asks the customer again.";
+      "When a customer asks you to withdraw the consent to electronic records, record it on the customer's page (Customers, then the customer, then Electronic records, then Record withdrawal). After that, the next card or bank-transfer payment on the pay page asks the customer again. ACH debit and bill payments are not asked.";
     const funding = section(read('src/content/docs/funding.mdx'), "## Who collects the sender's money");
     expect(funding).toContain(STAFF);
     expect(funding).not.toMatch(/\btest(ing)?\b/i);
@@ -316,6 +316,16 @@ describe('pack 6 documents say what the code does', () => {
     const en = read('src/lib/i18n/catalogues/en.ts');
     expect(en).toContain("'partner.customers.esign.title': 'Electronic records'");
     expect(en).toContain("'partner.customers.esign.submit': 'Record withdrawal'");
+    // Truth check 2 P6T2-1: no staff text and no public page says "the next pay-page payment asks
+    // again" without its condition: an ACH debit payment skips the consent gate (pay-esign-gate.ts).
+    const SUB =
+      'After a withdrawal, the next card or bank-transfer payment on the pay page asks the customer again. ACH debit and bill payments are not asked.';
+    const card = read('src/app/admin-dashboard/customers/[ref]/esign-card.tsx');
+    expect(en).toContain(`'partner.customers.esign.sub': '${SUB}'`);
+    expect(card).toContain(`<CardDescription>${SUB}</CardDescription>`);
+    for (const text of [funding, en, card]) expect(text).not.toContain('The next pay-page payment asks the customer again.');
+    expect(read('src/lib/pay-esign-gate.ts')).toContain("if (i.exempt) return { kind: 'not_needed' };");
+    expect(read('src/app/api/pay/[transferId]/route.ts')).toContain("exempt: payMethod === 'ach_pull'");
     expect(read('src/app/partner/(app)/customers/[ref]/page.tsx')).toContain('<EsignConsentBlock ');
     expect(read('src/app/admin-dashboard/customers/[ref]/page.tsx')).toContain('<EsignConsentCard ');
     expect(read('src/app/partner/(app)/customers/[ref]/esign-actions.ts')).toContain('recordStaffEsignWithdrawal(');

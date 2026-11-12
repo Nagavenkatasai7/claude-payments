@@ -35,6 +35,10 @@ import { ESIGN_CONSENT_VERSION } from '@/lib/legal/esign-consent';
 import { t } from '@/lib/i18n';
 
 const PHONE = '15551231011';
+// Truth check 2 P6T2-1: the sentence under the title is true in every state (ACH debit payments
+// skip the consent gate, and the bill route never calls it).
+const STAFF_SUB =
+  'After a withdrawal, the next card or bank-transfer payment on the pay page asks the customer again. ACH debit and bill payments are not asked.';
 const partnerHtml = async () =>
   renderToStaticMarkup(createElement(EsignConsentBlock, { view: await loadPartner('default', PHONE), customerRef: 'ref-x' }));
 const adminHtml = async (canWithdraw = true) =>
@@ -53,6 +57,7 @@ describe('partner Electronic records block (TC-T1)', () => {
     const html = await partnerHtml();
     expect(html).toContain(t('partner.customers.esign.title'));
     expect(html).toContain(t('partner.customers.esign.sub'));
+    expect(t('partner.customers.esign.sub')).toBe(STAFF_SUB);
     expect(html).toContain(t('partner.customers.esign.none'));
     expect(html).not.toContain('name="confirm"');
   });
@@ -86,7 +91,9 @@ describe('admin Electronic records card (TC-T1)', () => {
     await seedEsignConsentForTest(db, 'default', PHONE);
     const html = await adminHtml(true);
     expect(html).toContain('Electronic records');
-    expect(html).toContain('The next pay-page payment asks the customer again.');
+    // Truth check 2 P6T2-1: the line names its condition and the payments that are not asked.
+    expect(html).toContain(STAFF_SUB);
+    expect(html).not.toContain('The next pay-page payment asks the customer again.');
     expect(html).toContain('The customer asked to withdraw this consent.');
     expect(html).toContain('Record withdrawal');
     expect(await adminHtml(false)).not.toContain('Record withdrawal');
