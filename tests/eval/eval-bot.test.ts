@@ -417,6 +417,34 @@ describe('cases 60 and 61 check the lead-in line their titles promise (review ro
   ])('case 61 passes when markup or a missing space follows the English statement (final check R5 R4-A-1, R4-B-1): %j', async (text) => {
     expect(await failuresOf(61, text)).toEqual([]);
   });
+  // Final check R6 R5-1: a missing space ends the statement after any character, not only after
+  // a lowercase letter (a capital, a digit, a bracket or an ellipsis), as it did at 200402e.
+  it.each([
+    [`${H}Check the quote in USD.Shall I go ahead?`],
+    [`${H}You can see the quote for $200.Shall I go ahead?`],
+    [`${H}You can see the quote below (in USD).Shall I go ahead?`],
+    [`${H}You can see the quote below...Shall I go ahead?`],
+    [`${H}You can see the quote below.OK to go ahead?`],
+    [`${H}You can see the quote below... Shall I go ahead?`],
+  ])('case 61 passes when a missing space follows a capital, a digit, a bracket or an ellipsis (final check R6 R5-1): %j', async (text) => {
+    expect(await failuresOf(61, text)).toEqual([]);
+  });
+  // Final check R6 R5-1, the other side: the wider split makes no question a statement. A
+  // sentence is a question when its closing run of marks holds a "?" ("?!", "?...", "?)."), and a
+  // decimal point does not split.
+  it.each([
+    [`${H}Is this quote in USD?Shall I go ahead?`],
+    [`${H}Is the $200.00 quote okay? Shall I go ahead?`],
+    [`${H}Is this quote okay (in USD)?Shall I go ahead?`],
+    [`${H}Is this quote OK?OK to go ahead?`],
+    [`${H}Is this quote okay?!Shall I go ahead?`],
+    [`${H}Is this quote okay?! Shall I go ahead?`],
+    [`${H}Is this quote okay?...Shall I go ahead?`],
+    [`${H}Is this quote okay?... Shall I go ahead?`],
+    [`${H}(Is this quote okay?). Shall I go ahead?`],
+  ])('case 61 still fails when a question has no space before the next sentence (final check R6 R5-1): %j', async (text) => {
+    expect(await failuresOf(61, text)).toContain('the quote lead line is not in English');
+  });
   it.each([
     ['Here are the details you can check, shall I go ahead?'],
     ['You can review the quote below. Shall I go ahead?'],

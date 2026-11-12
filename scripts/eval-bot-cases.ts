@@ -1504,14 +1504,17 @@ export const EVAL_CASES: EvalCase[] = [
       // Known limits: a Hinglish statement the ROMAN_HINDI list misses that holds "quote" still
       // counts; a question with no "?" counts as a statement; a comma-joined lead without a
       // declarative start ("You can check the quote below, shall I go ahead?") does not count.
+      // An abbreviation's full stop ends a sentence ("U.S. dollars", "U.S.Dollars").
       // Sentences: WhatsApp markup (* _ ~) is dropped first; a sentence ends at . ! or ? (plus any
-      // closing bracket or quote) before a space, or before a capital when a lowercase letter
-      // precedes the mark ("below.Shall"); a sentence is a question when it ends in "?" plus closers.
+      // closing bracket or quote) before a space, or with no space before a capitalised word or
+      // "OK" ("below.Shall", "USD.Shall", "$200.Shall", "below...Shall"); a decimal point or an
+      // all-capitals word does not end one. A sentence is a question when its closing run of
+      // marks and closers holds a "?" ("?", "?!", "?...", "?).").
       const LEAD_NOUN = /\b(?:quote|details|summary|breakdown)\b/i;
       const DECLARATIVE_START = /^\s*(?:(?:ok(?:ay)?|great|sure|alright|perfect|thanks|thank you)[,!\s]+)?(?:here(?:'s| is| are)|(?:this|below) is|(?:these|below) are|(?:your|the) (?:quote|details|summary|breakdown) (?:is|are)|i(?:'ve| have))\b/i;
       const QUESTION_OPENER = /\b(?:shall|should|can|could|may|would you like|do you want|want me to|ready to)\b/i;
       const leadOf = (s: string) => {
-        if (!/\?[)\]"'”’]*\s*$/.test(s)) return s;
+        if (!/\?[.!?)\]"'”’]*\s*$/.test(s)) return s;
         const start = s.match(DECLARATIVE_START);
         if (!start) return '';
         const rest = s.slice(start[0].length);
@@ -1519,7 +1522,7 @@ export const EVAL_CASES: EvalCase[] = [
         const kept = ends.length ? s.slice(0, start[0].length + Math.min(...ends)) : '';
         return LEAD_NOUN.test(kept) ? kept : '';
       };
-      const sentences = (l: string) => l.replace(/[*_~]/g, '').split(/(?<=[.!?][)\]"'”’]*)\s+|(?<=[a-z][.!?][)\]"'”’]*)(?=[A-Z])/);
+      const sentences = (l: string) => l.replace(/[*_~]/g, '').split(/(?<=[.!?][)\]"'”’]*)\s+|(?<=\S[.!?][)\]"'”’]*)(?=[A-Z][a-z]|OK\b)/);
       const leadText = (l: string) => sentences(l).map(leadOf).join(' ');
       const quoteLead = body.find((l) => /\b(?:quote|here(?:'s| is| are)|details|summary|breakdown)\b/i.test(leadText(l)));
       return fail(
