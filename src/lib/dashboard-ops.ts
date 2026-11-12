@@ -14,16 +14,24 @@ import type { Db } from '@/db/client';
 import type { Store } from './store';
 import type { Scope } from './staff-scope';
 import type { Partner, PartnerId, Transfer } from './types';
-import { isPartnerReleasableHold, isRescreenOnlyHold, senderScreeningHoldActive, type CustomerScreeningFlags } from './compliance-config';
-import { realMoneyRail } from './live-gate';
+import {
+  isPartnerReleasableHold, isRescreenOnlyHold, RECIPIENT_IDENTITY_MISSING_REASON, senderScreeningHoldActive, type CustomerScreeningFlags,
+} from './compliance-config';
+import { partnerMayRejectHold } from './partner-reviews';
+import { createAuditRepo } from '@/db/repos/aux-repos';
+import { sanctionsNoticeAddress } from './sanctions/notices';
+import { realMoneyFor, realMoneyRail } from './live-gate';
 import { CARD_REFUND_UNAVAILABLE, cardRefundUnavailableFor, collectedOnRealMoneyFor } from './funding-class';
 import { readSenderScreeningFlags } from '@/db/repos/customer-repo';
 import { listScreenEvidence, liveFresh } from './sanctions/evidence-read';
 import { warmSanctionsList } from './providers/sanctions-provider';
 import { screenHeldOnFile } from './list-hold-rescreen';
 import { createPartnerRepo } from '@/db/repos/partner-repo';
-import { classifyHold } from './hold-queue';
-import { holdQueueApplies, partnerDecidesKyc, reviewRecordApplies } from './partner-decision-scope';
+import {
+  allowedDispositions, classifyHold, openHoldClasses, rowReasonsFp, type DecisionRefusal, type HoldClass, type HoldDisposition,
+  type ReviewRowLite,
+} from './hold-queue';
+import { holdQueueApplies, partnerDecidesKyc, reviewRecordApplies, type ScopeOwner } from './partner-decision-scope';
 import { HoldReviewChangedError, insertReview, lockAndRouteReview, type HoldReviewInput } from './hold-review-tx';
 
 /**
@@ -102,6 +110,11 @@ export const PARTNER_DECIDES_HOLD_REFUSAL = 'The partner decides this hold: paus
 export const HOLD_REVIEW_RELOAD_REFUSAL =
   'This partner needs a recorded decision with a disposition: reload the page and decide again.';
 export const HOLD_CHANGED_REFUSAL = 'This hold changed since the page loaded: reload the page and decide again.';
+/** Fix pack 7 T14a (P7, P12): the platform decision reason rule (parseHoldReason) refused the note. */
+export const HOLD_REASON_REFUSAL = 'Add a reason of at least 10 characters, with no account or phone numbers.';
+/** Fix pack 7 T14a (P12): the escalate refusals. */
+export const ESCALATE_NOT_QUEUE_REFUSAL = 'Escalate applies only to a partner that decides its own holds.';
+export const ESCALATE_NOT_HELD_REFUSAL = 'This transfer is no longer held.';
 
 /** The partner release refusal when the row or its sender changed (the partner actions map it to notAllowed). */
 const PARTNER_RELEASE_CHANGED = 'Cannot release: transfer is not in_review or its sender is not releasable (it changed concurrently)';
@@ -360,13 +373,185 @@ export const PAYLINK_RECENT = 'Cannot resend: the payment link was resent in the
  */
 export function canReleaseHeld(
   scope: Scope,
-  owner: Pick<Partner, 'kycMode'> | null | undefined,
+  owner: HoldOwner,
   transfer: Pick<Transfer, 'status' | 'complianceStatus' | 'complianceReasons'>,
   sender: CustomerScreeningFlags | null | undefined,
 ): boolean {
   if (isRescreenOnlyHold(transfer)) return false;
-  if (scope.kind === 'platform') return true;
+  if (scope.kind === 'platform') {
+    // Fix pack 7 T14a (P12): a queue partner decides its partner-decided classes itself. The sender
+    // flags are not read here (null: the sender classes read as platform watchlist, conservative);
+    // the action re-checks with the flags.
+    return !queueClasses(owner, transfer, null)?.some((c) => c.decider === 'partner');
+  }
   return isPartnerReleasableHold(transfer, owner, sender);
+}
+
+/**
+ * Fix pack 7 T14a (P12): the owner shape canReleaseHeld / canRejectHeld take (a full Partner row
+ * fits). A `{ kycMode }`, `{}` or null owner (no id, status or liveControls) is never certified, so
+ * it keeps today's answers. `status` is a plain string, like compliance-config's LegacyHoldOwner.
+ */
+export type HoldOwner =
+  | { kycMode?: Partner['kycMode']; id?: string; status?: string; liveControls?: Partner['liveControls'] }
+  | null
+  | undefined;
+
+/** The classes of a queue owner's row (null for every other owner). Pure. */
+function queueClasses(
+  owner: HoldOwner,
+  transfer: Pick<Transfer, 'complianceStatus' | 'complianceReasons'>,
+  sender: CustomerScreeningFlags | null | undefined,
+) {
+  const o = owner as ScopeOwner | null | undefined;
+  if (!holdQueueApplies(o)) return null;
+  return classifyHold(transfer.complianceReasons, sender, { queue: true, partnerDecidesKyc: partnerDecidesKyc(o) }, {
+    blocked: transfer.complianceStatus === 'blocked',
+  });
+}
+
+/**
+ * Fix pack 7 T14a (P12): WHO may reject a held transfer. Platform staff: always, except on a queue
+ * partner whose classes are ALL partner-decided (the partner decides them; SmartRemit pauses or
+ * escalates). `sender`: the flags the caller read (undefined = not read; null = the read failed,
+ * which adds a platform sender class, fail closed). Partner staff: partnerMayRejectHold (unchanged).
+ * Pure.
+ */
+export function canRejectHeld(
+  scope: Scope,
+  owner: HoldOwner,
+  transfer: Pick<Transfer, 'status' | 'complianceStatus' | 'complianceReasons'>,
+  sender: CustomerScreeningFlags | null | undefined,
+): boolean {
+  if (scope.kind !== 'platform') return partnerMayRejectHold(transfer, owner, sender);
+  const classes = queueClasses(owner, transfer, sender);
+  return !classes || !classes.every((c) => c.decider === 'partner');
+}
+
+/**
+ * Fix pack 7 T14a (P12): a HoldReviewChangedError's `why` as the ONE fixed platform text. No
+ * sanctions detail beyond the existing texts.
+ */
+export function platformHoldRefusal(why: DecisionRefusal | 'changed', t: Pick<Transfer, 'complianceReasons'>): string {
+  switch (why) {
+    case 'not_yours':
+    case 'waits_platform':
+      return PARTNER_DECIDES_HOLD_REFUSAL;
+    case 'waits_list':
+      return RESCREEN_ONLY_RELEASE_REFUSAL;
+    case 'waits_data':
+      return (t.complianceReasons ?? []).includes(RECIPIENT_IDENTITY_MISSING_REASON)
+        ? RECIPIENT_IDENTITY_RELEASE_REFUSAL
+        : ORIGINATOR_INFO_RELEASE_REFUSAL;
+    case 'blocked':
+      return PLATFORM_RESCREEN_REFUSALS.blocked;
+    default:
+      return HOLD_CHANGED_REFUSAL;
+  }
+}
+
+/** Fix pack 7 T14a (P12): one platform decision form of one open class. */
+export interface PlatformHoldForm {
+  holdClass: HoldClass;
+  release: readonly HoldDisposition[];
+  reject: readonly HoldDisposition[];
+}
+export type PlatformHoldControls =
+  | { mode: 'legacy' }
+  | { mode: 'review'; rowFp: string; forms: PlatformHoldForm[]; partnerDecides: boolean; escalate: boolean; waitsList: boolean };
+
+/**
+ * Fix pack 7 T14a (P12, C3, R1, M11): what the admin compliance page renders for one held row.
+ * Legacy (today's Release / Reject) for every owner that is not certified. For a certified owner:
+ * one form per OPEN class (openHoldClasses) the platform decides (a queue owner: the platform
+ * classes; a delegated owner: every partner or platform class), plus a present data_missing class
+ * (reject `data_not_provided`; release `data_received` only when `dataOnFile`) and a present blocked
+ * class (reject `confirmed_match`) although no class decider owns them. While a list_wait class is
+ * present only Reject lists are offered (P5 rule 3); a blocked class or a data_missing class whose
+ * data is not on file also empties the Release lists (P5 rules 2, 4). A form with two empty lists
+ * is dropped. `sender`: the flags the caller read for a real-money row (R1: a later stamp is a
+ * synthetic platform sender class); `dataOnFile`: settlement's release data checks on the row.
+ * `partnerDecides` / `escalate`: a queue owner with an open partner class. Pure.
+ */
+export function platformHoldControls(
+  owner: HoldOwner,
+  t: Pick<Transfer, 'complianceStatus' | 'complianceReasons'>,
+  sender: CustomerScreeningFlags | null | undefined,
+  reviews: readonly ReviewRowLite[],
+  o: { dataOnFile?: boolean } = {},
+): PlatformHoldControls {
+  const so = owner as ScopeOwner | null | undefined;
+  if (!reviewRecordApplies(so)) return { mode: 'legacy' };
+  const queue = holdQueueApplies(so);
+  const dataOnFile = o.dataOnFile === true;
+  const classes = classifyHold(t.complianceReasons, sender, { queue, partnerDecidesKyc: partnerDecidesKyc(so) }, {
+    blocked: t.complianceStatus === 'blocked',
+    dataOnFile,
+  });
+  const open = openHoldClasses(classes, reviews, sender);
+  const waitsList = classes.some((c) => c.holdClass === 'list_wait');
+  const noRelease =
+    waitsList || classes.some((c) => c.holdClass === 'blocked' || (c.holdClass === 'data_missing' && c.decider === 'nobody'));
+  const forms: PlatformHoldForm[] = [];
+  for (const c of open) {
+    const ours =
+      c.decider === 'platform' ||
+      (!queue && c.decider === 'partner') ||
+      c.holdClass === 'data_missing' ||
+      c.holdClass === 'blocked' ||
+      c.holdClass === 'list_wait';
+    if (!ours) continue;
+    const lists = allowedDispositions(c.holdClass, 'platform');
+    const release = noRelease || (c.holdClass === 'data_missing' && !dataOnFile) ? [] : lists.release;
+    if (release.length === 0 && lists.reject.length === 0) continue;
+    forms.push({ holdClass: c.holdClass, release, reject: lists.reject });
+  }
+  const partnerDecides = queue && open.some((c) => c.decider === 'partner');
+  return { mode: 'review', rowFp: rowReasonsFp(t.complianceReasons), forms, partnerDecides, escalate: partnerDecides, waitsList };
+}
+
+/**
+ * Fix pack 7 T14a (P12, P28, P29): SmartRemit asks a queue partner to decide a held transfer. ONE
+ * transaction: the locked row (not in_review -> 'not_held'), the owner (null or not
+ * holdQueueApplies -> 'not_queue'), the classes (with the sender flags for a real-money row, R1),
+ * ONE `transfer.hold.escalate` audit row (meta: the class names and actorScope, nothing else) and,
+ * when the partner has a compliance address, ONE `email.send` deduped per transfer per UTC day.
+ * Changes no state. Pokes after the commit.
+ */
+export async function escalateHold(db: Db, id: string, actor: string): Promise<'ok' | 'not_queue' | 'not_held'> {
+  const r = await db.transaction(async (tx): Promise<'ok' | 'not_queue' | 'not_held'> => {
+    const t = await createTransferRepo(tx).getTransferForUpdate(id);
+    if (!t || t.status !== 'in_review') return 'not_held';
+    const owner = await createPartnerRepo(tx).getPartner(t.partnerId);
+    if (!owner || !holdQueueApplies(owner)) return 'not_queue';
+    const flags = (await realMoneyFor(tx, t)) ? await readSenderScreeningFlags(tx, t.partnerId, t.phone) : undefined;
+    const holdClasses = classifyHold(t.complianceReasons, flags, { queue: true, partnerDecidesKyc: partnerDecidesKyc(owner) }, {
+      blocked: t.complianceStatus === 'blocked',
+    }).map((c) => c.holdClass);
+    await createAuditRepo(tx).record({
+      partnerId: t.partnerId,
+      actor,
+      actorType: 'staff',
+      action: 'transfer.hold.escalate',
+      subjectId: t.id,
+      meta: { holdClasses, actorScope: 'platform' },
+    });
+    const addr = sanctionsNoticeAddress(owner.supportConfig);
+    if (addr) {
+      await createOutboxRepo(tx).enqueue(
+        'email.send',
+        {
+          to: [addr],
+          subject: 'SmartRemit: a held transfer waits for your decision',
+          text: `Transfer ${t.id} is held and waits for your compliance team's decision in your SmartRemit workspace (Reviews). Do not share this notice with the customer.`,
+        },
+        { dedupeKey: `holdescalate:${t.id}:${new Date().toISOString().slice(0, 10)}` },
+      );
+    }
+    return 'ok';
+  });
+  if (r === 'ok') pokeWorker();
+  return r;
 }
 
 /**

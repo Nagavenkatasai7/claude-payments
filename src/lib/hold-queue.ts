@@ -274,6 +274,23 @@ export function nextStep(cycle: readonly ReviewRowLite[], actor: string, d: Hold
   return fourEyes && dispositionReleases(d) ? { step: 1, final: false } : { step: 1, final: true };
 }
 
+/**
+ * P4 (T14a; T17 and T39 reuse it): the classes still open, i.e. with no FINAL
+ * review row of the same class under the class's CURRENT classReasonsFp. The
+ * sender classes need the flags for their `|f=` part (R5), so a re-armed stamp
+ * reopens its class.
+ */
+export function openHoldClasses(
+  classes: readonly ClassifiedClass[],
+  reviews: readonly ReviewRowLite[],
+  flags?: CustomerScreeningFlags | null,
+): ClassifiedClass[] {
+  return classes.filter((c) => {
+    const fp = classReasonsFp(c, flags);
+    return !reviews.some((r) => r.holdClass === c.holdClass && r.final && r.reasonsFp === fp);
+  });
+}
+
 export type DecisionRefusal =
   | 'not_yours' | 'changed' | 'waits_list' | 'waits_data' | 'waits_platform' | 'blocked' | 'closed' | 'same_actor' | 'disposition';
 export type DecisionRoute = { kind: 'record' } | { kind: 'release' } | { kind: 'reject' } | { kind: 'refused'; why: DecisionRefusal };
