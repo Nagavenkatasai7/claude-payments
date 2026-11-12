@@ -21,6 +21,22 @@ export const KYC_TRAIL_ACTIONS = Object.freeze([
   'kyc.manual_override.create',
 ] as const);
 
+/**
+ * Fix pack 7 T28 (P25 partner trail, P22): the slugs read ONLY for a qualified compliance user of a
+ * partner that decides KYC (partnerDecidesKyc): SmartRemit's recommendation (kyc.recommend) and
+ * the team's own PEP clear (customer.screening_hold.clear marked actorScope 'partner'). Both row
+ * kinds are also opt-in in partnerKycTrail (opts), so every other viewer reads KYC_TRAIL_ACTIONS
+ * and sees today's rows (D8: a recommendation or a PEP clear must not tip anyone else off).
+ */
+export const KYC_TRAIL_READ_ACTIONS = Object.freeze([...KYC_TRAIL_ACTIONS, 'kyc.recommend', 'customer.screening_hold.clear'] as const);
+
+export interface KycTrailOptions {
+  /** kyc.recommend rows: "SmartRemit recommends approval / rejection" with SmartRemit's reason. */
+  recommendations?: boolean;
+  /** customer.screening_hold.clear rows marked actorScope 'partner': "PEP flag cleared" with the actor. */
+  pepClears?: boolean;
+}
+
 export interface KycTrailEntry {
   at: string;
   /** null on the "Verification started" line (the customer started it). */
@@ -48,9 +64,38 @@ export function partnerKycTrail(
   rows: readonly TenantAuditRow[],
   tenantUsernames: ReadonlySet<string>,
   kycSubmittedAt: string | undefined,
+  opts?: KycTrailOptions,
 ): KycTrailEntry[] {
   const out: Array<KycTrailEntry & { sort: number; id: number }> = [];
   for (const row of rows) {
+    if (row.action === 'kyc.recommend') {
+      const meta = metaOf(row);
+      const rec = meta.recommendation;
+      const reason = typeof meta.reason === 'string' ? meta.reason.trim() : '';
+      if (opts?.recommendations !== true || row.actorType !== 'staff' || (rec !== 'approve' && rec !== 'reject') || reason === '') continue;
+      out.push({
+        at: row.at.toISOString(),
+        actor: t('partner.audit.smartremit'), // never the SmartRemit username
+        labelKey: rec === 'approve' ? 'partner.customers.trail.recommendApprove' : 'partner.customers.trail.recommendReject',
+        reason: safeText(reason),
+        sort: row.at.getTime(),
+        id: row.id,
+      });
+      continue;
+    }
+    if (row.action === 'customer.screening_hold.clear') {
+      const meta = metaOf(row);
+      if (opts?.pepClears !== true || row.actorType !== 'staff' || meta.actorScope !== 'partner' || meta.watchlistHit === true) continue;
+      out.push({
+        at: row.at.toISOString(),
+        actor: safeText(row.actor),
+        labelKey: 'partner.customers.trail.pepCleared',
+        reason: null,
+        sort: row.at.getTime(),
+        id: row.id,
+      });
+      continue;
+    }
     if (!(KYC_TRAIL_ACTIONS as readonly string[]).includes(row.action)) continue;
     const meta = metaOf(row);
     const own = isOwn(row, meta, tenantUsernames);

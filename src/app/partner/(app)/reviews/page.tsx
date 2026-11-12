@@ -197,7 +197,13 @@ export default async function PartnerReviewsPage() {
 
         <Section
           title={t('partner.reviews.kyc.title')}
-          sub={delegated ? t('partner.reviews.kyc.subDelegated') : t('partner.reviews.neutral')}
+          sub={
+            owner && partnerDecidesKyc(owner)
+              ? t('partner.reviews.kyc.subPartnerDecides') // Fix pack 7 T28 (P25)
+              : delegated
+                ? t('partner.reviews.kyc.subDelegated')
+                : t('partner.reviews.neutral')
+          }
           testId="partner-reviews-kyc"
         >
           {kycRows.length === 0 ? (

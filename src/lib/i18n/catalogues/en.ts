@@ -2049,6 +2049,7 @@ export const en = {
   'partner.reviews.held.age': 'Held {n} h', // Fix pack 7 T17 (P15)
   'partner.reviews.kyc.title': 'KYC awaiting a decision',
   'partner.reviews.kyc.subDelegated': 'Open a customer to approve or reject their verification.',
+  'partner.reviews.kyc.subPartnerDecides': 'Your named compliance users decide these customers on each customer’s page.',
   'partner.reviews.kyc.caption': 'Customers awaiting a KYC decision',
   'partner.reviews.kyc.empty': 'No customers are waiting for a decision.',
   'partner.reviews.aml.title': 'Behaviour alerts',
@@ -2307,6 +2308,10 @@ export const en = {
   'partner.customers.trail.createdVerified': 'Created as verified',
   'partner.customers.trail.created': 'Created with a set status',
   'partner.customers.trail.reason': 'Reason: {reason}',
+  'partner.customers.trail.recommendApprove': 'SmartRemit recommends approval',
+  'partner.customers.trail.recommendReject': 'SmartRemit recommends rejection',
+  'partner.customers.trail.pepCleared': 'PEP flag cleared',
+  'partner.customers.trail.noteDecides': 'Your team’s decisions show who made them and why. SmartRemit’s recommendations show its reason; you make the decision.',
   // Fix pack 6 truth check TC-T1: staff record a withdrawal of the electronic records consent.
   'partner.customers.esign.title': 'Electronic records',
   'partner.customers.esign.sub': 'After a withdrawal, the next card or bank-transfer payment on the pay page asks the customer again. ACH debit and bill payments are not asked.',

@@ -14,7 +14,7 @@ import { getAuthStore } from '@/lib/auth-store';
 import { listTenantAuditForSubject } from '@/db/repos/tenant-audit-repo';
 import { listTenantStaff } from '@/lib/partner-staff-policy';
 import { scopeOf } from '@/lib/staff-scope';
-import { KYC_TRAIL_ACTIONS, partnerKycTrail } from '@/lib/partner-kyc-trail';
+import { KYC_TRAIL_ACTIONS, KYC_TRAIL_READ_ACTIONS, partnerKycTrail } from '@/lib/partner-kyc-trail';
 import { revealCapabilities, revealViewer } from '@/lib/partner-reveal-policy';
 import { getStaffMfaStore } from '@/lib/staff-mfa-store';
 import { customerDetailView, customerProfileView, sendingTodayView } from '@/lib/partner-customer-view';
@@ -171,18 +171,23 @@ export default async function PartnerCustomerDetailPage({
   // Lost-features p2 B7 and A10: today's spend against the cap (the same ledger read and evaluation
   // a mint uses, figures only) and this customer's live transfers at THIS tenant (masked rows).
   const txCursor = decodeTransferCursor(Array.isArray(sp.tx) ? sp.tx[0] : sp.tx);
+  // Fix pack 7 T26/T28: for a partner that decides KYC, the viewer's qualification (a fresh staff
+  // read, fails closed) is known BEFORE the trail read: only a qualified compliance user reads
+  // SmartRemit's recommendations and the team's PEP clears (KYC_TRAIL_READ_ACTIONS, P25, D8).
+  const deciding = partner && partnerDecidesKyc(partner) ? await loadDecidingKyc(partner, ctx, customer, mfaEnrolled) : null;
+  const showDecides = deciding?.qualified === true;
   // senderTotals is the daily-volume store's ledger read (ET day; blocked and cancelled excluded).
   // Lost-features p2 A9: the KYC decision history from this tenant's durable audit rows only
   // (partner-kyc-trail decides whose reason may show; SmartRemit's decisions show the outcome only).
   const [totals, txPage, trailRows, allStaff, referredBy] = await Promise.all([
     getStore().senderTotals(ctx.partnerId, customer.senderPhone),
     listPartnerCustomerTransfers(getDb(), ctx.partnerId, customer.senderPhone, { limit: CUSTOMER_TRANSFERS_PAGE, cursor: txCursor }),
-    listTenantAuditForSubject(getDb(), ctx.partnerId, auditSubjectId(ctx.partnerId, customer.senderPhone), KYC_TRAIL_ACTIONS, KYC_TRAIL_LIMIT),
+    listTenantAuditForSubject(getDb(), ctx.partnerId, auditSubjectId(ctx.partnerId, customer.senderPhone), showDecides ? KYC_TRAIL_READ_ACTIONS : KYC_TRAIL_ACTIONS, KYC_TRAIL_LIMIT),
     getAuthStore().listStaff(),
     referredByName(getDb, ctx.partnerId, customer.senderPhone), // Batch B4: this tenant's row only
   ]);
   const tenantUsernames = new Set(listTenantStaff(scopeOf(ctx.staff), ctx.partnerId, allStaff).map((m) => m.username));
-  const trail = partnerKycTrail(trailRows, tenantUsernames, customer.kycSubmittedAt);
+  const trail = partnerKycTrail(trailRows, tenantUsernames, customer.kycSubmittedAt, showDecides ? { recommendations: true, pepClears: true } : undefined);
   const today = sendingTodayView(evaluateCap(customer, now, totals.todayUsdCents, 0, sendGateActive(partner), limits));
   const olderHref = txPage.nextCursor ? `${PARTNER_ROUTES.customers.href}/${ref}?tx=${encodeTransferCursor(txPage.nextCursor)}` : null;
   const setBySmartRemit = !partnerMayWriteOverride(customer.sendLimitOverride, now);
@@ -192,7 +197,6 @@ export default async function PartnerCustomerDetailPage({
   // or without a hit). decideKycAction re-checks everything. When nothing is offered ('ours' mode or
   // a no-op) the admin sees ONE neutral line.
   const kycDecisions = canEditLimits ? partnerKycOfferedDecisions(partner, customer) : [];
-  const deciding = partner && partnerDecidesKyc(partner) ? await loadDecidingKyc(partner, ctx, customer, mfaEnrolled) : null;
   const override = customer.sendLimitOverride;
   const esignView = await loadEsignConsentView(ctx.partnerId, customer.senderPhone); // Fix pack 6 TC-T1
   const partnerSetExpiry =
@@ -264,7 +268,7 @@ export default async function PartnerCustomerDetailPage({
                 ))}
               </ol>
             )}
-            <p className="mt-2 text-[12.5px] text-ds-ink-subtle">{t('partner.customers.trail.note')}</p>
+            <p className="mt-2 text-[12.5px] text-ds-ink-subtle">{t(showDecides ? 'partner.customers.trail.noteDecides' : 'partner.customers.trail.note')}</p>
           </div>
           {deciding && (canEditLimits || deciding.qualified) ? (
             <div className="mt-4 border-t border-ds-border pt-4" data-testid="partner-kyc-decision">
