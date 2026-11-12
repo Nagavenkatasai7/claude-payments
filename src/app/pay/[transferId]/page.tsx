@@ -40,6 +40,7 @@ import { NO_ORIGINATOR_FIELDS, readOriginatorView, type OriginatorView } from '@
 import { DEFAULT_DESTINATION_COUNTRY } from '@/lib/defaults';
 import { readEsignConsentNeeded } from '@/lib/esign';
 import { ESIGN_CONSENT_VERSION } from '@/lib/legal/esign-consent';
+import { isRiskSignal } from '@/lib/risk-signals';
 import { isOpaqueTransferId } from '@/lib/id';
 import { payReceiptState, type PayReceiptState } from '@/lib/pay-receipt-state';
 import { FIXED_REPLIES } from '@/lib/hold-replies';
@@ -254,6 +255,9 @@ async function renderPayPage(transferId: string) {
     // Fix pack 6 (P11): the reloaded page would show a printable receipt (b2c, not 'test', a
     // 22-char id or a draft, which mints one); the form's done state then says so.
     receiptOnReload: boolean;
+    // Fix pack 6 (R48, P19): the draft carries a known risk signal -> the form shows the fixed
+    // warning and its tick. Always false for a minted transfer (no read, no log).
+    riskWarning: boolean;
   };
 
   // A row that is no longer payable, b2b or exempt: no field (and no read).
@@ -372,6 +376,7 @@ async function renderPayPage(transferId: string) {
       originator,
       esignVersion,
       receiptOnReload: transferType === 'b2c' && transfer.environment !== 'test' && isOpaqueTransferId(transfer.id),
+      riskWarning: false,
     };
   } else if (draft) {
     // The draft carries its tenant (fix 1); a pre-deploy draft brands by the oldest-row rule.
@@ -451,6 +456,8 @@ async function renderPayPage(transferId: string) {
       originator,
       esignVersion,
       receiptOnReload: (draft.transferType ?? 'b2c') === 'b2c',
+      // The same filter as the pay route's tick (T27): an unknown value never asks.
+      riskWarning: (draft.riskSignals ?? []).some(isRiskSignal),
     };
   }
 
@@ -629,6 +636,7 @@ async function renderPayPage(transferId: string) {
                 }
               : {})}
             {...(view.receiptOnReload ? { receiptOnReload: true } : {})}
+            {...(view.riskWarning ? { riskWarning: true } : {})}
             transferId={view.id}
             destinationCountry={view.destinationCountry}
             needsBankDetails={view.needsBankDetails}

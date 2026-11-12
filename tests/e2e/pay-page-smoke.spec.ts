@@ -46,6 +46,10 @@ async function expectNoNewPayText(page: Page): Promise<void> {
 async function expectNoPack6Text(page: Page): Promise<void> {
   await expect(page.getByTestId('esign-consent')).toHaveCount(0);
   await expect(page.getByText('I agree to get the disclosures, receipts and notices for my transfers electronically.')).toHaveCount(0);
+  // Fix pack 6 T28 (P19): the draft page's risk tick; the literal is RISK_ACK_LABEL
+  // (src/lib/legal/risk-warning.ts), pinned equal by tests/pay-form-risk-ack.test.ts.
+  await expect(page.getByTestId('risk-ack')).toHaveCount(0);
+  await expect(page.getByText('I have read this warning.')).toHaveCount(0);
 }
 
 test('/pay carries exactly one enforced CSP, with the Program-Fix 47 additions', async ({ request }) => {

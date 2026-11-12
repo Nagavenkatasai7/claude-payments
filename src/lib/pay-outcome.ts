@@ -160,3 +160,10 @@ export function disclosureAckBody(
 export function esignConsentBody(version: string | null, ticked: boolean): { esignConsentVersion?: string } {
   return ticked && version !== null ? { esignConsentVersion: version } : {};
 }
+
+// Fix pack 6 (P4, P19): the risk tick a draft pay form posts: `riskAck: true` only
+// when the page showed the warning AND the box is ticked. Client-safe; the server
+// requires it for a draft that carries risk signals (payRiskAckRequired).
+export function riskAckBody(required: boolean, ticked: boolean): { riskAck?: true } {
+  return required && ticked ? { riskAck: true } : {};
+}

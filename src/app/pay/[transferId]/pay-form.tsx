@@ -11,6 +11,7 @@ import {
   PAY_SENDER_DOB_LABEL,
   disclosureAckBody,
   esignConsentBody,
+  riskAckBody,
   payErrorMessage,
   payOkStatus,
   payOkHeld,
@@ -25,6 +26,8 @@ import { otpRequestErrorMessage } from '@/lib/otp-send-copy';
 import { ACKNOWLEDGEMENT_LABEL } from '@/lib/legal/disclosure-drafts';
 // Pure and client-safe (no imports); never src/lib/esign.ts here (server: database reads).
 import { ESIGN_CONSENT_LABEL, ESIGN_CONSENT_TEXT, ESIGN_CONSENT_TITLE } from '@/lib/legal/esign-consent';
+// Pure and client-safe (no imports): the fixed risk warning and its tick label (P18).
+import { RISK_ACK_LABEL, RISK_WARNING_TEXT } from '@/lib/legal/risk-warning';
 import {
   BANK_FIELDS_BY_COUNTRY,
   accountConfirmErrors,
@@ -126,6 +129,7 @@ export function PayForm({
   esignVersion = null,
   disclosureSlot = null,
   receiptOnReload = false,
+  riskWarning = false,
 }: {
   transferId: string;
   destinationCountry: CountryCode;
@@ -161,6 +165,12 @@ export function PayForm({
    * says so (PAY_SUCCESS_RECEIPT_COPY). Default false: today's text. The ACH form ignores it.
    */
   receiptOnReload?: boolean;
+  /**
+   * Fix pack 6 (R48, P19): the DRAFT page only, when the draft carries risk signals: the form
+   * shows RISK_WARNING_TEXT and a tick above the E-SIGN block, Pay waits for it and the body
+   * carries `riskAck: true`. Default false: markup unchanged. The ACH form never shows it.
+   */
+  riskWarning?: boolean;
 }) {
   // fix 6: the sender may replace a prefilled (server-rehydrated) destination.
   const [editBankDetails, setEditBankDetails] = useState(false);
@@ -195,6 +205,7 @@ export function PayForm({
         esignVersion={esignVersion}
         disclosureSlot={disclosureSlot}
         receiptOnReload={receiptOnReload}
+        riskWarning={riskWarning}
         savedAccountLabel={savedAccountLabel}
         onEditBankDetails={savedAccountLabel && !bankDetailsLocked ? () => setEditBankDetails(true) : undefined}
       />
@@ -213,6 +224,7 @@ export function PayForm({
       esignVersion={esignVersion}
       disclosureSlot={disclosureSlot}
       receiptOnReload={receiptOnReload}
+      riskWarning={riskWarning}
       destinationCountry={destinationCountry}
       recipientName={recipientName}
       summary={summary}
@@ -344,6 +356,28 @@ function DisclosureAck({ checked, onChange }: { checked: boolean; onChange: (v: 
       />
       <span>{ACKNOWLEDGEMENT_LABEL}</span>
     </label>
+  );
+}
+
+// ── Fix pack 6 (R48, P19): the risk warning on the draft pay page ───────────
+// The one fixed, versioned warning (MLRO draft) and its tick, above the E-SIGN
+// block. Pay waits for the tick; the POST then carries `riskAck: true`.
+
+function RiskAck({ checked, onChange }: { checked: boolean; onChange: (v: boolean) => void }) {
+  return (
+    <div data-testid="risk-ack" className="mb-5 rounded-xl border border-[#2a3942] p-3.5">
+      <p className="text-[13px] leading-normal text-[#e9edef]">{RISK_WARNING_TEXT}</p>
+      <label className="mt-3 flex items-start gap-2 text-[13px] leading-normal text-[#e9edef]">
+        <input
+          type="checkbox"
+          name="riskAck"
+          className="mt-0.5 size-4 shrink-0 accent-[#25d366]"
+          checked={checked}
+          onChange={(e) => onChange(e.target.checked)}
+        />
+        <span>{RISK_ACK_LABEL}</span>
+      </label>
+    </div>
   );
 }
 
@@ -535,6 +569,7 @@ function SimplePayForm({
   esignVersion = null,
   disclosureSlot = null,
   receiptOnReload = false,
+  riskWarning = false,
 }: {
   transferId: string;
   savedAccountLabel?: string | null;
@@ -548,6 +583,7 @@ function SimplePayForm({
   esignVersion?: string | null;
   disclosureSlot?: ReactNode;
   receiptOnReload?: boolean;
+  riskWarning?: boolean;
 }) {
   const [status, setStatus] = useState<Status>('idle');
   // Fix pack 6 (P11): a held answer (in_review) shows the neutral label, never "complete".
@@ -557,6 +593,9 @@ function SimplePayForm({
   // Fix pack 6 (P8): the E-SIGN tick, asked only when the page passed a version.
   const [esignTicked, setEsignTicked] = useState(false);
   const esignMissing = esignVersion !== null && !esignTicked;
+  // Fix pack 6 (P19): the risk tick, asked only when the draft page passed riskWarning.
+  const [riskTicked, setRiskTicked] = useState(false);
+  const riskMissing = riskWarning && !riskTicked;
   // Fix pack 4 (C18): the stored account has no name on file -> ask for it here.
   const showHolder = !legalNameOnFile;
   const [holder, setHolder] = useState('');
@@ -577,7 +616,7 @@ function SimplePayForm({
 
   async function handleSubmit(e: FormEvent) {
     e.preventDefault();
-    if (ackMissing || esignMissing || holderMissing || origMissing) return; // the button is disabled too; this covers implicit (Enter) submission
+    if (ackMissing || esignMissing || riskMissing || holderMissing || origMissing) return; // the button is disabled too; this covers implicit (Enter) submission
     setStatus('paying');
     setOtpError('');
     setHolderError('');
@@ -591,6 +630,7 @@ function SimplePayForm({
           otp: code,
           ...disclosureAckBody(disclosureVersion, disclosureHash, acked),
           ...esignConsentBody(esignVersion, esignTicked),
+          ...riskAckBody(riskWarning, riskTicked),
           ...(showHolder ? { accountHolder: holder.trim() } : {}),
           ...originatorBody(shownOrig, { address: senderAddress, dob: senderDob }),
         }),
@@ -628,6 +668,7 @@ function SimplePayForm({
   // EVERY render path, so the disclosure stays where the page showed it. Both absent: nothing.
   const top = (
     <>
+      {riskWarning && status !== 'done' && <RiskAck checked={riskTicked} onChange={setRiskTicked} />}
       {esignVersion !== null && status !== 'done' && <EsignConsent checked={esignTicked} onChange={setEsignTicked} />}
       {disclosureSlot}
     </>
@@ -722,7 +763,7 @@ function SimplePayForm({
       <button
         type="submit"
         className={primaryBtnClasses}
-        disabled={status === 'paying' || !sent || code.length !== 6 || ackMissing || esignMissing || holderMissing || origMissing}
+        disabled={status === 'paying' || !sent || code.length !== 6 || ackMissing || esignMissing || riskMissing || holderMissing || origMissing}
       >
         {status === 'paying' ? 'Processing…' : 'Pay now'}
       </button>
@@ -756,6 +797,7 @@ function BankDetailsPayForm({
   esignVersion = null,
   disclosureSlot = null,
   receiptOnReload = false,
+  riskWarning = false,
 }: {
   transferId: string;
   destinationCountry: CountryCode;
@@ -770,6 +812,7 @@ function BankDetailsPayForm({
   esignVersion?: string | null;
   disclosureSlot?: ReactNode;
   receiptOnReload?: boolean;
+  riskWarning?: boolean;
 }) {
   const defs: Field[] = BANK_FIELDS_BY_COUNTRY[destinationCountry] ?? [];
 
@@ -794,6 +837,9 @@ function BankDetailsPayForm({
   // Fix pack 6 (P8): the E-SIGN tick, asked only when the page passed a version.
   const [esignTicked, setEsignTicked] = useState(false);
   const esignMissing = esignVersion !== null && !esignTicked;
+  // Fix pack 6 (P19): the risk tick, asked only when the draft page passed riskWarning.
+  const [riskTicked, setRiskTicked] = useState(false);
+  const riskMissing = riskWarning && !riskTicked;
   // Fix pack 4 (C18): a name on file describes the STORED account, not the one
   // typed here, so on real money the field shows even with a name on file. An
   // exempt row ({ required: false, onFile: true }) never shows it.
@@ -855,7 +901,7 @@ function BankDetailsPayForm({
   // canonical payoutDestination server-side (it never trusts a client-composed
   // string), so we send the raw fields, not the composed string.
   async function handlePay() {
-    if (ackMissing || esignMissing) return;
+    if (ackMissing || esignMissing || riskMissing) return;
     setStatus('paying');
     setOtpError('');
     setErrorMessage(null);
@@ -869,6 +915,7 @@ function BankDetailsPayForm({
           otp: code,
           ...disclosureAckBody(disclosureVersion, disclosureHash, acked),
           ...esignConsentBody(esignVersion, esignTicked),
+          ...riskAckBody(riskWarning, riskTicked),
           ...(showHolder ? { accountHolder: holder.trim() } : {}),
           ...originatorBody(shownOrig, { address: senderAddress, dob: senderDob }),
         }),
@@ -907,6 +954,7 @@ function BankDetailsPayForm({
   // EVERY render path, so the disclosure stays where the page showed it. Both absent: nothing.
   const top = (
     <>
+      {riskWarning && status !== 'done' && <RiskAck checked={riskTicked} onChange={setRiskTicked} />}
       {esignVersion !== null && status !== 'done' && <EsignConsent checked={esignTicked} onChange={setEsignTicked} />}
       {disclosureSlot}
     </>
@@ -993,7 +1041,7 @@ function BankDetailsPayForm({
         </div>
         <OtpFields code={code} setCode={setCode} sent={sent} otpError={otpError} otp={otp} approvingText={approvingText} />
         {disclosureVersion !== null && <DisclosureAck checked={acked} onChange={setAcked} />}
-        <button type="button" className={primaryBtnClasses} onClick={handlePay} disabled={status === 'paying' || !sent || code.length !== 6 || ackMissing || esignMissing}>
+        <button type="button" className={primaryBtnClasses} onClick={handlePay} disabled={status === 'paying' || !sent || code.length !== 6 || ackMissing || esignMissing || riskMissing}>
           {status === 'paying' ? 'Processing…' : 'Pay now'}
         </button>
         <ResendCode sent={sent} otp={otp} disabled={status === 'paying'} />

@@ -294,6 +294,7 @@ export const en = {
   'partner.audit.action.kycModeChange': 'KYC handling changed',
   'partner.audit.action.otpVerified': 'Payment approved with a code',
   'partner.audit.action.amlHoldRulesSet': 'AML hold rules changed',
+  'partner.audit.action.riskSignals': 'Payment warning recorded',
   'partner.audit.action.disclosureConfig': 'Disclosure details changed',
   'partner.audit.action.persona': 'Assistant persona changed',
   'partner.audit.action.displayName': 'Display name changed',

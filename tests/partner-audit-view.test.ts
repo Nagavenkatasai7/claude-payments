@@ -118,7 +118,7 @@ describe('projectAuditRow', () => {
 
 describe('TENANT_AUDIT_ACTIONS', () => {
   it('the allowlist excludes screening, login and ops rows', () => {
-    for (const a of ['sanctions.screen', 'aml.alert', 'aml.holds_set', 'risk_signals.set', 'kyc.start', 'auth.login', 'auth.login.failed', 'auth.login.success', 'auth.login.throttled', 'ops.outbox.retry', 'ops.outbox.dismiss', 'auth.mfa.reset', 'auth.mfa.failed', 'auth.stepup', 'ticket.triage', 'ticket.note', 'copilot.kyc_review']) {
+    for (const a of ['sanctions.screen', 'aml.alert', 'aml.holds_set', 'risk_signals.set', 'aml.hold', 'customer.consent.esign', 'kyc.start', 'auth.login', 'auth.login.failed', 'auth.login.success', 'auth.login.throttled', 'ops.outbox.retry', 'ops.outbox.dismiss', 'auth.mfa.reset', 'auth.mfa.failed', 'auth.stepup', 'ticket.triage', 'ticket.note', 'copilot.kyc_review']) {
       expect(TENANT_AUDIT_ACTIONS).not.toContain(a);
     }
   });
@@ -140,6 +140,37 @@ describe('TENANT_AUDIT_ACTIONS', () => {
     expect(platformRow.actor).toBe(t('partner.audit.smartremit'));
     expect(JSON.stringify(platformRow)).not.toContain('owner-admin');
     expect(JSON.stringify(platformRow)).not.toContain('go_live_default');
+  });
+  // Fix pack 6 T28 (P21): the mint's record of the pay-page warning is in the feed with its
+  // enum detail only; the platform writer (risk_signals.set) and the consent rows stay out.
+  it('risk.signals is in TENANT_AUDIT_ACTIONS with its own label', () => {
+    expect(TENANT_AUDIT_ACTIONS).toContain('risk.signals');
+    expect(TENANT_OWN_ONLY_ACTIONS).not.toContain('risk.signals');
+    expect(actionLabelKey('risk.signals')).toBe('partner.audit.action.riskSignals');
+    expect(t(actionLabelKey('risk.signals'))).toBe('Payment warning recorded');
+    for (const a of ['risk_signals.set', 'aml.hold', 'customer.consent.esign']) expect(TENANT_AUDIT_ACTIONS).not.toContain(a);
+  });
+  it('risk.signals detail shows shown, held and acked only (never derived, warningVersion, ackedAt, checkFailed)', () => {
+    const meta = {
+      shown: ['first_transfer', 'chat_cue'],
+      derived: ['amount_over_threshold'],
+      acked: true,
+      held: ['first_transfer'],
+      warningVersion: 'rw-2026-11.1-draft',
+      ackedAt: new Date(Date.now() - 60_000).toISOString(),
+      checkFailed: true,
+    };
+    const r = projectAuditRow(row({ action: 'risk.signals', actor: 'system:risk-signals', actorType: 'system', subjectId: 'tx_abc123', meta }), tenant);
+    expect(r.detail).toBe('shown=first_transfer chat_cue, held=first_transfer, acked=true');
+    for (const v of ['derived', 'amount_over_threshold', 'warningVersion', 'rw-2026', 'ackedAt', meta.ackedAt, 'checkFailed']) {
+      expect(JSON.stringify(r)).not.toContain(v);
+    }
+    expect(r.subject).toBe('tx_abc123');
+  });
+  it("a risk.signals row with actorType 'system' (actor 'system:risk-signals') reads as the system label", () => {
+    const r = projectAuditRow(row({ action: 'risk.signals', actor: 'system:risk-signals', actorType: 'system', meta: { shown: [], held: [], acked: false } }), tenant);
+    expect(r.actor).toBe(t('partner.audit.system'));
+    expect(JSON.stringify(r)).not.toContain('system:risk-signals');
   });
   it('holds the plan list, and every action has a label', () => {
     expect(TENANT_AUDIT_ACTIONS).toContain('transfer.release');
