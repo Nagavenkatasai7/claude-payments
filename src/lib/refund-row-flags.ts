@@ -42,6 +42,16 @@ export async function cardRefundBlockedIds(db: DbOrTx, rows: readonly RefundList
 
 type RefundHoldRow = RefundListRow & Pick<Transfer, 'phone' | 'status' | 'complianceStatus' | 'complianceReasons'>;
 
+/** Fix pack 7 F2: which buttons a list shows (default: Approve / Retry; reverse: the B2B Reverse). */
+export interface RefundHoldOpts {
+  reverse?: boolean;
+}
+
+function hasHoldButton(t: Pick<Transfer, 'refundStatus'>, o: RefundHoldOpts): boolean {
+  if (o.reverse) return (t.refundStatus ?? 'none') === 'none';
+  return t.refundStatus === 'requested' || t.refundStatus === 'failed';
+}
+
 /**
  * The refusal text per LISTED row with a decision button (refund 'requested'
  * or 'failed') that the cores would refuse: REFUND_SANCTIONS_REFUSAL or
@@ -50,11 +60,16 @@ type RefundHoldRow = RefundListRow & Pick<Transfer, 'phone' | 'status' | 'compli
  * more. A failed flags or owner read flags the row with the sanctions text
  * (fail closed: the button hides; the core re-checks). No customer row is
  * nothing to read (as the cores).
+ *
+ * Fix pack 7 F2 (early review EE1): `{ reverse: true }` is the /admin-dashboard/b2b
+ * Reverse button instead: its rows are those with refund 'none' (the state
+ * reverseB2bSettlement flips), the same reads and texts (a paid row is never
+ * in_review, so only the sanctions text applies there).
  */
-export async function refundHoldRefusals(db: DbOrTx, rows: readonly RefundHoldRow[]): Promise<Map<string, string>> {
+export async function refundHoldRefusals(db: DbOrTx, rows: readonly RefundHoldRow[], o: RefundHoldOpts = {}): Promise<Map<string, string>> {
   const out = new Map<string, string>();
   for (const t of rows) {
-    if (t.refundStatus !== 'requested' && t.refundStatus !== 'failed') continue;
+    if (!hasHoldButton(t, o)) continue;
     if (!(await realMoneyFor(db, t))) continue;
     try {
       const flags = await readSenderScreeningFlags(db, t.partnerId, t.phone).then(
@@ -78,6 +93,6 @@ export async function refundHoldRefusals(db: DbOrTx, rows: readonly RefundHoldRo
 }
 
 /** The ids refundHoldRefusals flags (P14: mirrors cardRefundBlockedIds). */
-export async function refundHoldBlockedIds(db: DbOrTx, rows: readonly RefundHoldRow[]): Promise<Set<string>> {
-  return new Set((await refundHoldRefusals(db, rows)).keys());
+export async function refundHoldBlockedIds(db: DbOrTx, rows: readonly RefundHoldRow[], o: RefundHoldOpts = {}): Promise<Set<string>> {
+  return new Set((await refundHoldRefusals(db, rows, o)).keys());
 }

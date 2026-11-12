@@ -15,8 +15,10 @@ import { certifiedQueuePartner, heldRowFor } from './helpers-hold';
 import { paidRealMoneyTransfer, seedRealMoneyRail } from './helpers-live';
 import type { Db } from '@/db/client';
 import {
-  approveRefund, issueRefund, rejectTransfer, retryRefund, REFUND_HOLD_FIRST_REFUSAL, REFUND_SANCTIONS_REFUSAL,
+  approveRefund, issueRefund, rejectTransfer, retryRefund, reverseB2bSettlement, REFUND_HOLD_FIRST_REFUSAL, REFUND_SANCTIONS_REFUSAL,
 } from '@/lib/dashboard-ops';
+import { b2bRowControl, showsReverse } from '@/lib/b2b-row-control';
+import type { Transfer } from '@/lib/types';
 import { refundHoldBlockedIds, refundHoldRefusals } from '@/lib/refund-row-flags';
 import { refundControls } from '@/lib/partner-refunds';
 import { createTransferRepo } from '@/db/repos/transfer-repo';
@@ -244,5 +246,105 @@ describe('refundControls holdBlocked', { retry: 0 }, () => {
     expect(refundControls('requested', 'admin', { holdBlocked: false })).toEqual({ approve: true, dismiss: true, retry: false });
     expect(refundControls('failed', 'admin', {})).toEqual({ approve: false, dismiss: false, retry: true });
     expect(refundControls('requested', 'admin')).toEqual({ approve: true, dismiss: true, retry: false });
+  });
+});
+
+// Fix pack 7 F2 (early review EE1): the staff B2B Reverse is a fourth refund path (partner-pulled
+// rows have no fundingRef, so issueRefund cannot reach them). On real money it honours the funds
+// rule: the row is read FOR UPDATE and refundHoldGuard runs before the none -> pending flip.
+/** A PAID B2B ach_pull row (no fundingRef: SmartRemit captured nothing). */
+async function paidB2bPull(id: string, partnerId = 'acme'): Promise<Transfer> {
+  const t = await paidRealMoneyTransfer(db, { id, partnerId, fundingMethod: 'ach_pull' });
+  await db.execute(sql`UPDATE transfers SET transfer_type = 'b2b' WHERE id = ${t.id}`);
+  return load(t.id);
+}
+async function blockRow(id: string): Promise<void> {
+  await db.execute(sql`UPDATE transfers SET compliance_status = 'blocked', compliance_reasons = ${JSON.stringify([RECIPIENT_WATCHLIST_REASON])}::jsonb
+    WHERE id = ${id}`);
+}
+
+describe('reverseB2bSettlement honours the funds rule on real money (F2, EE1)', { retry: 0 }, () => {
+  it('F2.1: http rail, B2B ach_pull row, paid, complianceStatus blocked: REFUND_SANCTIONS_REFUSAL; refund stays none; no funding.refund', async () => {
+    await httpOwner();
+    const t = await paidB2bPull('rv_f2_1');
+    await blockRow(t.id);
+    await expect(reverseB2bSettlement(db, t.id)).rejects.toThrow(REFUND_SANCTIONS_REFUSAL);
+    expect((await load(t.id)).refundStatus ?? 'none').toBe('none');
+    expect(await refunds()).toEqual([]);
+  });
+
+  it('F2.2: http rail, paid row of a sender with a watchlist stamp: REFUND_SANCTIONS_REFUSAL', async () => {
+    await httpOwner();
+    const t = await paidB2bPull('rv_f2_2');
+    await stampWatchlist(t.phone);
+    await expect(reverseB2bSettlement(db, t.id)).rejects.toThrow(REFUND_SANCTIONS_REFUSAL);
+    expect((await load(t.id)).refundStatus ?? 'none').toBe('none');
+    expect(await refunds()).toEqual([]);
+  });
+
+  it('F2.3: http rail, clean paid row: reverses as today (refund pending, one funding.refund row)', async () => {
+    await httpOwner();
+    const t = await paidB2bPull('rv_f2_3');
+    await reverseB2bSettlement(db, t.id);
+    expect((await load(t.id)).refundStatus).toBe('pending');
+    expect((await refunds()).map((r) => r.dedupe_key)).toEqual([`refund:${t.id}`]);
+  });
+
+  it('F2.4: mock rail, the fixtures of F2.1 and F2.2: reverse as today, and no sender flags are read', async () => {
+    await seedPartner(db, 'acme');
+    const a = await paidB2bPull('rv_f2_4a');
+    await blockRow(a.id);
+    const b = await paidB2bPull('rv_f2_4b');
+    await stampWatchlist(b.phone);
+    flagsRead.calls = 0;
+    await reverseB2bSettlement(db, a.id);
+    await reverseB2bSettlement(db, b.id);
+    for (const id of [a.id, b.id]) expect((await load(id)).refundStatus).toBe('pending');
+    expect((await refunds()).map((r) => r.dedupe_key)).toEqual([`refund:${a.id}`, `refund:${b.id}`]);
+    expect(flagsRead.calls).toBe(0);
+  });
+
+  it('F2.5: the B2B page flags the row of F2.1 and renders its fixed line in place of the Reverse form', async () => {
+    await httpOwner();
+    const blocked = await paidB2bPull('rv_f2_5a');
+    await blockRow(blocked.id);
+    const clean = await paidB2bPull('rv_f2_5b');
+    const rows = [await load(blocked.id), await load(clean.id)];
+    // The reverse buttons (refund none) are the B2B page's decision buttons; the default (Approve /
+    // Retry rows) does not list them.
+    expect([...(await refundHoldBlockedIds(db, rows))]).toEqual([]);
+    expect([...(await refundHoldBlockedIds(db, rows, { reverse: true }))]).toEqual([blocked.id]);
+    const refusals = await refundHoldRefusals(db, rows.filter(showsReverse), { reverse: true });
+    expect(b2bRowControl(rows[0], refusals)).toEqual({ kind: 'reverse_refused', text: REFUND_SANCTIONS_REFUSAL });
+    expect(b2bRowControl(rows[1], refusals)).toEqual({ kind: 'reverse' });
+  });
+
+  it('F2.5b: a mock-rail blocked row keeps its Reverse form, and a row with no Reverse costs no read', async () => {
+    await seedPartner(db, 'acme');
+    const t = await paidB2bPull('rv_f2_5c');
+    await blockRow(t.id);
+    flagsRead.calls = 0;
+    const row = await load(t.id);
+    const refusals = await refundHoldRefusals(db, [row], { reverse: true });
+    expect(b2bRowControl(row, refusals)).toEqual({ kind: 'reverse' });
+    await db.execute(sql`UPDATE transfers SET refund_status = 'pending' WHERE id = ${t.id}`);
+    expect([...(await refundHoldBlockedIds(db, [await load(t.id)], { reverse: true }))]).toEqual([]);
+    expect(flagsRead.calls).toBe(0);
+  });
+});
+
+describe('b2bRowControl (the B2B page actions column, unchanged rows)', { retry: 0 }, () => {
+  const base = { id: 'x', fundingMethod: 'ach_pull', fundingRef: undefined, fundingIntentRef: undefined } as unknown as Transfer;
+  it('maps every status as the page did before F2', () => {
+    const none = new Map<string, string>();
+    expect(b2bRowControl({ ...base, status: 'awaiting_payment' }, none)).toEqual({ kind: 'cancel' });
+    expect(b2bRowControl({ ...base, status: 'awaiting_payment', fundingRef: 'ch_1' }, none)).toEqual({ kind: 'charged' });
+    expect(b2bRowControl({ ...base, status: 'paid' }, none)).toEqual({ kind: 'reverse' });
+    expect(b2bRowControl({ ...base, status: 'paid', fundingMethod: 'credit_card' }, none)).toEqual({ kind: 'none' });
+    expect(b2bRowControl({ ...base, status: 'in_review' }, none)).toEqual({ kind: 'in_review' });
+    expect(b2bRowControl({ ...base, status: 'delivered' }, none)).toEqual({ kind: 'recall' });
+    expect(b2bRowControl({ ...base, status: 'cancelled' }, none)).toEqual({ kind: 'none' });
+    expect(showsReverse({ ...base, status: 'paid' })).toBe(true);
+    expect(showsReverse({ ...base, status: 'delivered' })).toBe(false);
   });
 });

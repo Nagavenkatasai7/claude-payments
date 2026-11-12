@@ -212,7 +212,9 @@ export async function cancelOwnedTransfer(
 export async function reverseB2bSettlement(db: Db, id: string): Promise<void> {
   await db.transaction(async (tx) => {
     const repo = createTransferRepo(tx);
-    const transfer = await repo.getTransfer(id);
+    // Fix pack 7 F2 (early review EE1): the row is read FOR UPDATE, so the checks below and the
+    // none -> pending flip see one locked row (lock order transfer -> customer, as rejectTransfer).
+    const transfer = await repo.getTransferForUpdate(id);
     if (!transfer) {
       throw new Error('Cannot reverse: transfer not found.');
     }
@@ -227,6 +229,12 @@ export async function reverseB2bSettlement(db: Db, id: string): Promise<void> {
     if ((transfer.refundStatus ?? 'none') !== 'none') {
       throw new Error('Cannot reverse: a reversal is already in progress or complete for this transfer.');
     }
+    // Fix pack 7 F2 (P14 "Refund back doors", D7): the B2B Reverse is a refund path too. On real
+    // money a sanctions-held row keeps its funds (REFUND_SANCTIONS_REFUSAL, thrown BEFORE the flip:
+    // refund stays 'none', no funding.refund); the partner returns them on its own rail and staff
+    // record it outside SmartRemit (P26). Not real money (mock, simulator, sandbox): one rail read,
+    // then today's path with no further read.
+    await refundHoldGuard(tx, transfer, await realMoneyFor(tx, transfer));
     await repo.updateRefund(id, { refundStatus: 'pending' });
     const fresh = await createOutboxRepo(tx).enqueue(
       'funding.refund',
