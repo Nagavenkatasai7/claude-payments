@@ -9,15 +9,18 @@
 // every object field by field, never spreading an input, so an extra field on a caller's
 // object can never reach the partner.
 //
-// Imports: types, reviewRecordApplies (client-safe) and the outbox repo (T21, for
-// enqueuePartnerEvent). No node built-in, no env. Not imported by any client file.
+// Imports: types, reviewRecordApplies (client-safe), the outbox repo (T21, for
+// enqueuePartnerEvent) and the partner repo (T22, the owner read of
+// enqueuePotentialMatchIfEligible). No node built-in, no env. Not imported by any client file.
 
 import type { DbOrTx } from '@/db/client';
 import { createOutboxRepo } from '@/db/repos/outbox-repo';
+import { createPartnerRepo } from '@/db/repos/partner-repo';
 import { reviewRecordApplies, type ScopeOwner } from './partner-decision-scope';
 import type { HoldClass, HoldDisposition, ReviewRowLite } from './hold-queue';
 import type { ScreeningView } from './partner-screening-view';
 import type { PartnerIntegrations } from './partner-integrations';
+import type { SanctionsDecision } from './sanctions/evidence';
 import type { PartnerId, Transfer } from './types';
 
 export const PARTNER_EVENT_TYPES = Object.freeze(['screening.potential_match', 'hold.disposition'] as const);
@@ -174,6 +177,24 @@ export async function enqueuePartnerEvent(
     },
     { dedupeKey },
   );
+}
+
+/**
+ * P21 sites 2-4 (T22): one potential-match event in the caller's transaction when the
+ * owner and the row qualify. Reads the owner (tenant row, in `tx`) only for a possible
+ * match on a live row; a failed read throws (the caller's transaction rolls back, nothing
+ * moves). Never for list_unavailable, match or clear. Returns whether a row was queued
+ * (false on a dedupe hit: the key is global and for ever). The caller pokes or runs in the worker.
+ */
+export async function enqueuePotentialMatchIfEligible(
+  tx: DbOrTx,
+  t: Pick<Transfer, 'id' | 'partnerId' | 'environment'>,
+  decision: SanctionsDecision | null | undefined,
+): Promise<boolean> {
+  if (decision !== 'possible_match' || t.environment === 'test') return false;
+  const owner = await createPartnerRepo(tx).getPartner(t.partnerId);
+  if (!partnerEventsApply(owner, t)) return false;
+  return enqueuePartnerEvent(tx, { type: 'screening.potential_match', transferId: t.id });
 }
 
 /**

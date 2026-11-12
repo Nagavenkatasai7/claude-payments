@@ -705,6 +705,8 @@ export async function releaseTransfer(
       );
     }
     if (rr.kind === 'blocked') pokeWorker(); // the block notices are committed
+    // Fix pack 7 (P21 site 4): a held re-screen may have queued a partner event; mark the worker due.
+    if (rr.kind === 'held') pokeWorker();
     // Review R2 (J2): partner staff get one text for every outcome; platform
     // staff get the text for the outcome class (what to do next).
     if (partnerRelease) throw new Error(RESCREEN_RELEASE_REFUSAL);

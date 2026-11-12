@@ -40,6 +40,7 @@ import { KycScreeningChangedError } from '@/lib/sender-screening';
 import { isOpaqueTransferId } from '@/lib/id';
 import { payUrlFor } from '@/lib/pay-url';
 import { logWarn } from '@/lib/log';
+import { enqueuePotentialMatchIfEligible } from '@/lib/partner-events';
 
 // settlement — THE transactional "money was paid" entry point (Stage 2c).
 //
@@ -714,6 +715,9 @@ export async function releaseHoldAfterRescreen(
         uncovered: [...uncovered],
         trigger: 'release',
       });
+      // Fix pack 7 (P21 site 4): a possible match of a live-certified owner queues one
+      // partner event with the hold (dashboard-ops' caller pokes on 'held').
+      await enqueuePotentialMatchIfEligible(tx, t, ev?.decision);
       return { kind: 'held', cause: newReasons.includes(LIST_UNAVAILABLE_REASON) ? 'list_not_live' : 'review' };
     }
 
@@ -912,6 +916,9 @@ export async function releaseRescreenedHold(
         subjectId: t.id,
         meta: { previousReasons, newReasons, decision: result.evidence?.decision ?? null, uncovered: [...uncovered] },
       });
+      // Fix pack 7 (P21 site 3): a possible match of a live-certified owner queues one
+      // partner event with the hold (the sweep runs in the worker, which marks the next due row).
+      await enqueuePotentialMatchIfEligible(tx, t, result.evidence?.decision);
       return { kind: 'still_held' };
     }
 
