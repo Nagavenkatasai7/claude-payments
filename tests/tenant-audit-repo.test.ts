@@ -21,7 +21,9 @@ async function insert(o: { partnerId: string | null; action: string; actor?: str
       action: o.action,
       subjectId: o.subjectId ?? null,
       meta: o.meta ?? null,
-      at: o.at ?? new Date(),
+      // One second ago, never "now": the read's upper bound `to` is exclusive, so a row written in
+      // the same millisecond as `to: new Date()` would fall outside [from, to) (seen once in CI).
+      at: o.at ?? new Date(Date.now() - 1_000),
     })
     .returning({ id: auditEvents.id });
   return r.id;
