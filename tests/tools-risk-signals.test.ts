@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { sql } from 'drizzle-orm';
 import { prepareSendDraft, type PrepareSendInput } from '@/lib/send-seam';
-import type { ToolContext } from '@/lib/tools';
+import { buildApproveSummary, executeTool, type ToolContext } from '@/lib/tools';
 import { createStore } from '@/lib/store';
 import { createScheduleStore } from '@/lib/schedule-store';
 import { createDraftStore } from '@/lib/draft-store';
@@ -12,10 +12,15 @@ import { MockKycProvider } from '@/lib/providers/mock-kyc-provider';
 import { createPartnerStore } from '@/lib/partner-store';
 import { resetRateCacheForTests } from '@/lib/rate';
 import { RISK_CHAT_CUES } from '@/lib/risk-chat-cue';
-import type { B2bInvoice, Customer, PartnerId, TurnContext } from '@/lib/types';
+import type { B2bInvoice, CurrencyCode, Customer, PartnerId, Quote, TurnContext } from '@/lib/types';
+import { RISK_WARNING_TEXT } from '@/lib/legal/risk-warning';
+import { PROVIDER_LINE_MAX } from '@/lib/legal/provider-line';
+import { PURPOSE_SCAM_WARNING } from '@/lib/purpose-detail';
+import { NAME_MAX } from '@/lib/untrusted-text';
+import { FESTIVAL_NAME_MAX } from '@/lib/rewards/settings';
 import type { Db } from '@/db/client';
 import { fakeRedis } from './helpers';
-import { freshDb, seedPartner, seedPriorSends } from './helpers-db';
+import { freshDb, seedLedgerSpend, seedPartner, seedPriorSends } from './helpers-db';
 import { riskConfigFor } from './helpers-risk';
 
 // Fix pack 6 (R48, P19 T26a): the draft that becomes the pay link records the
@@ -282,5 +287,159 @@ describe('prepareSendDraft risk signals (pack 6 P19 T26a)', () => {
       expect(json.toLowerCase()).not.toContain(cue);
     }
     expect(json).not.toContain('chatRiskCue');
+  });
+});
+
+// Fix pack 6 (R48, P19 T26b): when the draft carries risk signals, the ONE
+// fixed warning (RISK_WARNING_TEXT) heads the WhatsApp Approve card and the
+// tool result carries risk_warning for the agent's composeReply slot; the
+// scam warning wins (never both); no signals -> today's bytes.
+describe('the chat risk warning: card prefix and tool fields (pack 6 P19 T26b)', () => {
+  const TAP = '\n\nTap to pay securely, or reply cancel to stop.';
+  const stubWhatsApp = () => {
+    const bodies: string[] = [];
+    vi.stubGlobal('fetch', vi.fn(async (url: string, init?: { body?: unknown }) => {
+      if (String(url).includes('graph.facebook.com')) bodies.push(String(init?.body ?? ''));
+      return { ok: true, text: async () => '', json: async () => ({ rates: { INR: 85 } }) };
+    }));
+    return bodies;
+  };
+  const cardText = (body: string) => String((JSON.parse(body) as { interactive?: { body?: { text?: string } } }).interactive?.body?.text ?? '');
+  const picker = (over: Record<string, unknown> = {}) => ({
+    amount_source: 600, recipient_name: 'Mom', recipient_phone: MOM, destination_country: 'IN', funding_method: 'bank_transfer', ...over,
+  });
+
+  it('signals on the draft -> the card body starts with RISK_WARNING_TEXT + blank line; the tool returns risk_warning: RISK_WARNING_TEXT', async () => {
+    await acmeOn();
+    const ctx = await buildCtx();
+    const bodies = stubWhatsApp();
+    const r = await executeTool('send_approve_picker', picker(), ctx);
+    expect(r.sent).toBe(true);
+    expect(r.risk_warning).toBe(RISK_WARNING_TEXT);
+    expect(r).not.toHaveProperty('scam_warning');
+    expect(Object.keys(r)).toEqual(['sent', 'draft_id', 'risk_warning']);
+    expect(bodies).toHaveLength(1);
+    const text = cardText(bodies[0]);
+    expect(text.startsWith(`${RISK_WARNING_TEXT}\n\nSending `)).toBe(true);
+    expect(text.endsWith(TAP)).toBe(true);
+    expect(text.split(RISK_WARNING_TEXT)).toHaveLength(2);
+    // The result carries the constant only: never a signal name.
+    expect(JSON.stringify(r)).not.toMatch(/first_to_recipient|first_transfer|amount_over_threshold|new_account|chat_cue/);
+  });
+
+  it('no signals -> no risk_warning key; card bytes as today (the same card as with the config off)', async () => {
+    await acmeOn();
+    await seedPriorSends(db, 'acme', PHONE, { paid: 1, toRecipient: 1, recipientPhone: MOM });
+    const on = await buildCtx();
+    const bodiesOn = stubWhatsApp();
+    const rOn = await executeTool('send_approve_picker', picker({ amount_source: 200 }), on);
+    expect(rOn).not.toHaveProperty('risk_warning');
+    expect(Object.keys(rOn)).toEqual(['sent', 'draft_id']);
+
+    await setRisk('acme', riskConfigFor({ enabled: false }));
+    const off = await buildCtx();
+    const bodiesOff = stubWhatsApp();
+    const rOff = await executeTool('send_approve_picker', picker({ amount_source: 200 }), off);
+    expect(Object.keys(rOff)).toEqual(['sent', 'draft_id']);
+    expect(cardText(bodiesOn[0])).toBe(cardText(bodiesOff[0]));
+    expect(cardText(bodiesOn[0]).startsWith('Sending ')).toBe(true);
+    expect(cardText(bodiesOn[0])).not.toContain(RISK_WARNING_TEXT);
+  });
+
+  it('scam wins: a scam-pattern purpose with signals -> scam_warning only, no risk_warning key; the card starts with PURPOSE_SCAM_WARNING', async () => {
+    await acmeOn();
+    const ctx = await buildCtx();
+    const bodies = stubWhatsApp();
+    const r = await executeTool('send_approve_picker', picker({ purpose: 'other', purpose_detail: 'to claim my lottery prize' }), ctx);
+    expect(r.sent).toBe(true);
+    expect(r.scam_warning).toBe(PURPOSE_SCAM_WARNING);
+    expect(r).not.toHaveProperty('risk_warning');
+    const d = await ctx.draftStore.getDraft(String(r.draft_id));
+    expect(d?.riskSignals?.length).toBeGreaterThan(0); // the signals are still on the draft
+    const text = cardText(bodies[0]);
+    expect(text.startsWith(`${PURPOSE_SCAM_WARNING}\n\nSending `)).toBe(true);
+    expect(text).not.toContain(RISK_WARNING_TEXT);
+  });
+
+  it("web channel: the result has risk_warning and the reply_hint starts with 'start your reply with the risk_warning text word for word, then '", async () => {
+    await acmeOn();
+    const ctx = await buildCtx();
+    stubWhatsApp();
+    // An unpaid past row to Mom: not a prior send, so the repeat still raises signals.
+    const pastId = await seedLedgerSpend(db, { partnerId: 'acme', phone: PHONE, amountUsd: 600, recipientPhone: MOM });
+    const web = { ...ctx, channel: 'web' as const };
+    const r = await executeTool('repeat_transfer', { transfer_id: pastId, amount_source: 600 }, web);
+    expect(typeof r.pay_url).toBe('string');
+    expect(r.risk_warning).toBe(RISK_WARNING_TEXT);
+    expect(r).not.toHaveProperty('scam_warning');
+    expect(String(r.reply_hint).startsWith('start your reply with the risk_warning text word for word, then show the summary')).toBe(true);
+    expect(Object.keys(r)).toEqual(['draft_id', 'summary', 'pay_url', 'risk_warning', 'reply_hint']);
+  });
+
+  it('web channel, scam wins: scam_warning and the scam hint only', async () => {
+    await acmeOn();
+    const ctx = await buildCtx();
+    stubWhatsApp();
+    const pastId = await seedLedgerSpend(db, { partnerId: 'acme', phone: PHONE, amountUsd: 600, recipientPhone: MOM });
+    const web = { ...ctx, channel: 'web' as const };
+    const r = await executeTool('repeat_transfer', { transfer_id: pastId, amount_source: 600, purpose: 'other', purpose_detail: 'customs charge for a parcel' }, web);
+    expect(r.scam_warning).toBe(PURPOSE_SCAM_WARNING);
+    expect(r).not.toHaveProperty('risk_warning');
+    expect(String(r.reply_hint)).toMatch(/^start your reply with the scam_warning text word for word, then show the summary/);
+  });
+
+  it('web channel, no signals: no risk_warning key and the hint as today', async () => {
+    await seedPartner(db, 'acme');
+    const ctx = await buildCtx();
+    stubWhatsApp();
+    const pastId = await seedLedgerSpend(db, { partnerId: 'acme', phone: PHONE, amountUsd: 600, recipientPhone: MOM });
+    const r = await executeTool('repeat_transfer', { transfer_id: pastId, amount_source: 600 }, { ...ctx, channel: 'web' as const });
+    expect(Object.keys(r)).toEqual(['draft_id', 'summary', 'pay_url', 'reply_hint']);
+    expect(String(r.reply_hint).startsWith('show the summary')).toBe(true);
+  });
+
+  it('the duplicate-card return is unchanged', async () => {
+    await acmeOn();
+    const ctx = await buildCtx();
+    const bodies = stubWhatsApp();
+    const first = await executeTool('send_approve_picker', picker(), ctx);
+    expect(first.risk_warning).toBe(RISK_WARNING_TEXT);
+    const dup = await executeTool('send_approve_picker', picker(), ctx);
+    expect(dup).toEqual({
+      sent: false,
+      duplicate: true,
+      draft_id: dup.draft_id,
+      reply_hint: 'The payment card for this exact send is already above — ask the customer to tap it, or say what to change.',
+    });
+    expect(Object.keys(dup)).toEqual(['sent', 'duplicate', 'draft_id', 'reply_hint']);
+    expect(bodies).toHaveLength(1);
+  });
+
+  it("card body length: each warning + blank line + the longest summary + the tap line <= 1024 (WhatsApp's interactive body limit)", () => {
+    const currencies: CurrencyCode[] = ['USD', 'CAD', 'GBP', 'AED', 'SGD', 'AUD', 'NZD', 'INR', 'HKD', 'MXN', 'EUR'];
+    const today = new Date().toISOString().slice(0, 10);
+    let longest = '';
+    for (const destinationCurrency of currencies) {
+      for (const sourceCurrency of currencies) {
+        const q: Quote = {
+          amountUsd: 99_999.99, feeUsd: 9_999.99, totalChargeUsd: 109_999.98, fxRate: 99_999.99, amountInr: 9_999_999_999.99,
+          deliveryEstimate: 'within 1 business day', sourceCurrency, amountSource: 99_999.99, feeSource: 9_999.99,
+          totalChargeSource: 109_999.98, destinationCurrency,
+        };
+        const summary = buildApproveSummary(
+          q, 'N'.repeat(NAME_MAX), 'bank', 'AE070331234567890123456', 'credit_card', destinationCurrency, 30, today,
+          { kind: 'festival', discountUsd: 9_999.99, detail: { festivalName: 'F'.repeat(FESTIVAL_NAME_MAX) } },
+          'P'.repeat(PROVIDER_LINE_MAX),
+        );
+        if (summary.length > longest.length) longest = summary;
+      }
+    }
+    expect(longest).toContain('N'.repeat(NAME_MAX));
+    expect(longest).toContain('daily reference rate');
+    expect(longest).toContain('F'.repeat(FESTIVAL_NAME_MAX));
+    expect(longest).toContain('P'.repeat(PROVIDER_LINE_MAX));
+    for (const warning of [RISK_WARNING_TEXT, PURPOSE_SCAM_WARNING]) {
+      expect(`${warning}\n\n${longest}${TAP}`.length).toBeLessThanOrEqual(1024);
+    }
   });
 });

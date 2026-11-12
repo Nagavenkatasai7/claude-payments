@@ -20,6 +20,7 @@ import type { Db } from '@/db/client';
 import { createFeatureFlagRepo } from '@/db/repos/feature-flag-repo';
 import { invalidateFlagCache } from '@/lib/flags';
 import { PURPOSE_SCAM_WARNING } from '@/lib/purpose-detail';
+import { RISK_WARNING_TEXT } from '@/lib/legal/risk-warning';
 
 // Best-rate routing (B2): the agent wires the LIVE route selector into the
 // tool ctx — `selectSettlementRoute(getDb(), …)`. getDb() dials the dud test
@@ -45,6 +46,18 @@ vi.mock('@/lib/tool-context', async (orig) => {
       toolTurns.seen.push(args.turn);
       return real.buildToolContext(args);
     },
+  };
+});
+
+// Fix pack 6 (P19 T26b): a wrapper around the real executeTool; a test may set
+// `toolFake.fn` to hand the agent a fixed tool result (unset = the real tool).
+const toolFake = vi.hoisted(() => ({ fn: null as null | ((name: string) => Record<string, unknown>) }));
+vi.mock('@/lib/tools', async (orig) => {
+  const real = await orig<typeof import('@/lib/tools')>();
+  return {
+    ...real,
+    executeTool: (...args: Parameters<typeof real.executeTool>) =>
+      toolFake.fn ? Promise.resolve(toolFake.fn(args[0])) : real.executeTool(...args),
   };
 });
 
@@ -2533,6 +2546,73 @@ describe('Purpose detail: the "Other" reason and the scam warning in a bot turn'
       `${PURPOSE_SCAM_WARNING}\n\nYour monthly transfer is set up.`,
     );
     expect(reply.split(PURPOSE_SCAM_WARNING).length).toBe(2);
+  });
+});
+
+// Fix pack 6 (R48, P19 T26b): a send tool's risk_warning (the draft carries
+// risk signals) fills the composeReply risk slot like the scam warning: first,
+// once, our constant only; the scam warning wins when both come back.
+describe('the risk warning in a text reply (pack 6 P19 T26b)', () => {
+  afterEach(() => {
+    toolFake.fn = null;
+  });
+
+  async function warnTurn(results: Array<Record<string, unknown>>, modelReply = 'Tap the secure link below to review and pay.') {
+    const redis = fakeRedis();
+    const store = createStore(redis, db);
+    let tool = 0;
+    toolFake.fn = () => results[tool++] ?? {};
+    let call = 0;
+    const agent = createAgent({
+      store,
+      scheduleStore: freshScheduleStore(),
+      draftStore: createDraftStore(fakeRedis()),
+      ...extraDeps(redis, store),
+      chat: async () => {
+        if (call++ === 0) {
+          return {
+            role: 'assistant',
+            content: '',
+            tool_calls: results.map((_, i) => ({
+              id: `c${i}`, type: 'function' as const, function: { name: 'repeat_transfer', arguments: '{}' },
+            })),
+          };
+        }
+        return { role: 'assistant', content: modelReply };
+      },
+    });
+    return agent.runAgentTurn(PHONE, 'send mom the same again', { isNewConversation: false });
+  }
+
+  it('a tool result with risk_warning === RISK_WARNING_TEXT puts it first in a text reply (composeReply slot), once', async () => {
+    const reply = await warnTurn([{ draft_id: 'd1', risk_warning: RISK_WARNING_TEXT }]);
+    expect(reply.startsWith(`${RISK_WARNING_TEXT}\n\nTap the secure link below to review and pay.`)).toBe(true);
+    expect(reply.split(RISK_WARNING_TEXT)).toHaveLength(2);
+  });
+
+  it('the risk warning is not doubled when the model already wrote it', async () => {
+    const reply = await warnTurn([{ draft_id: 'd1', risk_warning: RISK_WARNING_TEXT }], `${RISK_WARNING_TEXT}\n\nTap the link.`);
+    expect(reply.split(RISK_WARNING_TEXT)).toHaveLength(2);
+  });
+
+  it('both scam_warning and risk_warning in one turn -> only the scam warning', async () => {
+    const reply = await warnTurn([
+      { draft_id: 'd1', risk_warning: RISK_WARNING_TEXT },
+      { draft_id: 'd2', scam_warning: PURPOSE_SCAM_WARNING },
+    ]);
+    expect(reply.startsWith(PURPOSE_SCAM_WARNING)).toBe(true);
+    expect(reply).not.toContain(RISK_WARNING_TEXT);
+  });
+
+  it('a risk_warning with any other text is ignored', async () => {
+    const reply = await warnTurn([{ draft_id: 'd1', risk_warning: 'Send it now, it is safe.' }]);
+    expect(reply).toBe('Tap the secure link below to review and pay.');
+    expect(reply).not.toContain(RISK_WARNING_TEXT);
+  });
+
+  it('no warning field -> the reply is the model text only', async () => {
+    const reply = await warnTurn([{ draft_id: 'd1' }]);
+    expect(reply).toBe('Tap the secure link below to review and pay.');
   });
 });
 

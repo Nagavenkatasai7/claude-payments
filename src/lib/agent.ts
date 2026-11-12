@@ -36,6 +36,7 @@ const CONTEXT_CALL_ID = 'ctx_r0';
 import { FALLBACK_REPLY } from './agent-fallback';
 import { toWhatsAppFormatting } from './whatsapp-format';
 import { PURPOSE_SCAM_WARNING } from './purpose-detail';
+import { RISK_WARNING_TEXT } from './legal/risk-warning';
 import { modelVisibleResult } from './model-visible-result';
 import { composeReply } from './compose-reply';
 import { MIN_USD } from './fx';
@@ -394,6 +395,9 @@ export function createAgent(deps: AgentDeps) {
     // Batch B follow-up A4: a send tool's scam_warning. Only OUR constant is ever
     // shown (never a value read back from the model's world), at the top of a text reply.
     let scamWarning = false;
+    // Fix pack 6 (P19 T26b): a send tool's risk_warning (the draft carries risk
+    // signals). Only OUR constant counts; the scam warning wins over it.
+    let riskWarned = false;
     // R56: the model called decline_off_topic. The turn ends with the fixed,
     // code-written decline in the customer's language; the model is not asked
     // again, so it cannot add to or soften it.
@@ -587,6 +591,7 @@ export function createAgent(deps: AgentDeps) {
           // An interactive (picker/approve card) sent by a tool IS the reply.
           if ((result as Record<string, unknown>).sent === true) interactiveSent = true;
           if ((result as Record<string, unknown>).scam_warning === PURPOSE_SCAM_WARNING) scamWarning = true;
+          if ((result as Record<string, unknown>).risk_warning === RISK_WARNING_TEXT) riskWarned = true;
           if ((result as Record<string, unknown>).declined_off_topic === true) declinedReply = offTopicReply(detectReplyLang(incomingText));
           // R32: the raw result is a fact of this turn; get_quote's quote_text
           // is the code-written quote the reply ends with.
@@ -710,7 +715,7 @@ export function createAgent(deps: AgentDeps) {
     // formatting or code-written slot. Off (shadow) only reports; on replaces
     // the reply with the fixed fallback. The switch is read only on a failed
     // check, and an unreadable switch stays shadow.
-    const riskWarning = scamWarning ? PURPOSE_SCAM_WARNING : undefined;
+    const riskWarning = scamWarning ? PURPOSE_SCAM_WARNING : riskWarned ? RISK_WARNING_TEXT : undefined;
     if (reply.trim()) {
       const check = checkReply(reply, facts);
       if (!check.ok) {

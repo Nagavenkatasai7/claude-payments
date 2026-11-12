@@ -43,6 +43,7 @@ import { openRecallTicketLocked } from './receipt-cores';
 import { refundDisposition } from './refund-policy';
 import { cancelWithinWindow, type SenderCancelResult } from './sender-cancel';
 import { CANCEL_REPLY_HINT } from './legal/cancel-drafts';
+import { RISK_WARNING_TEXT } from './legal/risk-warning';
 import {
   recipientButtonId,
   someoneNewButtonId,
@@ -3878,6 +3879,15 @@ function scamWarningFields(risk: PurposeRiskCategory | undefined): ToolResult {
   return risk ? { scam_warning: PURPOSE_SCAM_WARNING } : {};
 }
 
+/**
+ * Fix pack 6 (R48, P19 T26b): the ONE fixed risk warning, only when the draft
+ * carries risk signals AND no scam warning applies (the scam warning wins;
+ * never both). The constant only: never a signal name.
+ */
+function riskWarningFields(risk: PurposeRiskCategory | undefined, riskSignals: readonly RiskSignal[] | undefined): ToolResult {
+  return !risk && riskSignals?.length ? { risk_warning: RISK_WARNING_TEXT } : {};
+}
+
 function senderNameRequired(): ToolResult {
   return { needs_sender_name: true, reply_to_customer: SENDER_NAME_QUESTION };
 }
@@ -4416,8 +4426,9 @@ async function sendApprovePickerTool(
       summary,
       pay_url: payUrl,
       ...scamWarningFields(pd.risk),
+      ...riskWarningFields(pd.risk, r.riskSignals),
       reply_hint:
-        `${pd.risk ? 'start your reply with the scam_warning text word for word, then ' : ''}show the summary and tell the customer to tap the secure payment link below your reply to review and pay — ${
+        `${pd.risk ? 'start your reply with the scam_warning text word for word, then ' : r.riskSignals?.length ? 'start your reply with the risk_warning text word for word, then ' : ''}show the summary and tell the customer to tap the secure payment link below your reply to review and pay — ${
           lockMinutes < 2
             ? 'the rate is valid only for a moment, so they should tap soon'
             : `the rate is locked for ${lockMinutes} minutes`
@@ -4450,7 +4461,8 @@ async function sendApprovePickerTool(
     await sendCtaUrl(
       ctx.phone,
       // Batch B follow-up A4: a scam-pattern reason puts the warning at the top of the card.
-      `${pd.risk ? `${PURPOSE_SCAM_WARNING}\n\n` : ''}${summary}\n\nTap to pay securely, or reply cancel to stop.`,
+      // Fix pack 6 (P19 T26b): else the draft's risk signals put the risk warning there.
+      `${pd.risk ? `${PURPOSE_SCAM_WARNING}\n\n` : r.riskSignals?.length ? `${RISK_WARNING_TEXT}\n\n` : ''}${summary}\n\nTap to pay securely, or reply cancel to stop.`,
       { displayText: 'Approve & Pay', url: payUrl },
       undefined,
       undefined,
@@ -4463,7 +4475,7 @@ async function sendApprovePickerTool(
     await ctx.store.clearApproveCardSent(cardKey).catch(() => {});
     throw sendErr;
   }
-  return { sent: true, draft_id: draftId, ...scamWarningFields(pd.risk) };
+  return { sent: true, draft_id: draftId, ...scamWarningFields(pd.risk), ...riskWarningFields(pd.risk, r.riskSignals) };
 }
 
 async function repeatTransferTool(
