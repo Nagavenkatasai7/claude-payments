@@ -24,7 +24,7 @@ import { screenHeldOnFile } from './list-hold-rescreen';
 import { createPartnerRepo } from '@/db/repos/partner-repo';
 import { classifyHold } from './hold-queue';
 import { holdQueueApplies, partnerDecidesKyc, reviewRecordApplies } from './partner-decision-scope';
-import { HoldReviewChangedError, refuseUnwiredPepClear, type HoldReviewInput } from './hold-review-tx';
+import { HoldReviewChangedError, insertReview, lockAndRouteReview, refuseUnwiredPepClear, type HoldReviewInput } from './hold-review-tx';
 
 /**
  * Fix pack 2 T4 (R02): the refusal for a hold waiting on a fresh sanctions list
@@ -105,6 +105,8 @@ export const HOLD_CHANGED_REFUSAL = 'This hold changed since the page loaded: re
 
 /** The partner release refusal when the row or its sender changed (the partner actions map it to notAllowed). */
 const PARTNER_RELEASE_CHANGED = 'Cannot release: transfer is not in_review or its sender is not releasable (it changed concurrently)';
+/** The partner reject refusal when the row or its sender changed (the partner actions map it to notAllowed). */
+const PARTNER_REJECT_CHANGED = 'Cannot reject: transfer is not in_review or its sender is not rejectable (it changed concurrently)';
 
 /**
  * Staff "Cancel" = VOID an UNFUNDED draft, and nothing else (Phase 1 Task 5 /
@@ -368,23 +370,23 @@ export function canReleaseHeld(
 }
 
 /**
- * Fix pack 7 (P9, D6): a release with NO review on a live row reads the owner
- * (a throw propagates; null refuses with the generic permission text). On a
- * certified owner (reviewRecordApplies): a partner release is refused with the
- * partner's concurrent text (its legacy release is closed by design); a
- * platform release is refused with PARTNER_DECIDES_HOLD_REFUSAL when a queue
- * owner decides a class of the row, else HOLD_REVIEW_RELOAD_REFUSAL.
+ * Fix pack 7 (P9, D6): a release or reject with NO review on a live row reads
+ * the owner (a throw propagates; null refuses with the generic permission
+ * text). On a certified owner (reviewRecordApplies): a partner-scoped call is
+ * refused with the partner's concurrent text (`changedText`: its legacy path is
+ * closed by design); a platform call is refused with PARTNER_DECIDES_HOLD_REFUSAL
+ * when a queue owner decides a class of the row, else HOLD_REVIEW_RELOAD_REFUSAL.
  * Uncertified owners (every tenant today): one read, no change.
  */
-async function refuseUnreviewedRelease(
+async function ownerGate(
   db: Db,
   transfer: Pick<Transfer, 'partnerId' | 'complianceReasons'>,
-  partnerRelease: { partnerId: PartnerId } | undefined,
+  o: { partnerScoped: boolean; changedText: string },
 ): Promise<void> {
   const owner = await createPartnerRepo(db).getPartner(transfer.partnerId);
   if (!owner) throw new Error('You do not have permission to perform this action.');
   if (!reviewRecordApplies(owner)) return;
-  if (partnerRelease) throw new Error(PARTNER_RELEASE_CHANGED);
+  if (o.partnerScoped) throw new Error(o.changedText);
   if (
     holdQueueApplies(owner) &&
     classifyHold(transfer.complianceReasons, null, { queue: true, partnerDecidesKyc: partnerDecidesKyc(owner) }, { blocked: false })
@@ -460,7 +462,7 @@ export async function releaseTransfer(
   if (review) {
     if (review.ownerId !== transfer.partnerId) throw new HoldReviewChangedError('changed');
   } else if (transfer.environment !== 'test') {
-    await refuseUnreviewedRelease(db, transfer, partnerRelease);
+    await ownerGate(db, transfer, { partnerScoped: partnerRelease !== undefined, changedText: PARTNER_RELEASE_CHANGED });
   }
   const railIntegrations = await createIntegrationsRepo(db).getIntegrations(transfer.settlementPartnerId ?? transfer.partnerId);
   // Fix pack 2 T6 (R06): on a real-money rail, PLATFORM staff clear the
@@ -558,13 +560,29 @@ export async function rejectTransfer(
   id: string,
   audit?: StaffAuditCtx,
   partnerReject?: { partnerId: PartnerId },
+  review?: HoldReviewInput,
 ): Promise<void> {
+  // Fix pack 7 (P9): programming errors, before any read.
+  if (review) {
+    if (partnerReject) throw new Error('rejectTransfer: review and partnerReject are exclusive');
+    if (review.pepClear) throw new Error('rejectTransfer: review.pepClear is for a release only');
+    if (!audit || audit.actor !== review.actor || audit.reason !== review.reason) {
+      throw new Error("rejectTransfer: the audit context must be the review's actor and reason");
+    }
+  }
   const transfer = await store.getTransfer(id);
   if (!transfer) {
     throw new Error('Transfer not found');
   }
   if (transfer.status !== 'in_review') {
     throw new Error(`Cannot reject: transfer is not in_review (current status: ${transfer.status})`);
+  }
+  // Fix pack 7 (P9, D6 defence in depth): a certified owner's hold is rejected only with a
+  // recorded review. A sandbox ('test') row is exempt and its owner is not read (P0 rule 3).
+  if (review) {
+    if (review.ownerId !== transfer.partnerId) throw new HoldReviewChangedError('changed');
+  } else if (transfer.environment !== 'test') {
+    await ownerGate(db, transfer, { partnerScoped: partnerReject !== undefined, changedText: PARTNER_REJECT_CHANGED });
   }
   // The in_review check above is advisory; the GUARDED UPDATE below is the
   // claim. A concurrent release (in_review → paid + rail instructed) between
@@ -574,21 +592,55 @@ export async function rejectTransfer(
   // can never leave a cancelled, charged, UNREFUNDED transfer.
   const refunding = await db.transaction(async (tx) => {
     const repo = createTransferRepo(tx);
-    // Merge plan 2c (D4): a PARTNER-scoped reject claims with the partner-release predicates
-    // (tenant, not blocked, sender row present with no PEP / watchlist hit) in the SAME UPDATE.
-    const cancelled = partnerReject
-      ? await repo.cancelInReviewForPartner(id, partnerReject.partnerId, 'rejected in review')
-      : await repo.updateIfStatus(id, 'in_review', { status: 'cancelled', adminNote: 'rejected in review' });
-    if (!cancelled) {
-      throw new Error(
-        partnerReject
-          ? 'Cannot reject: transfer is not in_review or its sender is not rejectable (it changed concurrently)'
-          : 'Cannot reject: transfer is not in_review (it moved concurrently)',
+    let cancelled: Transfer | null;
+    if (review) {
+      // Fix pack 7 (P9 steps 1-4): the tenant-pinned locked read, the owner re-read, the row
+      // fingerprint, the locked sender flags, the classes, the route ('reject', final) and the
+      // partner-scope sender stance. Every refusal throws, so nothing commits.
+      const r = await lockAndRouteReview(tx, id, review, 'reject');
+      if (r.kind === 'already') throw new Error('Cannot reject: transfer is not in_review (it moved concurrently)');
+      if (r.kind !== 'ok') throw new HoldReviewChangedError(r.kind === 'changed' ? r.why : 'changed');
+      // P9 step 7: the claim on the locked, tenant-pinned row (never the partner claim, DP6).
+      cancelled = await repo.updateIfStatus(id, 'in_review', { status: 'cancelled', adminNote: 'rejected in review' });
+      if (!cancelled) throw new Error('Cannot reject: transfer is not in_review (it moved concurrently)');
+      // P9 step 8: the review row AFTER the claim (a refused insert throws: the claim rolls back).
+      const reviewId = await insertReview(tx, r, review);
+      // P9 step 9: the audit ctx is DERIVED from the review, so the two rows can never differ.
+      await recordStaffTransferAudit(
+        tx,
+        { actor: review.actor, reason: review.reason, actorScope: review.actorScope },
+        'transfer.reject',
+        cancelled,
+        {
+          previousStatus: 'in_review',
+          newStatus: 'cancelled',
+          refundStatus: cancelled.fundingRef ? 'pending' : 'none',
+          reviewId,
+          step: r.step.step,
+          disposition: review.disposition,
+          holdClass: r.cls.holdClass,
+          actorScope: review.actorScope,
+        },
       );
+      // P21 hold.disposition (T23)
+      // P14 funds rule (T16)
+    } else {
+      // Merge plan 2c (D4): a PARTNER-scoped reject claims with the partner-release predicates
+      // (tenant, not blocked, sender row present with no PEP / watchlist hit) in the SAME UPDATE.
+      cancelled = partnerReject
+        ? await repo.cancelInReviewForPartner(id, partnerReject.partnerId, 'rejected in review')
+        : await repo.updateIfStatus(id, 'in_review', { status: 'cancelled', adminNote: 'rejected in review' });
+      if (!cancelled) {
+        throw new Error(
+          partnerReject
+            ? PARTNER_REJECT_CHANGED
+            : 'Cannot reject: transfer is not in_review (it moved concurrently)',
+        );
+      }
     }
     // Program-Fix 28: the audit row BEFORE the uncharged early return, so both
-    // branches record the decision in this transaction.
-    if (audit) {
+    // branches record the decision in this transaction (the review path wrote its own above).
+    if (audit && !review) {
       await recordStaffTransferAudit(tx, audit, 'transfer.reject', cancelled, {
         previousStatus: 'in_review',
         newStatus: 'cancelled',

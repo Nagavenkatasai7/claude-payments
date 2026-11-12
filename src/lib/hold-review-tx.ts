@@ -16,6 +16,7 @@ import {
   decisionRoute,
   nextStep,
   rowReasonsFp,
+  senderPepOnly,
   toReviewRowLite,
   type ClassifiedClass,
   type DecisionRoute,
@@ -210,7 +211,16 @@ export async function routeLockedReview(
   // R6: a final step is never written without the step-up the plan asked for (and the converse).
   if (step.final !== review.expectFinal) return refuse('changed');
   if ((want === 'release' || want === 'reject') && !step.final) return refuse('changed');
-  // T8b: a partner-scope reject with a watchlist hit or an active non-PEP-only stamp -> 'waits_platform' (P9 step 4).
+  // P9 step 4 (T8b): a partner-scope reject keeps today's partner reject stance
+  // (cancelInReviewForPartner refuses a flagged sender): unreadable flags, a watchlist
+  // hit or an active stamp that is not PEP-only (senderPepOnly, R2) wait for the platform.
+  if (
+    want === 'reject' &&
+    review.actorScope === 'partner' &&
+    (flags === null || flags.watchlistHit === true || (senderScreeningHoldActive(flags) && !senderPepOnly(flags)))
+  ) {
+    return changed('waits_platform');
+  }
   return { kind: 'ok', t, owner, flags, cls, step, reasonsFp };
 }
 
