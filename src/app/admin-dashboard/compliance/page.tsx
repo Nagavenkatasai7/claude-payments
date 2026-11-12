@@ -16,11 +16,22 @@ import { Sidebar } from '../sidebar';
 import { SenderCell } from '../sender-cell';
 import { money } from '../format';
 import { MaskedDestination } from '../masked-destination';
-import { canReleaseHeld } from '@/lib/dashboard-ops';
+import { canReleaseHeld, platformHoldControls, type PlatformHoldControls } from '@/lib/dashboard-ops';
 import {
   releaseTransferAction,
   rejectTransferAction,
+  escalateHoldAction,
 } from '../actions';
+import { reviewRecordApplies } from '@/lib/partner-decision-scope';
+import { toReviewRowLite, type HoldClass, type HoldDisposition, type ReviewRowLite } from '@/lib/hold-queue';
+import { HOLD_REASON_MAX, HOLD_REASON_MIN } from '@/lib/hold-decision';
+import { createHoldReviewRepo, HOLD_QUEUE_MAX_IDS } from '@/db/repos/hold-review-repo';
+import { createIntegrationsRepo } from '@/db/repos/integrations-repo';
+import { loadSenderScreening } from '@/lib/sender-screening';
+import { realMoneyFor } from '@/lib/live-gate';
+import { identityMissingForRelease, originatorMissingForRelease } from '@/lib/release-data-checks';
+import { ORIGINATOR_INFO_MISSING_REASON, RECIPIENT_IDENTITY_MISSING_REASON } from '@/lib/compliance-config';
+import { STEP_UP_FIELD } from '@/lib/staff-step-up-result';
 import { ExpandableTable, type ExpandableColumn } from '../expandable-table';
 import { ReviewCopilot } from './review-copilot';
 import { AmlExplain } from './aml-explain';
@@ -30,7 +41,7 @@ import { Button, buttonVariants } from '@/components/ui/button';
 import Link from 'next/link';
 import { Input } from '@/components/ui/input';
 import { CustomerLink } from '../customer-link';
-import type { Transfer } from '@/lib/types';
+import type { Partner, Transfer } from '@/lib/types';
 import { readPurposeDetailsForStaff, type StaffPurposeDetail } from '@/lib/purpose-detail-staff';
 import { sanctionsListStatus, type SanctionsListStatus } from '@/lib/sanctions/list-health';
 import { SANCTIONS_LIST_MAX_AGE_MS } from '@/lib/sanctions/list-policy';
@@ -68,6 +79,224 @@ async function loadSanctionsListCard(now: Date): Promise<{
     logError('compliance.sanctions-archive-summary', err instanceof Error ? err.name : 'unknown');
   }
   return { status, archive, blobConfigured: isBlobConfigured() };
+}
+
+// Fix pack 7 T14b (P12): staff-only plain English names of the hold classes and of the closed
+// disposition list (hold-queue.ts HOLD_DISPOSITIONS). Never shown to a customer or a partner.
+const HOLD_CLASS_LABEL: Record<HoldClass, string> = {
+  kyc: 'Customer verification',
+  aml: 'Behavioural review (AML)',
+  sender_pep: 'Sender is a politically exposed person',
+  sanctions_review: 'Sanctions name match',
+  sender_watchlist: 'Sender on the watchlist',
+  list_wait: 'Waiting for a fresh sanctions list',
+  data_missing: 'Required data missing',
+  blocked: 'Blocked by screening',
+  unknown: 'Other hold',
+};
+
+const DISPOSITION_LABEL: Record<HoldDisposition, string> = {
+  documents_verified: 'Documents verified',
+  activity_explained: 'Activity explained',
+  customer_not_verified: 'Customer not verified',
+  activity_unexplained: 'Activity not explained',
+  false_positive: 'False positive',
+  suspicious_activity: 'Suspicious activity',
+  scam_suspected: 'Scam suspected',
+  pep_accepted_with_edd: 'Accepted with enhanced due diligence',
+  pep_rejected: 'Not accepted (politically exposed person)',
+  false_positive_match: 'Not the listed person (false match)',
+  confirmed_match: 'Confirmed match',
+  unable_to_clear: 'Unable to clear',
+  data_received: 'Required data received',
+  data_not_provided: 'Required data not provided',
+};
+
+/** One held row's platform controls: `readFailed` = a review, rail or data read failed (no forms). */
+type RowHoldControls = { controls: PlatformHoldControls; readFailed: boolean };
+
+const NO_FORMS: PlatformHoldControls = {
+  mode: 'review', rowFp: '', forms: [], partnerDecides: false, escalate: false, waitsList: false,
+};
+
+const errName = (e: unknown): string => (e instanceof Error ? e.name : 'unknown');
+
+/**
+ * Fix pack 7 T14b (P12, R1, O2): the platform controls of every held row whose owner records a
+ * review (reviewRecordApplies: certified for live money; no tenant today). Every other row is left
+ * out of the map and renders today's markup with no extra read. Per certified owner: its reviews
+ * (listForQueue, owner-scoped, in chunks of HOLD_QUEUE_MAX_IDS); per row: the sender flags for a
+ * real-money row (loadSenderScreening, fails closed to null, R1) and dataOnFile from the release
+ * data checks with the rail partner's integrations, exactly as the admin action's gate computes
+ * them. A failed read never falls back to today's markup: the row shows review mode with no forms.
+ */
+async function loadPlatformHoldControls(
+  rows: readonly Transfer[],
+  partnersById: ReadonlyMap<string, Partner>,
+): Promise<Map<string, RowHoldControls>> {
+  const out = new Map<string, RowHoldControls>();
+  const byOwner = new Map<string, Transfer[]>();
+  for (const t of rows) {
+    const owner = partnersById.get(t.partnerId);
+    // A sandbox row keeps today's body in the action too (T14a), so it keeps today's markup.
+    if (!owner || !reviewRecordApplies(owner) || t.environment === 'test') continue;
+    byOwner.set(t.partnerId, [...(byOwner.get(t.partnerId) ?? []), t]);
+  }
+  if (byOwner.size === 0) return out;
+  const db = getDb();
+  for (const [ownerId, list] of byOwner) {
+    const owner = partnersById.get(ownerId);
+    let reviews: Map<string, ReviewRowLite[]> | null = new Map();
+    try {
+      for (let i = 0; i < list.length; i += HOLD_QUEUE_MAX_IDS) {
+        const ids = list.slice(i, i + HOLD_QUEUE_MAX_IDS).map((t) => t.id);
+        for (const r of await createHoldReviewRepo(db).listForQueue(ownerId, ids)) {
+          const lite = toReviewRowLite(r);
+          if (lite) reviews.set(r.transferId, [...(reviews.get(r.transferId) ?? []), lite]);
+        }
+      }
+    } catch (err) {
+      logError('compliance.hold-reviews', errName(err), { partnerId: ownerId });
+      reviews = null;
+    }
+    for (const t of list) {
+      if (!reviews) {
+        out.set(t.id, { controls: NO_FORMS, readFailed: true });
+        continue;
+      }
+      try {
+        const sender = (await realMoneyFor(db, t)) ? await loadSenderScreening(db, t.partnerId, t.phone) : undefined;
+        const reasons = t.complianceReasons ?? [];
+        let dataOnFile = false;
+        if (reasons.includes(RECIPIENT_IDENTITY_MISSING_REASON) || reasons.includes(ORIGINATOR_INFO_MISSING_REASON)) {
+          const rail = await createIntegrationsRepo(db).getIntegrations(t.settlementPartnerId ?? t.partnerId);
+          dataOnFile = !(await identityMissingForRelease(db, t, rail)) && !(await originatorMissingForRelease(db, t, rail));
+        }
+        out.set(t.id, {
+          controls: platformHoldControls(owner, t, sender, reviews.get(t.id) ?? [], { dataOnFile }),
+          readFailed: false,
+        });
+      } catch (err) {
+        logError('compliance.hold-controls', errName(err), { transferId: t.id });
+        out.set(t.id, { controls: NO_FORMS, readFailed: true });
+      }
+    }
+  }
+  return out;
+}
+
+/**
+ * Fix pack 7 T14b (P12): one platform decision form of one open class of a certified owner's row.
+ * Posts id, holdClass, rowFp, the disposition, the note (the decision reason, P7) and the step-up
+ * code with its FIRST submit (the action always asks and throws the gate's text when it is missing
+ * or wrong). The server action is the authority: it re-checks the class, the disposition and the row.
+ */
+function PlatformDecisionForm({
+  transferId,
+  rowFp,
+  holdClass,
+  kind,
+  dispositions,
+}: {
+  transferId: string;
+  rowFp: string;
+  holdClass: HoldClass;
+  kind: 'release' | 'reject';
+  dispositions: readonly HoldDisposition[];
+}) {
+  const base = `hold-${kind}-${transferId}-${holdClass}`;
+  return (
+    <form action={kind === 'release' ? releaseTransferAction : rejectTransferAction} className="flex flex-col gap-1">
+      <input type="hidden" name="id" value={transferId} />
+      <input type="hidden" name="holdClass" value={holdClass} />
+      <input type="hidden" name="rowFp" value={rowFp} />
+      <span className="text-xs font-semibold">{HOLD_CLASS_LABEL[holdClass]}</span>
+      <label htmlFor={`${base}-disposition`} className="text-xs text-muted-foreground">
+        {kind === 'release' ? 'Release decision' : 'Reject decision'}
+      </label>
+      <select
+        id={`${base}-disposition`}
+        name="disposition"
+        required
+        className="h-8 rounded-md border border-input bg-background px-2 text-sm"
+      >
+        {dispositions.map((d) => (
+          <option key={d} value={d}>{DISPOSITION_LABEL[d]}</option>
+        ))}
+      </select>
+      <Input
+        name="note"
+        required
+        minLength={HOLD_REASON_MIN}
+        maxLength={HOLD_REASON_MAX}
+        placeholder="Reason (required)"
+        aria-label={`${kind === 'release' ? 'Release' : 'Reject'} reason, at least ${HOLD_REASON_MIN} characters (required)`}
+        className="h-8 w-56"
+      />
+      <label htmlFor={`${base}-stepup`} className="text-xs text-muted-foreground">
+        Your authenticator code, or your password if two-step sign-in is off
+      </label>
+      <Input id={`${base}-stepup`} name={STEP_UP_FIELD} type="password" autoComplete="off" required className="h-8 w-56" />
+      {kind === 'release' ? (
+        <Button type="submit" size="sm" className="self-start">Release</Button>
+      ) : (
+        <Button
+          type="submit"
+          size="sm"
+          variant="outline"
+          className="self-start text-destructive"
+          title="Cancels the transfer and auto-refunds the captured charge to the sender"
+        >
+          Reject &amp; refund
+        </Button>
+      )}
+    </form>
+  );
+}
+
+/**
+ * Fix pack 7 T14b (P12): a certified owner's held row. e2e hook (new, documented here):
+ * `data-testid="admin-hold-partner-decides"` marks a queue partner's partner-decided row
+ * ("Partner decides (queue)"), shown in place of Release / Reject with an Escalate form.
+ */
+function PlatformHoldReview({ t, row }: { t: Transfer; row: RowHoldControls }) {
+  const c = row.controls;
+  if (c.mode !== 'review') return null;
+  return (
+    <div className="flex flex-col gap-3">
+      {row.readFailed && (
+        <span className="text-xs text-muted-foreground">
+          The review state could not be read. Reload the page to decide this hold.
+        </span>
+      )}
+      {c.partnerDecides && (
+        <span data-testid="admin-hold-partner-decides" className="text-xs text-muted-foreground">
+          Partner decides (queue)
+        </span>
+      )}
+      {c.escalate && (
+        <form action={escalateHoldAction}>
+          <input type="hidden" name="id" value={t.id} />
+          <Button type="submit" size="sm" variant="outline">Escalate</Button>
+        </form>
+      )}
+      {c.waitsList && (
+        <span className="text-xs text-muted-foreground">
+          Releases automatically after a re-screen on a fresh sanctions list.
+        </span>
+      )}
+      {c.forms.map((f) => (
+        <div key={f.holdClass} className="flex flex-wrap gap-4">
+          {f.release.length > 0 && (
+            <PlatformDecisionForm transferId={t.id} rowFp={c.rowFp} holdClass={f.holdClass} kind="release" dispositions={f.release} />
+          )}
+          {f.reject.length > 0 && (
+            <PlatformDecisionForm transferId={t.id} rowFp={c.rowFp} holdClass={f.holdClass} kind="reject" dispositions={f.reject} />
+          )}
+        </div>
+      ))}
+    </div>
+  );
 }
 
 const REVIEW_COLUMNS: ExpandableColumn[] = [
@@ -217,6 +446,11 @@ export default async function CompliancePage() {
   // No sender flags: canReleaseHeld ignores them for platform staff, and UI M5
   // sends partner staff to /partner (their release flow reads the flags there).
   const canRelease = (t: Transfer) => canReleaseHeld(scoped.scope, partnersById.get(t.partnerId), t, null);
+  // Fix pack 7 T14b (P12): rows of an owner that records reviews (certified; none today) render the
+  // platform controls; every other row renders today's markup below, byte for byte. Platform
+  // staff only: requireStaff keeps partner staff off a certified review (auth.ts).
+  const holdControls =
+    scoped.scope.kind === 'platform' ? await loadPlatformHoldControls(inReview, partnersById) : new Map<string, RowHoldControls>();
   const corridorRows = partners.flatMap((p) =>
     (p.countries ?? [])
       .filter((c) => c !== 'IN')
@@ -275,6 +509,9 @@ export default async function CompliancePage() {
                 cells: [
                   ...transferCells(t, senderNames, purposeReasons),
                   <div key="actions">
+                    {holdControls.has(t.id) ? (
+                      <PlatformHoldReview t={t} row={holdControls.get(t.id)!} />
+                    ) : (
                     <div className="flex flex-wrap gap-2">
                       {isRecipientIdentityHold(t) ? (
                         // Pack 4 review R2 (I5): no release pays out without the account holder
@@ -336,6 +573,7 @@ export default async function CompliancePage() {
                         </Button>
                       </form>
                     </div>
+                    )}
                     {/* Rung-1 copilot: suggests a disposition narrative; the
                         Release / Reject actions above stay the deterministic,
                         audited decision — the AI never executes. */}
