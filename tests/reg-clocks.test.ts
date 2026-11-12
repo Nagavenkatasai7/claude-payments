@@ -5,6 +5,7 @@ import {
   REG_CLASSES,
   REG_CLOCKS,
   REG_CLOCKS_VERSION,
+  REG_DAY_OFFSETS_HOURS,
   addRegBusinessDays,
   earlierDue,
   isRegClass,
@@ -166,5 +167,59 @@ describe('reg-clocks (P4)', () => {
     expect(runtime).toEqual([]);
     expect(src).not.toMatch(/\brequire\(/);
     expect(src).not.toMatch(/^\s*export\s+[^\n]*\bfrom\s+['"]/m);
+  });
+});
+
+// Fix pack 8 F3 (early review FB1): the business-day count is the EARLIEST of
+// the counts on UTC days and on the days of every US state time zone. These
+// inputs go into a PURE function (no clock read, no time window), so literal
+// UTC instants are right here.
+describe('reg-clocks: earliest count over UTC and the US state offsets (F3)', () => {
+  const HOUR = 3_600_000;
+  /** Independent counter: Mon-Fri on the calendar shifted by `h` hours, counting from the next day. */
+  function daysOnCalendar(fromMs: number, n: number, h: number): number {
+    let k = 0;
+    let left = n;
+    while (left > 0) {
+      k += 1;
+      const dow = new Date(fromMs + k * DAY + h * HOUR).getUTCDay();
+      if (dow !== 0 && dow !== 6) left -= 1;
+    }
+    return k;
+  }
+  const OFFSETS = [0, -4, -5, -6, -7, -8, -9, -10];
+
+  it('REG_DAY_OFFSETS_HOURS is frozen and holds UTC and every US state offset', () => {
+    expect(REG_DAY_OFFSETS_HOURS).toEqual([0, -4, -5, -6, -7, -8, -9, -10]);
+    expect(Object.isFrozen(REG_DAY_OFFSETS_HOURS)).toBe(true);
+  });
+
+  it('a Tuesday 20:30 Eastern cancellation is due Friday 20:30 Eastern, not Sunday', () => {
+    expect(regDueAt('cancellation', Date.parse('2026-11-18T01:30:00Z'))).toBe(Date.parse('2026-11-21T01:30:00Z'));
+  });
+
+  it('a Sunday 21:00 Eastern fraud report is due Friday 27 Nov 21:00 Eastern', () => {
+    expect(regDueAt('fraud_report', Date.parse('2026-11-16T02:00:00Z'))).toBe(Date.parse('2026-11-28T02:00:00Z'));
+  });
+
+  it('a Friday 21:00 Eastern notice keeps the earlier UTC count', () => {
+    const from = Date.parse('2026-11-21T02:00:00Z');
+    expect(addRegBusinessDays(from, 3)).toBe(Date.parse('2026-11-25T02:00:00Z'));
+    expect(addRegBusinessDays(from, 3)).toBeLessThanOrEqual(countBusiness(from, 3));
+  });
+
+  it('equals the minimum of the independent counts for every hour of 14 days', () => {
+    const start = Date.parse('2026-11-02T00:00:00Z');
+    for (let i = 0; i < 14 * 24; i++) {
+      const from = start + i * HOUR;
+      for (const n of [0, 1, 3, 10]) {
+        const counts = OFFSETS.map((h) => from + daysOnCalendar(from, n, h) * DAY);
+        const r = addRegBusinessDays(from, n);
+        expect(r).toBe(Math.min(...counts));
+        for (const c of counts) expect(r).toBeLessThanOrEqual(c);
+        expect((r - from) % DAY).toBe(0);
+        expect(r).toBeGreaterThanOrEqual(from + n * DAY);
+      }
+    }
   });
 });

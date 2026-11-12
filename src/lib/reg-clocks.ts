@@ -1,8 +1,12 @@
 /**
  * Fix pack 8 (R44, P4): the regulatory case classes and their clocks from the
  * FIRST notice. Draft lengths until counsel confirms (REG_CLOCKS_VERSION).
- * Business days = Mon-Fri in UTC, no holidays (equal or earlier due date: the
- * safe side). Pure, client-safe: no runtime import.
+ * Business days = Monday to Friday, no holidays, counted on the calendar of UTC
+ * and of every US state time zone (REG_DAY_OFFSETS_HOURS); the due date is the
+ * EARLIEST of those counts, so it is never later than the Mon-Fri count on UTC
+ * days or on the days of any US state. Holidays and the provider's own time
+ * zone (and its cut-off) are open points for counsel (fix F3, early review FB1).
+ * Pure, client-safe: no runtime import.
  *
  * Do not merge with remittance-disclosure's addBusinessDays: that helper rolls a
  * weekend start forward to Monday first and then counts (Sat + 1 = Tue), and is
@@ -30,29 +34,49 @@ export const REG_CLOCKS: Readonly<Record<RegClass, Readonly<{ unit: 'calendar' |
   } as const);
 
 const DAY_MS = 86_400_000;
+const HOUR_MS = 3_600_000;
 
 /**
- * Add n business days (Mon-Fri, UTC), keeping the time of day of `fromMs`.
- * Counting starts on the next calendar day: each step adds one UTC day and
- * counts it only on Monday to Friday. So a notice received on a Saturday or a
- * Sunday counts the following Monday as its first business day (Sat + 1 = Mon,
- * Sat + 3 = Wed, Sun + 3 = Wed, Fri + 3 = Wed, Wed + 3 = Mon).
- * No US holiday list: skipping a holiday would give a LATER date, so ignoring
- * holidays gives an equal or EARLIER due date (the safe side); a known limit
- * for counsel (D3).
+ * UTC and every UTC offset a US state uses in standard or daylight time (UTC-4
+ * Eastern daylight to UTC-10 Hawaii). A business-day count runs on each of these
+ * calendars and the earliest result wins (fix F3).
+ */
+export const REG_DAY_OFFSETS_HOURS = Object.freeze([0, -4, -5, -6, -7, -8, -9, -10] as const);
+
+/** Calendar days that n Mon-Fri days take on the calendar shifted by `offsetH` hours, counting from the next day. */
+function businessCountDays(fromMs: number, n: number, offsetH: number): number {
+  let k = 0;
+  let left = n;
+  while (left > 0) {
+    k += 1;
+    const dow = new Date(fromMs + k * DAY_MS + offsetH * HOUR_MS).getUTCDay();
+    if (dow !== 0 && dow !== 6) left -= 1;
+  }
+  return k;
+}
+
+/**
+ * Add n business days (Monday to Friday, no holidays), keeping the time of day
+ * of `fromMs`: the result is `fromMs` plus a whole number of days.
+ * On each calendar of REG_DAY_OFFSETS_HOURS (the weekday of a moment there is
+ * the UTC weekday of the moment plus the offset) the count starts on the next
+ * calendar day and counts only Monday to Friday, so a notice received on a
+ * Saturday or a Sunday counts the following Monday as its first business day
+ * (Sat + 1 = Mon, Sat + 3 = Wed, Sun + 3 = Wed, Fri + 3 = Wed, Wed + 3 = Mon).
+ * The result takes the SMALLEST number of days over those calendars, so it is
+ * never later than the count on UTC days or on the days of any US state time
+ * zone. No US holiday list: skipping a holiday would give a LATER date, so
+ * ignoring holidays errs earlier too. Holidays and the provider's own time zone
+ * are open points for counsel (D3, owner question 11).
  * `n` must be a non-negative integer and `fromMs` finite, else RangeError.
  */
 export function addRegBusinessDays(fromMs: number, n: number): number {
   if (!Number.isFinite(fromMs)) throw new RangeError('addRegBusinessDays: fromMs must be finite');
   if (!Number.isInteger(n) || n < 0) throw new RangeError('addRegBusinessDays: n must be a non-negative integer');
-  const d = new Date(fromMs);
-  let left = n;
-  while (left > 0) {
-    d.setUTCDate(d.getUTCDate() + 1);
-    const dow = d.getUTCDay();
-    if (dow !== 0 && dow !== 6) left -= 1;
-  }
-  return d.getTime();
+  if (n === 0) return fromMs;
+  let days = Number.POSITIVE_INFINITY;
+  for (const h of REG_DAY_OFFSETS_HOURS) days = Math.min(days, businessCountDays(fromMs, n, h));
+  return fromMs + days * DAY_MS;
 }
 
 /** The due date of a case of class `cls` whose first notice was at `firstNoticeMs`. */
