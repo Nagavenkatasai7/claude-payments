@@ -1,4 +1,5 @@
 import type { RegClass } from './reg-clocks';
+import type { ResidenceSource, UsStateCode } from './licence-matrix';
 
 // 'usdc' = a stablecoin payout to the seller's verified wallet address (B2B
 // cross-border sellers only; chosen at onboarding). NON-CUSTODIAL: the licensed
@@ -720,6 +721,13 @@ export interface Customer {
   esignConsentVersion?: string;
   esignConsentedAt?: string;
   esignWithdrawnAt?: string;
+  // Fix pack 8 (0042, R12, P7): READ-ONLY here (mapped in rowToCustomer only,
+  // never in customerToRow): setResidenceState is the only writer, so no
+  // whole-row save can set or clear a state. A state never comes from chat
+  // words, a phone area code or an IP (D8).
+  residenceState?: UsStateCode;
+  residenceStateSource?: ResidenceSource;
+  residenceStateAt?: string;
   kycSubmittedAt?: string;  // ISO — inquiry created / customer entered the hosted flow
   kycApprovedBy?: string;    // staff username who approved (audit)
   kycApprovedAt?: string;    // ISO

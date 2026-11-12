@@ -22,6 +22,7 @@ import { createRewardRepo, type RedemptionWrite } from '@/db/repos/reward-repo';
 import type { Catalog, PartnerRewardSettings, PartnerRewardTerms, SenderRewardUsage } from './rewards/types';
 import { legacyKeyAllowed, legacyTenantResolver } from './legacy-tenant';
 import type { CapSubject } from './tier-rules';
+import type { ResidenceSource, UsStateCode } from './licence-matrix';
 import { SANCTIONS_AUDIT_ACTION, type ScreeningEvidence } from './sanctions/evidence';
 import { billExpiryCutoff, BILL_CLAIM_TTL_SEC, BILL_RESEND_WINDOW_SEC } from './b2b-bill-expiry';
 import type { ChatMessage, CountryCode, KycStatus, PartnerId, SendLimitOverride, Transfer, TransferStatus } from './types';
@@ -578,11 +579,22 @@ export function createStore(redis: RedisLike, db: Db) {
       phone: string,
       kycStatus: KycStatus,
       now: Date = new Date(),
-    ): Promise<CapSubject & { sendLimitOverride?: SendLimitOverride }> {
+    ): Promise<
+      CapSubject & { sendLimitOverride?: SendLimitOverride; residence?: { state: UsStateCode; source: ResidenceSource } }
+    > {
       const { row, firstSeenAt } = await subjectRowAndFirstSeen(partnerId, phone, now);
       // Program fix 16b: the customer's raise rides along (same row, no extra
       // query on the hot path) so createTransfer resolves the effective limits.
-      return { firstSeenAt, kycStatus, sendLimitOverride: row?.sendLimitOverride };
+      // Fix pack 8 (P7): the verified state of residence rides along too (same
+      // row), and only when one is on file (the key is absent otherwise).
+      return {
+        firstSeenAt,
+        kycStatus,
+        sendLimitOverride: row?.sendLimitOverride,
+        ...(row?.residenceState && row.residenceStateSource
+          ? { residence: { state: row.residenceState, source: row.residenceStateSource } }
+          : {}),
+      };
     },
     /**
      * Pack 6 (P19): the sender's firstSeenAt by the ONE rule (draft time, root handle).

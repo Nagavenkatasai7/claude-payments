@@ -6,6 +6,7 @@ import { openOptional, sealOptional } from './mappers';
 import { customerEmailCtx, customerRowCtx } from '@/lib/crypto-context';
 import { DEFAULT_PARTNER_ID, DEFAULT_SENDER_COUNTRY } from '@/lib/defaults';
 import { countryForPhone } from '@/lib/partner-currency';
+import { isResidenceSource, isUsStateCode, type UsStateCode } from '@/lib/licence-matrix';
 import type {
   CountryCode,
   Customer,
@@ -111,6 +112,15 @@ export function createCustomerRepo(
     set('esignConsentVersion', row.esignConsentVersion);
     set('esignConsentedAt', isoOpt(row.esignConsentedAt));
     set('esignWithdrawnAt', isoOpt(row.esignWithdrawnAt));
+    // Fix pack 8 (R12, P7): READ-ONLY here (never in customerToRow):
+    // setResidenceState is the only writer. A half-written row (a state
+    // without a valid source, or the reverse) maps neither, so it never reads
+    // as verified. The reserved source 'kyc_vendor' is readable (D8).
+    if (isUsStateCode(row.residenceState) && isResidenceSource(row.residenceStateSource)) {
+      set('residenceState', row.residenceState);
+      set('residenceStateSource', row.residenceStateSource);
+      set('residenceStateAt', isoOpt(row.residenceStateAt));
+    }
     set('kycSubmittedAt', isoOpt(row.kycSubmittedAt));
     set('kycApprovedBy', row.kycApprovedBy);
     set('kycApprovedAt', isoOpt(row.kycApprovedAt));
@@ -481,6 +491,51 @@ export function createCustomerRepo(
         .where(tenantKey(partnerId, senderPhone))
         .returning({ phone: customers.phone });
       return rows.length > 0;
+    },
+
+    /**
+     * Fix pack 8 (R12, P7): THE writer of the verified US state of residence (a
+     * single-column UPDATE; saveCustomer / insertCustomerIfAbsent never name the
+     * columns). Source precedence: 'partner_attested' writes only when the stored
+     * source is NULL or 'partner_attested' (a staff document check is never
+     * overwritten by an API attestation); 'staff_verified' always writes. The
+     * reserved source 'kyc_vendor' has no writer (D8): it and a non-code state
+     * throw TypeError before any statement. Zero rows updated -> one tenant-keyed
+     * `SELECT 1` tells 'kept' from 'no_customer'.
+     * drizzle update().set().where().returning():
+     * node_modules/drizzle-orm/pg-core/query-builders/update.d.ts:157-166.
+     */
+    async setResidenceState(
+      partnerId: PartnerId,
+      senderPhone: string,
+      w: { state: UsStateCode; source: 'partner_attested' | 'staff_verified'; at: Date },
+    ): Promise<'set' | 'kept' | 'no_customer'> {
+      if (!isUsStateCode(w.state)) throw new TypeError('setResidenceState: not a US state code');
+      if (w.source !== 'partner_attested' && w.source !== 'staff_verified') {
+        throw new TypeError('setResidenceState: not a writable residence source');
+      }
+      if (!(w.at instanceof Date) || !Number.isFinite(w.at.getTime())) {
+        throw new TypeError('setResidenceState: invalid time');
+      }
+      const where =
+        w.source === 'partner_attested'
+          ? and(
+              tenantKey(partnerId, senderPhone),
+              or(isNull(customers.residenceStateSource), eq(customers.residenceStateSource, 'partner_attested')),
+            )
+          : tenantKey(partnerId, senderPhone);
+      const rows = await db
+        .update(customers)
+        .set({ residenceState: w.state, residenceStateSource: w.source, residenceStateAt: w.at, updatedAt: w.at })
+        .where(where)
+        .returning({ phone: customers.phone });
+      if (rows.length > 0) return 'set';
+      const exists = await db
+        .select({ one: sql<number>`1` })
+        .from(customers)
+        .where(tenantKey(partnerId, senderPhone))
+        .limit(1);
+      return exists.length > 0 ? 'kept' : 'no_customer';
     },
 
     /**
