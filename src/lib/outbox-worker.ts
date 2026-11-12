@@ -13,7 +13,7 @@ import {
   buildReverseInstruction,
   RAIL_TIMEOUT_MS,
 } from '@/lib/providers/http-payment-provider';
-import { signRailHeaders, UnsignedRailError } from '@/lib/providers/rail-signature';
+import { RAIL_SIG_HEADER, signRailHeaders, UnsignedRailError } from '@/lib/providers/rail-signature';
 import { withInstructDeliveryLog } from '@/lib/webhook-delivery-log';
 import { createRailMessageRepo, RAIL_OUT } from '@/db/repos/rail-message-repo';
 import { loadComplianceBlock } from '@/lib/instruction-compliance';
@@ -43,6 +43,18 @@ import { SANCTIONS_NO_PAYOUT_RULE, SANCTIONS_NO_PAYOUT_SENTENCE } from '@/lib/sa
 import { readSenderScreeningFlags } from '@/db/repos/customer-repo';
 import { senderScreeningHoldActive } from '@/lib/compliance-config';
 import { railSecrets } from '@/lib/partner-integrations';
+import { createHoldReviewRepo } from '@/db/repos/hold-review-repo';
+import { toReviewRowLite } from '@/lib/hold-queue';
+import { partnerScreeningView } from '@/lib/partner-screening-view';
+import { checkPartnerEndpointUrl } from '@/lib/partner-settlement-endpoint';
+import {
+  buildPartnerEventBody,
+  isPartnerEventType,
+  partnerEventsApply,
+  partnerEventTarget,
+  PartnerEventDeliveryError,
+  type PartnerEventInput,
+} from '@/lib/partner-events';
 import { refundProviderFor, type FundingProvider } from '@/lib/providers/funding-provider';
 import { isPartnerPulled, senderChargeState } from '@/lib/funding-method';
 import { sendEmail as sendEmailDefault, type EmailMessage, type EmailOutcome } from '@/lib/email';
@@ -1960,6 +1972,19 @@ async function handle(
       return;
     }
 
+    // Fix pack 7 T21 (P18): a compliance event to the OWNER partner's own endpoint.
+    // The payload is ids only; the signed body is built here from the ledger, recorded
+    // sealed in rail_messages (kind 'event') BEFORE the POST, then POSTed to the owner's
+    // events URL (else its settlement URL). Ineligible rows complete without a send; an
+    // unusable http rail completes with one alert per partner per day; a non-2xx or a
+    // network error is a charged retry (PartnerEventDeliveryError, 24 attempts). A build
+    // older than pack 7 defers this kind uncharged (PR1); an event TYPE this build does
+    // not know waits the same way (O7: never dropped on a rollback past a later pack).
+    case 'partner.event': {
+      await sendPartnerEvent(deps, row, p);
+      return;
+    }
+
     default:
       // PR1: a kind this build does not know (a newer build wrote it, and this
       // one is serving after a rollback) waits, uncharged, for a build that does.
@@ -2223,6 +2248,128 @@ async function recordRailOut(
 }
 
 /**
+ * T21 (P20): the sealed outbound record (kind 'event') of a compliance event about
+ * to be POSTed; partner_id and rail_partner_id are both the OWNER. Same failure rule
+ * as recordRailOut: RailRecordError, logged by the error NAME with ids only.
+ */
+async function recordRailEvent(
+  db: DbOrTx,
+  i: { partnerId: PartnerId; transferId: string; body: string; signatureHeader: string | null },
+): Promise<void> {
+  try {
+    await createRailMessageRepo(db).append({
+      partnerId: i.partnerId,
+      railPartnerId: i.partnerId,
+      transferId: i.transferId,
+      direction: RAIL_OUT,
+      kind: 'event',
+      body: i.body,
+      signatureHeader: i.signatureHeader,
+    });
+  } catch (err) {
+    logWarn('outbox.rail-record', err instanceof Error ? err.name : 'error', { transferId: i.transferId, kind: 'event' });
+    throw new RailRecordError(i.transferId);
+  }
+}
+
+/** P18: the handler of a 'partner.event' row (see the case in `handle`). */
+async function sendPartnerEvent(deps: WorkerDeps, row: OutboxRow, p: Payload): Promise<void> {
+  // O7: the type check runs first. An unknown type (a later pack's, after a rollback)
+  // waits uncharged with one unknownkind alert per day, before any read.
+  const type = p.type;
+  if (!isPartnerEventType(type)) {
+    throw new UnknownOutboxKindError(`partner.event.${typeof type === 'string' ? type : '_'}`);
+  }
+  const transferId = str(p.transferId);
+  const t = transferId ? await createTransferRepo(deps.db).getTransfer(transferId) : null;
+  if (!t) {
+    logWarn('outbox.partner-event', 'subject missing', { transferId, type });
+    return;
+  }
+  if (t.environment === 'test') return;
+  // The OWNER (never railPartnerOf): the hold, the review and the event are the owner's.
+  // A failed read throws: a charged retry. The certification is checked before the
+  // integrations are read (no decrypt for an ineligible owner).
+  const owner = await createPartnerRepo(deps.db).getPartner(t.partnerId);
+  if (!partnerEventsApply(owner, t)) return;
+  const integrations = await createIntegrationsRepo(deps.db).getIntegrations(t.partnerId);
+  if (integrations.payment.providerType !== 'http') return;
+  const url = partnerEventTarget(integrations.payment);
+  const secrets = railSecrets(integrations.payment, 'signing', new Date());
+  if (!url || secrets.length === 0 || !checkPartnerEndpointUrl(url).ok) {
+    await createOutboxRepo(deps.db).enqueue(
+      'ops.alert',
+      {
+        message:
+          `⚠️ SmartRemit ops: compliance events for partner ${t.partnerId} are not being sent: its rail has no usable events or settlement URL, or no signing secret. ` +
+          "Fix it on the partner's webhooks page; events are not retried.",
+      },
+      { dedupeKey: `partnerevent-unsent:${t.partnerId}:${new Date().toISOString().slice(0, 10)}` },
+    );
+    return;
+  }
+  const head = {
+    eventId: str(p.eventId),
+    created: Math.floor(row.createdAt.getTime() / 1000),
+    ownerId: t.partnerId,
+    transferId: t.id,
+    clientReference: t.clientReference ?? null,
+  };
+  let input: PartnerEventInput | null = null;
+  if (type === 'screening.potential_match') {
+    const ev = (await listScreenEvidence(deps.db, t, new Date())).filter((e) => e.decision === 'possible_match').at(-1);
+    const screening = partnerScreeningView(ev);
+    if (screening) input = { type, ...head, screening };
+  } else {
+    const reviewId = str(p.reviewId);
+    const stored = reviewId ? await createHoldReviewRepo(deps.db).getById(t.partnerId, reviewId) : null;
+    const review = stored && stored.transferId === t.id ? toReviewRowLite(stored) : null;
+    if (review) input = { type, ...head, review };
+  }
+  if (!input) {
+    logWarn('outbox.partner-event', 'subject missing', { transferId, type });
+    return;
+  }
+  const raw = JSON.stringify(buildPartnerEventBody(input));
+  const signed = signRailHeaders(raw, secrets, Date.now());
+  await recordRailEvent(deps.db, { partnerId: t.partnerId, transferId: t.id, body: raw, signatureHeader: signed[RAIL_SIG_HEADER] ?? null });
+  const res = await deps
+    .fetchFn(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...signed },
+      body: raw,
+      signal: AbortSignal.timeout(RAIL_TIMEOUT_MS),
+    })
+    .catch(() => {
+      throw new PartnerEventDeliveryError(t.partnerId, 'network');
+    });
+  // The answer body is not read.
+  if (!res.ok) throw new PartnerEventDeliveryError(t.partnerId, res.status);
+}
+
+/**
+ * T21 (P18): compliance events to a partner keep failing (non-2xx or network) from
+ * RAILFAIL_ALERT_MIN_ATTEMPT on: one coalesced alert per partner per hour. Never
+ * railFailKey (rail health and routing read it). Ids and counts only; best-effort.
+ */
+async function alertPartnerEventFailing(outbox: OutboxRepo, row: OutboxRow, err: PartnerEventDeliveryError): Promise<void> {
+  if (row.attempts < RAILFAIL_ALERT_MIN_ATTEMPT) return;
+  try {
+    await outbox.enqueue(
+      'ops.alert',
+      {
+        message:
+          `⚠️ SmartRemit ops: compliance events to partner ${err.partnerId} are failing (attempt ${row.attempts} of ${retryPolicy(row.kind).maxAttempts}, last answer ${err.answer}). ` +
+          'They retry for about 7 hours, then dead-letter. Further failures this hour are coalesced into this alert.',
+      },
+      { dedupeKey: `partnerevent:${err.partnerId}:${hourBucket()}` },
+    );
+  } catch (e) {
+    logWarn('worker.partnerevent', 'partner-event alert not enqueued', { id: row.id, error: e instanceof Error ? e.name : 'error' });
+  }
+}
+
+/**
  * G17 (and the reverse record): a rail message could not be recorded before
  * sending, so it was not sent. The ONE outbound railrecord text (P7); one
  * alert per hour on every failed or dead outcome (the dedupe does the rest).
@@ -2461,6 +2608,7 @@ export async function drainOnce(
       if (status === 'failed' && err instanceof RailInstructError) await alertRailFailing(outbox, row, err);
       if (status === 'failed' && err instanceof ComplianceBlockUnavailableError) await alertInstructBlock(outbox, row, err);
       if ((status === 'failed' || status === 'dead') && err instanceof RailRecordError) await alertRailRecord(outbox, row, err);
+      if (status === 'failed' && err instanceof PartnerEventDeliveryError) await alertPartnerEventFailing(outbox, row, err);
       if (status === 'dead') {
         result.dead++;
         // A terminal row (deadline / permanent WhatsApp code) is dead at attempt 1 — say so, or ops goes looking for 8 attempts.

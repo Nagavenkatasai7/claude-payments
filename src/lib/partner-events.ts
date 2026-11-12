@@ -1,16 +1,19 @@
 // partner-events — Fix pack 7 (P16): compliance events to a live-certified partner's own
-// rail endpoint. This is the PURE core: the closed event types, who gets events, the
-// dedupe key, the target URL and the body builder. T21 adds the outbox kind
-// 'partner.event', enqueuePartnerEvent and the worker case (which signs with the existing
-// signRailHeaders: no new signer); T22/T23 add the enqueue points.
+// rail endpoint: the closed event types, who gets events, the dedupe key, the target URL,
+// the body builder, the outbox enqueue (T21) and the delivery error the worker throws.
+// The worker case 'partner.event' (src/lib/outbox-worker.ts) builds the body at drain and
+// signs it with the existing signRailHeaders (no new signer); T22/T23 add the enqueue points.
 //
 // The body never carries a reason, name, phone, amount, reference or hash: the builder
 // takes T7's ScreeningView (no inputHash) and a ReviewRowLite pick (no reason), and builds
 // every object field by field, never spreading an input, so an extra field on a caller's
 // object can never reach the partner.
 //
-// Imports: types only, plus reviewRecordApplies (client-safe). No db, no crypto, no env.
+// Imports: types, reviewRecordApplies (client-safe) and the outbox repo (T21, for
+// enqueuePartnerEvent). No node built-in, no env. Not imported by any client file.
 
+import type { DbOrTx } from '@/db/client';
+import { createOutboxRepo } from '@/db/repos/outbox-repo';
 import { reviewRecordApplies, type ScopeOwner } from './partner-decision-scope';
 import type { HoldClass, HoldDisposition, ReviewRowLite } from './hold-queue';
 import type { ScreeningView } from './partner-screening-view';
@@ -145,5 +148,45 @@ export function buildPartnerEventBody(i: PartnerEventInput): PartnerEventBody {
       void never;
       throw new Error('unknown partner event');
     }
+  }
+}
+
+/**
+ * T21 (P16): queue ONE compliance event, in the caller's transaction. The payload is
+ * ids only (an inline literal): the worker builds the body from the ledger at drain.
+ * `eventId` is the body id the partner dedupes on (stable across retries). Dedupe:
+ * `screening.potential_match:<transferId>` (once per transfer, for ever) and
+ * `hold.disposition:<reviewId>`. True when a new row was queued. The caller pokes
+ * the worker (or runs inside it).
+ */
+export async function enqueuePartnerEvent(
+  tx: DbOrTx,
+  e: { type: 'screening.potential_match'; transferId: string } | { type: 'hold.disposition'; transferId: string; reviewId: string },
+): Promise<boolean> {
+  const dedupeKey = partnerEventDedupeKey(e.type, e.type === 'hold.disposition' ? e.reviewId : e.transferId);
+  return createOutboxRepo(tx).enqueue(
+    'partner.event',
+    {
+      type: e.type,
+      transferId: e.transferId,
+      eventId: globalThis.crypto.randomUUID(),
+      ...(e.type === 'hold.disposition' ? { reviewId: e.reviewId } : {}),
+    },
+    { dedupeKey },
+  );
+}
+
+/**
+ * T21 (P18): the partner's endpoint answered non-2xx (`answer` = the status) or could
+ * not be reached ('network'). A charged retry under the partner.event policy. The
+ * message (it becomes outbox.last_error) never carries a URL or a body.
+ */
+export class PartnerEventDeliveryError extends Error {
+  constructor(
+    readonly partnerId: PartnerId,
+    readonly answer: number | 'network',
+  ) {
+    super(`partner_event_rejected:${answer}`);
+    this.name = 'PartnerEventDeliveryError';
   }
 }

@@ -36,6 +36,12 @@ describe('docs FACTS equal the source constants', () => {
     expect(FACTS.instructBackoffCapSec).toBe(num(extract('src/db/repos/outbox-repo.ts', /export const INSTRUCT_BACKOFF_CAP_SEC = ([\d_]+)/)));
   });
 
+  it('partner event retry budget and backoff cap', async () => {
+    const { FACTS } = await import('@/content/docs/facts');
+    expect(FACTS.partnerEventMaxAttempts).toBe(num(extract('src/db/repos/outbox-repo.ts', /export const PARTNER_EVENT_MAX_ATTEMPTS = ([\d_]+)/)));
+    expect(FACTS.partnerEventBackoffCapSec).toBe(num(extract('src/db/repos/outbox-repo.ts', /export const PARTNER_EVENT_BACKOFF_CAP_SEC = ([\d_]+)/)));
+  });
+
   it('rail ack deadline (seconds) equals RAIL_TIMEOUT_MS / 1000', async () => {
     const { FACTS } = await import('@/content/docs/facts');
     const ms = num(extract('src/lib/providers/http-payment-provider.ts', /RAIL_TIMEOUT_MS = ([\d_]+)/));

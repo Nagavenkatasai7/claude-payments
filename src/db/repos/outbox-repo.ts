@@ -16,7 +16,8 @@ import type { DbOrTx } from '@/db/client';
 //                 passes one (a worker that lost its lease cannot clobber)
 //   markFailed  — exponential backoff (2^attempts s), capped per kind
 //                 (retryPolicy): default 8 attempts, 1h cap; settlement.instruct
-//                 56 attempts, 30-min cap (about a day). At the kind's ceiling
+//                 56 attempts, 30-min cap (about a day); partner.event 24
+//                 attempts, 30-min cap (about 7 hours). At the kind's ceiling
 //                 the row goes 'dead' (the caller enqueues the ops alert)
 //
 // dedupe_key (UNIQUE where not null) makes effects idempotent BY CONSTRUCTION:
@@ -34,7 +35,8 @@ export type OutboxKind =
   | 'ops.alert'
   | 'email.send'
   | 'ops.webhook'
-  | 'partner.report'; // UI redesign M3-16: { jobId } only (src/lib/partner-report-worker.ts)
+  | 'partner.report' // UI redesign M3-16: { jobId } only (src/lib/partner-report-worker.ts)
+  | 'partner.event'; // Fix pack 7 (P16): { type, transferId, eventId[, reviewId] } only (src/lib/partner-events.ts)
 
 export type OutboxRow = typeof outbox.$inferSelect;
 
@@ -76,6 +78,13 @@ export const BACKOFF_CAP_SEC = 3600;
  */
 export const INSTRUCT_MAX_ATTEMPTS = 56;
 export const INSTRUCT_BACKOFF_CAP_SEC = 1800;
+/**
+ * Fix pack 7 (P17): a compliance event to a live-certified partner retries for
+ * about 7 hours (2+4+…+1024 s, then 30-minute steps), so a partner outage of a
+ * few hours does not dead-letter it. The receiver dedupes on the body id.
+ */
+export const PARTNER_EVENT_MAX_ATTEMPTS = 24;
+export const PARTNER_EVENT_BACKOFF_CAP_SEC = 1800;
 
 export interface RetryPolicy {
   maxAttempts: number;
@@ -86,7 +95,9 @@ export interface RetryPolicy {
 export function retryPolicy(kind: string): RetryPolicy {
   return kind === 'settlement.instruct'
     ? { maxAttempts: INSTRUCT_MAX_ATTEMPTS, backoffCapSec: INSTRUCT_BACKOFF_CAP_SEC }
-    : { maxAttempts: MAX_ATTEMPTS, backoffCapSec: BACKOFF_CAP_SEC };
+    : kind === 'partner.event'
+      ? { maxAttempts: PARTNER_EVENT_MAX_ATTEMPTS, backoffCapSec: PARTNER_EVENT_BACKOFF_CAP_SEC }
+      : { maxAttempts: MAX_ATTEMPTS, backoffCapSec: BACKOFF_CAP_SEC };
 }
 
 /** Seconds until the next attempt after `attempts` failures: 2^n, capped per kind, floored by `minBackoffSec`. */

@@ -41,6 +41,9 @@ const HELPERS: Record<string, string[]> = {
   // transaction; every caller pokes after it commits (store.ts recordSanctionsBlock,
   // pay-rescreen, payment-link-*, tools) or is a listed helper (settlement.ts).
   'src/lib/sanctions/notices.ts': ['enqueueSanctionsBlockNotices'],
+  // Fix pack 7 T21 (P16): compliance events to a partner, queued in the caller's
+  // transaction; every caller pokes after it commits or runs in the worker (T22/T23).
+  'src/lib/partner-events.ts': ['enqueuePartnerEvent'],
   'src/lib/providers/payment-provider.ts': ['getPaymentProvider'],
   'src/lib/stripe-funded-settle.ts': ['settleFundedTransfer'],
   'src/lib/settlement.ts': ['settleOrHold', 'beginSettlement', 'beginHold', 'releaseHold', 'releaseRescreenedHold', 'releaseHoldAfterRescreen'],

@@ -220,7 +220,9 @@ describe('partner-events (P16)', () => {
     expect(r.ok).toBe(true);
   });
 
-  it('the module is pure: no db, crypto or env import; runtime import partner-decision-scope only', () => {
+  // T21 (P16): enqueuePartnerEvent lives here (the contract), so the outbox repo is the one
+  // db import; still no node built-in, no env, and exactly these two runtime imports.
+  it('the module stays server-light: no node or env import; runtime imports the outbox repo and partner-decision-scope only', () => {
     const src = readFileSync(join(__dirname, '..', 'src', 'lib', 'partner-events.ts'), 'utf8');
     const imports = [...src.matchAll(/^import\s+(type\s+)?[^;]*?from\s+'([^']+)'/gms)].map((m) => ({
       typeOnly: !!m[1],
@@ -228,10 +230,11 @@ describe('partner-events (P16)', () => {
     }));
     expect(imports.length).toBeGreaterThan(0);
     for (const im of imports) {
-      expect(im.from.startsWith('@/db')).toBe(false);
+      // A db import is the outbox repo (runtime) or the DbOrTx type, nothing else.
+      if (im.from.startsWith('@/db')) expect(im.typeOnly ? im.from === '@/db/client' : im.from === '@/db/repos/outbox-repo').toBe(true);
       expect(im.from.startsWith('node:')).toBe(false);
       expect(im.from).not.toMatch(/(^|\/)env$/);
     }
-    expect(imports.filter((im) => !im.typeOnly).map((im) => im.from)).toEqual(['./partner-decision-scope']);
+    expect(imports.filter((im) => !im.typeOnly).map((im) => im.from)).toEqual(['@/db/repos/outbox-repo', './partner-decision-scope']);
   });
 });
