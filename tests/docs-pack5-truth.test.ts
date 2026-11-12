@@ -14,6 +14,8 @@ import { railRecordAlertKey } from '@/lib/instruct-errors';
 import { ARCHIVE_LAG_ALERT_DAYS } from '@/lib/sanctions/list-archive';
 import { MAX_REDIRECT_HOPS } from '@/lib/sanctions/pinned-fetch';
 import type { Customer, Transfer } from '@/lib/types';
+import { drizzle as drizzleProxy } from 'drizzle-orm/pg-proxy';
+import { partnerWebhookDeliveries } from '@/db/schema';
 
 const ROOT = join(__dirname, '..');
 const read = (p: string): string => readFileSync(join(ROOT, p), 'utf8');
@@ -179,7 +181,28 @@ describe('pack 5 documents say what the code does', () => {
     };
     expect(row('401', '`x-signature`')).toMatch(/only the legacy `x-signature`/);
     row('422', '"error": "amount_required"');
-    row('422', '"error": "reference_unresolved"');
+    const unresolved = row('422', '"error": "reference_unresolved"');
+    // Review round 1 RG3: the verifying secret is chosen from the transfer the
+    // callback's reference names, so a reference we cannot resolve fails the
+    // signature check (401) before the reference check; 422
+    // reference_unresolved means the reference resolves but names a different
+    // transfer than the one the callback reports.
+    expect(unresolved).not.toMatch(/does not name a transfer we know/);
+    // Review round 1 R1 (F3-D1): the reference and the reported transfer come
+    // from the same parse (railCallbackTransferId), so a resolving reference
+    // always matches: 422 reference_unresolved is a defensive refusal that a
+    // correctly signed callback naming a real transfer never gets.
+    expect(unresolved).not.toContain('resolves to a transfer but does not match the transfer the callback reports');
+    expect(unresolved).toContain('Defensive: the transfer we read from the callback differs from the one its `reference` names');
+    expect(unresolved).toContain('a correctly signed callback that names a real transfer never gets it');
+    const sig401 = rows.filter((l) => l.startsWith('| `401`'));
+    expect(sig401.some((l) => l.includes('a `reference` we cannot resolve to a transfer'))).toBe(true);
+    const changelog = read('src/content/docs/changelog.mdx');
+    expect(changelog).not.toContain('names no known transfer gets');
+    expect(changelog).toContain('a reference we cannot resolve gets `401`');
+    expect(changelog).not.toContain('does not match the transfer the callback reports gets `422`');
+    expect(changelog).toContain('`422` `"error": "reference_unresolved"` is a defensive refusal');
+    expect(read('src/lib/providers/http-payment-provider.ts')).toContain('const transferId = railCallbackTransferId(body);');
     row('200', '"held": true');
     row('200', '"duplicate": true');
     const route = read('src/app/api/payment-webhook/[provider]/route.ts');
@@ -231,11 +254,28 @@ describe('pack 5 documents say what the code does', () => {
       '`railrecord:<hour>`',
       '`MIGRATE_ON_BUILD_SKIP=1`',
       'answers 500 to every verified callback until it is applied',
+      // Review round 2 GD1: what else a build serving without 0039 breaks.
+      // Review round 2 R2 (F7-D1): only the paths that send a reverse.
+      'sends no reverse (a refund of a non-sandbox partner-pulled row or of an unrouted real-money partner-collected row stays pending and dead-letters at 8)',
+      "fails the partner webhooks page's delivery log",
+      "reports a \"Send test event\" ping that reached the partner's endpoint as failed (no delivery row, no `webhook.test` audit row)",
     ]) {
       expect(durability, s).toContain(s);
     }
     expect(railRecordAlertKey(3_600_000 * 7)).toBe('railrecord:7');
     expect(read('src/lib/instruct-errors.ts')).toContain('export class RailRecordError');
+  });
+
+  it('the coupling the "without 0039" text relies on: a ping insert that leaves body_sha256 out still names the column (review round 2 GD1)', () => {
+    // drizzle names every insertable column and fills a missing one with `default`
+    // (node_modules/drizzle-orm/pg-core/dialect.js buildInsertQuery), so the
+    // unchanged sendTestPing insert fails on a database without 0039.
+    const db = drizzleProxy(async () => ({ rows: [] }));
+    const q = db
+      .insert(partnerWebhookDeliveries)
+      .values({ partnerId: 'acme', kind: 'ping', attempt: 1, outcome: 'ok', httpStatus: 200, latencyMs: 1 })
+      .toSQL();
+    expect(q.sql).toContain('"body_sha256"');
   });
 
   it('CLAUDE.md Sanctions bullet names SANCTIONS_LIST=lists as opt-in, the floor file and fail closed', () => {
@@ -244,6 +284,13 @@ describe('pack 5 documents say what the code does', () => {
     expect(line).toContain('opt-in');
     expect(line).toContain('`src/lib/sanctions/list-sets.ts`');
     expect(line).toMatch(/fails? closed/);
+    // Review round 1 RE2: a MISSING required list holds every transfer; a stale
+    // or not-live one holds real-money transfers only (compliance.ts holds on
+    // fitness only under requireLiveList).
+    expect(line).not.toContain('a missing or not-live required list holds the transfer');
+    expect(line).toContain(
+      'a missing required list holds every transfer; a stale or not-live one holds real-money transfers only (an exact match on any list still blocks)',
+    );
   });
 
   it("0039's header says NOT a privilege boundary (P2); RECORDS-RETENTION.md says TRUNCATE and has the erasure section (P1)", () => {
@@ -279,6 +326,23 @@ describe('pack 5 documents say what the code does', () => {
       'append-only against application code (trigger; not TRUNCATE, not the table-owner role)',
       '`MIGRATE_ON_BUILD_SKIP=1`',
       'Set `SANCTIONS_LIST` back to `ofac-sdn` (or unset) BEFORE rolling back past PR5: an older build treats `lists` as unknown and screens with the mock',
+      // Review round 2 GE1: Issue refund refuses a real-money card payment.
+      "Issue refund refuses a card payment through the partner's Stripe key",
+      // Review round 2 R2 (F6-D1): partner_psp lets only a funding-mode hold go out.
+      "so for that one either, when it is held for its funding mode (`fundmode:<id>`), record `partner_psp` on the go-live card and let it go out before rolling back, or return the money in the partner's Stripe dashboard and do not roll back while its row is paid",
+      // Final check F8 (X1, U1): a partner-collected row per class.
+      // Truth check F10 (F2): what SmartRemit recorded, and the unrecorded case.
+      'for a partner-collected row that is not routed, Issue refund sends nothing to the rail when SmartRemit has no record of an instruction for the transfer and leaves the refund `pending` with one `refundheld:<id>` alert (or `refundunrecorded:<id>` when its delivery log or provider reference shows an instruction sent without a record; roll back only after that alert is raised, so the worker has drained the refund), and no build (an older one included) instructs a row whose refund is pending; a person then arranges the return of the sender\'s money with the partner',
+      // Truth check R5 (F10-D2): only the unrouted real-money partner-collected row with no record.
+      // Truth check 2 (F12-1): the older build's delivery log is best-effort, so such a row can also raise refundheld:<id>.
+      'After the roll forward, a refund of a real-money partner-collected transfer that is not routed, was paid at or after its rail went live, was instructed by the older build and was never recorded by this build sends no reverse. It raises `refundunrecorded:<id>` when the older build left a delivery log row or a provider reference, and `refundheld:<id>` when it left neither (the older build writes the delivery log after the POST and can lose it). Either way the refund stays `pending`: ask the partner whether the rail still holds the instruction before anyone returns the money. A partner-pulled transfer still gets its signed reverse.',
+      'Issue refund is not available for a routed partner-collected row, so do not roll back while such a row is paid and held',
+      // Review round 2 GD1: what else a build serving without 0039 breaks.
+      // Review round 2 R2 (F7-D1): only the paths that send a reverse; a sandbox row
+      // closes as sandbox-reverse-<id>, a routed partner-collected row raises refundrouted:<id>.
+      'it also sends no reverse instruction, so a queued refund of a non-sandbox partner-pulled row, or of a real-money partner-collected row that is not routed, stays pending and dead-letters after 8 attempts (`dead:<id>`)',
+      'the delivery log section of the partner webhooks page fails to load',
+      "a \"Send test event\" ping still reaches the partner's endpoint but is reported as failed, with no delivery row and no `webhook.test` audit row",
     ]) {
       expect(p, s).toContain(s);
     }
@@ -317,7 +381,7 @@ describe('pack 5 documents say what the code does', () => {
     const docs = [SPEC, ROLLBACK, CLAUDE, WEBHOOKS].join('\n');
     const reasons: InstructHeldReason[] = ['mockfund', 'fundmode', 'travelrule'];
     for (const r of reasons) expect(heldStuckDedupeKey(r, 'x1')).toBe(`${r}:stuck:x1`);
-    const keys = ['raillegacy:', 'railnoamount:', 'instructblock:', 'railrecord:', 'mockfund:', 'fundmode:', 'fundcapture:', 'fundrefund:', 'stripekey:', 'travelrule:'];
+    const keys = ['raillegacy:', 'railnoamount:', 'instructblock:', 'railrecord:', 'mockfund:', 'fundmode:', 'fundcapture:', 'fundrefund:', 'stripekey:', 'travelrule:', 'refundnosettle:', 'refundrouted:', 'refundheld:', 'refundunrecorded:'];
     for (const k of keys) {
       expect(src, k).toContain(k);
       expect(docs, k).toContain(`\`${k}`);
@@ -334,12 +398,72 @@ describe('pack 5 documents say what the code does', () => {
     for (const r of reasons) expect(stuck!).toContain(`\`${r}:stuck:<id>\``);
     expect([...stuck!.matchAll(/«`([^`]+)`»/g)]).toHaveLength(3);
     expectQuotedInSrc(stuck!, src, 'stuck');
+    // Review round 2 GE1: the card-payment (class stripe) texts never name Issue refund.
+    const fm = rows.find((l) => l.startsWith('| `fundmode:<id>`'))!;
+    expect([...fm.matchAll(/«`([^`]+)`»/g)]).toHaveLength(6);
+    for (const [, text] of [...fm.matchAll(/«`([^`]+)`»/g)].slice(3)) expect(text).not.toContain('Issue refund');
+    const stuckCard = rows.find((l) => l.startsWith('| `fundmode:stuck:<id>`, `travelrule:stuck:<id>` for a card payment'));
+    expect(stuckCard, 'the card-payment stuck row').toBeDefined();
+    const cardTexts = [...stuckCard!.matchAll(/«`([^`]+)`»/g)].map((m) => m[1]);
+    expect(cardTexts).toHaveLength(2);
+    for (const text of cardTexts) expect(text).not.toContain('Issue refund');
+    expectQuotedInSrc(stuckCard!, src, 'stuck card');
+    // Final check F8 (TR1): the travelrule:<id> row quotes the card-payment tail too, which never names Issue refund.
+    const tr = rows.find((l) => l.startsWith('| `travelrule:<id>`'))!;
+    expect(tr).toContain("Return the sender's money in the partner's Stripe dashboard (SmartRemit cannot refund a card payment yet, and Cancel does not apply to a paid transfer).");
+    expect(stuckCard!).not.toContain('still names Issue refund');
+    // Final check F8 (X1, U1): a partner-collected row's own texts, routed or not, worker and sweeps.
+    const pcRow = rows.find((l) => l.startsWith('| `fundmode:<id>`, `travelrule:<id>` for a partner-collected row'));
+    expect(pcRow, 'the partner-collected worker row').toBeDefined();
+    expect([...pcRow!.matchAll(/«`([^`]+)`»/g)]).toHaveLength(4);
+    expectQuotedInSrc(pcRow!, src, 'partner-collected');
+    expect(pcRow!).toContain('`refundheld:<id>`');
+    // Final check R3 (F8-D1): the rail may have got the transfer before (a row held again on the stuck-paid
+    // re-instruct), so the worker texts and the Meaning cell never state as fact that it did not.
+    expect(pcRow!).not.toContain('no reverse is sent, because the rail never got this transfer');
+    // Truth check F10 (F2): the texts say what SmartRemit recorded, not what the rail did.
+    expect(pcRow!).toContain("if SmartRemit has no record of an instruction for this transfer, no reverse is sent, the refund stays pending and a person arranges the return of the sender's money with the partner; if a recorded instruction reached the rail after it went live, the signed reverse goes to the rail.");
+    expect(pcRow!).not.toContain('if the rail never got this transfer');
+    expect(pcRow!).toContain('`refundunrecorded:<id>`');
+    expect(pcRow!).toContain('held again on the stuck-paid re-instruct');
+    expect(pcRow!).not.toContain('and the row was held before its first instruction, so the rail has nothing to reverse');
+    const pcStuck = rows.find((l) => l.startsWith('| `fundmode:stuck:<id>`, `travelrule:stuck:<id>` for a partner-collected row'));
+    expect(pcStuck, 'the partner-collected stuck row').toBeDefined();
+    expect([...pcStuck!.matchAll(/«`([^`]+)`»/g)]).toHaveLength(4);
+    expectQuotedInSrc(pcStuck!, src, 'partner-collected stuck');
+    expect(pcStuck!).not.toContain('if the rail never got this transfer');
+    expect(pcStuck!).toContain('`refundunrecorded:<id>`');
+    for (const routedText of ["Issue refund is not available for a transfer that another partner pays out: a person must arrange the return of the sender's money with the owner partner."]) {
+      expect(pcRow!).toContain(routedText);
+      expect(pcStuck!).toContain(routedText);
+    }
     // The other pack 5 alerts (not compliance alerts) have their rows in section 14.
     const other = section(SPEC, '## 14.').split('\n').filter((l) => l.startsWith('| `'));
-    for (const k of ['raillegacy:', 'railnoamount:', 'railrecord:', 'stripekey:']) {
+    // Review round 1 (RC2, RF1): the two funding.refund alerts.
+    for (const k of ['raillegacy:', 'railnoamount:', 'railrecord:', 'stripekey:', 'refundnosettle:', 'refundrouted:', 'refundheld:', 'refundunrecorded:']) {
       const row = other.find((l) => l.startsWith(`| \`${k}`));
       expect(row, k).toBeDefined();
       expectQuotedInSrc(row!, src, k);
+    }
+    // Final check F8 (X1, U1): refundnosettle:<id> is the demo era only; a row held before its first instruction is refundheld:<id>.
+    const nosettle = other.find((l) => l.startsWith('| `refundnosettle:'))!;
+    expect(nosettle).toContain('demo era');
+    expect(nosettle).toContain('a row held before its first instruction raises `refundheld:<id>` instead');
+    const held = other.find((l) => l.startsWith('| `refundheld:<id>`'))!;
+    // Truth check F10 (F1, F2): no rail record, delivery log or provider reference; the uncharged wait.
+    for (const s of ['the refund stays `pending`', 'no reverse', 'no customer message', 'no rail record, delivery log or provider reference', 'waits, uncharged', 'parked after its row deadline']) {
+      expect(held, s).toContain(s);
+    }
+    expect(held).not.toContain('refund_waits_for_running_instruct` and retries');
+    expect(held).not.toContain('the transfer is not paid out');
+    // Truth check 2 (F12-1): no evidence is not proof; staff ask the partner first.
+    for (const s of ['so the rail may still hold one', 'ask the partner whether the rail holds an instruction for this transfer before a person arranges the return', 'Ask the partner whether the rail holds an instruction for the transfer first']) {
+      expect(held, s).toContain(s);
+    }
+    expect(held).not.toContain('so there is nothing to reverse on the rail');
+    const unrec = other.find((l) => l.startsWith('| `refundunrecorded:<id>`'))!;
+    for (const s of ['no reverse', 'the refund stays `pending`', 'no customer message', 'provider reference', 'delivery log', 'may still pay it out']) {
+      expect(unrec, s).toContain(s);
     }
   });
 
@@ -409,5 +533,87 @@ describe('pack 5 documents say what the code does', () => {
     for (const s of ['version `2`', '`x-signature`', '`401`', '"error": "amount_required"', '`compliance.funding`', '"method": "partner_collected"']) {
       expect(nov, s).toContain(s);
     }
+  });
+
+  it('funding.mdx Refunds: no reverse for a transfer never sent to the rail, and a partner_psp card payment is refunded in the partner\'s own Stripe dashboard (final check F9, U2)', () => {
+    const refunds = section(FUNDING, '## Refunds');
+    // Truth check F11 (F2-docs): the reverse goes out only when SmartRemit HOLDS the settle record
+    // (an instruction sent by a build that keeps no record gets none: refundunrecorded:<id>).
+    expect(refunds).toContain('A refund of a transfer you collected yourself reaches your rail as a signed reverse instruction with `"method": "partner_collected"`, when SmartRemit holds the record of its settlement instruction to your rail after you went live: return the sender\'s money on your side.');
+    expect(refunds).toContain('For any other transfer you collected (for example one for which SmartRemit holds no record of a settlement instruction to your rail, one that was settled before you went live, or one that another partner pays out), no reverse is sent and SmartRemit staff arrange the return with you.');
+    expect(refunds).not.toContain('when its settlement instruction went to your rail after you went live');
+    // Final check R3 (F9-D1) and R4 (R3-D1): SmartRemit records no Stripe-dashboard refund. The page says
+    // only what SmartRemit controls: with an open refund request it sends no NEW instruction, but an
+    // instruction a rail already holds, and any other transfer not yet paid out, can still be paid out.
+    expect(refunds).toContain('SmartRemit cannot refund a `partner_psp` card payment yet: refund it in your own Stripe dashboard. SmartRemit does not record that refund. While a transfer has an open refund request, SmartRemit sends no new payout instruction for it, but an instruction already sent to a rail can still be paid out, and any other transfer that has not been paid out yet can still be paid out. Ask SmartRemit staff before you refund a transfer that has not been delivered.');
+    expect(refunds).not.toContain('The transfer then stays paid and held in SmartRemit');
+    expect(refunds).not.toContain('stays paid and is not paid out');
+    expect(FUNDING).not.toContain('is refunded through Stripe');
+  });
+
+  it('spec: the fundrefund:<id> row names the true exits, not a Stripe refund (final check F9, U3)', () => {
+    const row = section(SPEC, '## 11.').split('\n').find((l) => l.startsWith('| `fundrefund:<id>`'));
+    expect(row).toBeDefined();
+    // Final check R3 (F9-D2): the worker also closes a refund with nothing collected as nofunds-<id>.
+    expect(row!).toContain("A refund here completes only on the partner's signed reverse, or as nofunds-<id> when nothing was collected on the live rail (a mock-funded or demo-era transfer). A card payment is refunded in the partner's Stripe dashboard and is not recorded here; any other partner-collected refund with no reverse waits for a person (refundrouted:<id>, refundheld:<id> or refundunrecorded:<id>).");
+    // Truth check R5 (F10-D1): the third outcome is named.
+    expect(row!).not.toContain('(refundrouted:<id> or refundheld:<id>)');
+    expect(row!).not.toContain("A refund completes here only on the partner's signed reverse.");
+    expect(row!).not.toContain('Only the partner\'s signed reverse completes it');
+    expect(row!).not.toContain('the Stripe refund completes');
+    expectQuotedInSrc(row!, srcText(), 'fundrefund');
+  });
+
+  it('the changelog, funding.mdx and webhooks.mdx limit the partner_collected reverse to a settle sent to the rail after go-live (review round 1 R1, F2-D1)', () => {
+    const line = section(CHANGELOG, '## 2026-11').split('\n').find((l) => l.includes('**Refunds of partner-collected funds.**'));
+    expect(line).toBeDefined();
+    // Truth check F11 (F2-docs): only a settle instruction SmartRemit holds the record of gets the reverse.
+    expect(line!).toContain('when SmartRemit holds the record of its settlement instruction to your rail after you went live');
+    expect(line!).toContain('Any other transfer you collected (for example one for which SmartRemit holds no record of a settlement instruction to your rail, one that was settled before you went live, or one that another partner pays out) gets no reverse: SmartRemit staff arrange that return with you.');
+    expect(FUNDING).toContain('when SmartRemit holds the record of its settlement instruction to your rail after you went live');
+    expect(WEBHOOKS).toContain('when SmartRemit holds the record of its settlement instruction to your rail after you went live');
+    expect(WEBHOOKS).toContain('For any other transfer you collected (for example one for which SmartRemit holds no record of a settlement instruction to your rail, one that was settled before you went live, or one that another partner pays out), no reverse is sent and SmartRemit staff arrange that return with you directly.');
+    for (const [name, text] of [['changelog', CHANGELOG], ['funding', FUNDING], ['webhooks', WEBHOOKS]] as const) {
+      // Truth check R5 (F11-D1): a recorded settle whose POST never reached the rail still gets the reverse.
+      expect(text, name).not.toContain('one that was never sent to your rail');
+      expect(text, name).not.toContain('settlement instruction went to your rail after you went live');
+      expect(text, name).not.toContain('whose settlement instruction we sent to your rail after you went live');
+    }
+  });
+
+  it('webhooks.mdx failed / returned rows: each funding mode gets its true return path, and no "captured the charge" claim (truth check F11, F3)', () => {
+    for (const status of ['failed', 'returned']) {
+      const row = WEBHOOKS.split('\n').find((l) => l.startsWith(`| \`${status}\` |`));
+      expect(row, `${status} row`).toBeDefined();
+      for (const s of [
+        'a partner-pulled debit gets a signed `reverse`',
+        'SmartRemit cannot refund a card payment made through your own Stripe account (`partner_psp`) yet: refund it in your Stripe dashboard (see <GuideLink slug="funding">Funding</GuideLink>)',
+        'SmartRemit refunds a demo payment, which moved no real money',
+        'for any other transfer you return the funds on your side',
+        'SmartRemit tells the customer that the transfer could not be delivered, unless a refund of it had already completed or failed.',
+      ]) {
+        expect(row!, `${status}: ${s}`).toContain(s);
+      }
+      expect(row!).not.toContain('If SmartRemit captured the charge it is refunded');
+      expect(row!).not.toMatch(/captured the charge/i);
+    }
+    // As built: a rail failure flips the refund to pending only for a captured charge or a partner pull,
+    // the Stripe provider's refund throws, and every customer notice opens with the undelivered head.
+    expect(read('src/db/repos/transfer-repo.ts')).toContain("AND (${transfers.fundingRef} IS NOT NULL OR ${transfers.fundingMethod} IN ('ach_pull', 'bank_pull'))");
+    expect(read('src/lib/providers/stripe-funding-provider.ts')).toContain("throw new Error('stripe funding: automatic refund not supported yet");
+    expect(read('src/lib/payment.ts')).toContain("const head = `We couldn't deliver your transfer ${transfer.id} to ${recipientDisplayName(transfer)}.`;");
+    expect(read('src/lib/rail-failure.ts')).toContain("else if (finalRefund === 'none' || finalRefund === 'requested') variant = 'contact';");
+  });
+
+  it('spec: a key-configuration error at the build step retries like a transient read failure; the instructblock alert says so (review round 1 R1, F1-D1)', () => {
+    const rule = 'a transient read failure or a field-crypto key-configuration error retries with one `instructblock:<rail>:<hour>` alert from attempt 3, any other failure is dead-lettered at once';
+    expect(SPEC).toContain(rule);
+    expect(SPEC).not.toContain('`build` fails closed: a transient read failure retries with one');
+    const row = section(SPEC, '## 11.').split('\n').find((l) => l.startsWith('| `instructblock:'));
+    expect(row).toBeDefined();
+    expect(row!).toContain('a database, network or key-configuration error');
+    expect(row!).toContain('A transient read failure or a field-crypto key-configuration error retries; any other failure is dead-lettered at once');
+    expect(row!).toContain('`FIELD_ENCRYPTION_*` key configuration');
+    expect(read('src/lib/instruction-compliance.ts')).toContain('isTransientInstructError(err) || isKeyConfigError(err)');
   });
 });

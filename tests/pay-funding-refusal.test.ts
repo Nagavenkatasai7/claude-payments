@@ -7,7 +7,7 @@
  * captured. This file pins the refusal WITHOUT the funding-class mock that the
  * other real-money pay tests use.
  */
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach, onTestFinished } from 'vitest';
 import { sql } from 'drizzle-orm';
 import { createStore } from '@/lib/store';
 import { fakeRedis } from './helpers';
@@ -283,6 +283,11 @@ describe('processTransferPayment step 7: no mock funding on real money', () => {
   });
 
   it('fix pack 5 T16 (P16): an unrestricted Stripe key at step 7: 409, nothing captured, one stripekey:<partner>:<hour> alert with no key fragment; a second pay this hour adds none', async () => {
+    // Review round 2 GF1: Date frozen so both pays fall in ONE stripekey:<hour> bucket.
+    vi.useFakeTimers({ toFake: ['Date'] });
+    onTestFinished(() => {
+      vi.useRealTimers();
+    });
     process.env.STRIPE_FUNDING_ENABLED = 'true';
     await acmeLive();
     rails.fundingConfig = { providerType: 'stripe', secretKey: ['sk', 'live', 'stepseven'].join('_') };

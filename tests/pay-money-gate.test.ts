@@ -4,7 +4,7 @@
  * funding on real money). Only a context that KNOWS the rail is real money
  * makes a read; everything else answers null with no read at all.
  */
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach, onTestFinished } from 'vitest';
 import { sql } from 'drizzle-orm';
 import { freshDb, seedPartner } from './helpers-db';
 import { seedRealMoneyRail } from './helpers-live';
@@ -143,6 +143,11 @@ describe('payMoneyGateRefusal (P13 route pre-verify)', { retry: 0 }, () => {
   });
 
   it("fix pack 5 T16 (P16): a stored unrestricted Stripe key: 'mock_on_real_money' and one stripekey:<partner>:<hour> alert with no key fragment", async () => {
+    // Review round 2 GF1: Date frozen so both pays fall in ONE stripekey:<hour> bucket.
+    vi.useFakeTimers({ toFake: ['Date'] });
+    onTestFinished(() => {
+      vi.useRealTimers();
+    });
     await seedRealMoneyRail(db, 'acme');
     process.env.STRIPE_FUNDING_ENABLED = 'true';
     seam.fundingOverride = { providerType: 'stripe', secretKey: ['sk', 'test', 'moneygatesecret'].join('_') };

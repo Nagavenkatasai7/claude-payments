@@ -45,8 +45,19 @@ const RAIL_URL = 'https://rail.acme-test.com/settle';
 
 const mockfundText = (id: string, owner: string, rail: string) =>
   `⚠️ SmartRemit ops: transfer ${id} (partner ${owner}, rail ${rail}) is PAID but was not instructed: it was funded by the demo (mock) funding provider on a real-money rail, so no real money was collected here. It will never be sent. Close it with Issue refund in the dashboard: it completes as nofunds-${id} without moving money. Check with the partner how the sender paid.`;
-const fundmodeText = (id: string, owner: string, rail: string, cls: string, mode: string) =>
-  `transfer ${id} (partner ${owner}, rail ${rail}) is paid but was not instructed: its funding (${cls}) does not match the partner's recorded funding mode (${mode}). It waits and is checked every 15 minutes. Record the right funding mode on the partner's go-live card, or return the sender's money with Issue refund in the dashboard (Cancel does not apply to a paid transfer).`;
+
+// Final check F8 (X1, U1): a partner-collected row has its own tail. Not routed:
+// Issue refund sends no reverse for a row the rail never got. Routed: Issue
+// refund refuses it (RF1), so the text never offers it.
+const fundmodePcText = (id: string, owner: string, rail: string, mode: string) =>
+  `transfer ${id} (partner ${owner}, rail ${rail}) is paid but was not instructed: its funding (partner_collected) does not match the partner's recorded funding mode (${mode}). It waits and is checked every 15 minutes. Record the right funding mode on the partner's go-live card: the transfer then goes out on its next attempt. Or stop it with Issue refund in the dashboard (Cancel does not apply to a paid transfer): if SmartRemit has no record of an instruction for this transfer, no reverse is sent, the refund stays pending and a person arranges the return of the sender's money with the partner; if a recorded instruction reached the rail after it went live, the signed reverse goes to the rail.`;
+const fundmodeRoutedText = (id: string, owner: string, rail: string, mode: string) =>
+  `transfer ${id} (partner ${owner}, rail ${rail}) is paid but was not instructed: its funding (partner_collected) does not match the partner's recorded funding mode (${mode}). It waits and is checked every 15 minutes. Record the right funding mode on the partner's go-live card: the transfer then goes out on its next attempt. Issue refund is not available for a transfer that another partner pays out: a person must arrange the return of the sender's money with the owner partner.`;
+
+// Review round 2 GE1: a stripe-class row's fundmode:<id> text never names Issue
+// refund (a card refund cannot be made from SmartRemit yet).
+const fundmodeStripeText = (id: string, owner: string, rail: string, mode: string) =>
+  `transfer ${id} (partner ${owner}, rail ${rail}) is paid but was not instructed: its funding (stripe) does not match the partner's recorded funding mode (${mode}). It waits and is checked every 15 minutes. If the partner's own payment provider collects card payments, record the funding mode partner_psp on the partner's go-live card: the transfer then goes out on its next attempt. Otherwise return the sender's money in the partner's Stripe dashboard (SmartRemit cannot refund a card payment yet, and Cancel does not apply to a paid transfer). The ledger cannot record that refund yet, so the transfer then stays paid and held here.`;
 
 let db: Db;
 let store: ReturnType<typeof createStore>;
@@ -168,7 +179,7 @@ describe('settlement.instruct funding_mode gate G14 (pack 5 T14)', { retry: 0 },
     expect(await drainOnce(deps(), 'w1')).toMatchObject({ processed: 0, failed: 0, released: 1 });
     expect(fetchFn).not.toHaveBeenCalled();
     expectDeferred(await rowState());
-    expect(await alerts()).toEqual([{ k: `fundmode:${ID}`, m: fundmodeText(ID, 'acme', 'acme', 'partner_collected', 'none') }]);
+    expect(await alerts()).toEqual([{ k: `fundmode:${ID}`, m: fundmodePcText(ID, 'acme', 'acme', 'none') }]);
     await expectNoPii();
 
     await dueNow();
@@ -186,13 +197,30 @@ describe('settlement.instruct funding_mode gate G14 (pack 5 T14)', { retry: 0 },
     await drainOnce(deps(), 'w1');
     expect(fetchFn).not.toHaveBeenCalled();
     expectDeferred(await rowState());
-    expect(await alerts()).toEqual([{ k: `fundmode:${ID}`, m: fundmodeText(ID, 'acme', 'acme', 'stripe', 'partner_collected') }]);
+    expect(await alerts()).toEqual([{ k: `fundmode:${ID}`, m: fundmodeStripeText(ID, 'acme', 'acme', 'partner_collected') }]);
 
     await certifyPartnerForTest(db, 'acme', { fundingMode: 'partner_psp' });
     await dueNow();
     await drainOnce(deps(), 'w1');
     expectPosted();
     expect((await rowState()).status).toBe('done');
+  });
+
+  it('review round 2 GE1: a stripe row with no fundingMode record defers; its fundmode:<id> text never says Issue refund and names partner_psp and the Stripe dashboard', async () => {
+    await certifyPartnerForTest(db, 'acme', { fundingMode: null });
+    await paidRealMoneyTransfer(db, { id: ID, fundingProvider: 'stripe', fundingRef: 'pi_test_2', fundingMethod: 'debit_card' });
+    await db.execute(sql`UPDATE transfers SET funding_state = 'succeeded' WHERE id = ${ID}`);
+    await enqueueInstruct();
+    await drainOnce(deps(), 'w1');
+    expect(fetchFn).not.toHaveBeenCalled();
+    expectDeferred(await rowState());
+    const a = await alerts();
+    expect(a).toEqual([{ k: `fundmode:${ID}`, m: fundmodeStripeText(ID, 'acme', 'acme', 'none') }]);
+    expect(a[0].m).not.toContain('Issue refund');
+    expect(a[0].m).toContain('partner_psp');
+    expect(a[0].m).toContain("in the partner's Stripe dashboard");
+    expect(a[0].m).not.toContain('pi_test_2');
+    await expectNoPii();
   });
 
   it("routed row: the OWNER's record decides, not the rail partner's", async () => {
@@ -205,7 +233,8 @@ describe('settlement.instruct funding_mode gate G14 (pack 5 T14)', { retry: 0 },
     await drainOnce(deps(), 'w1');
     expect(fetchFn).not.toHaveBeenCalled();
     expectDeferred(await rowState());
-    expect(await alerts()).toEqual([{ k: `fundmode:${ID}`, m: fundmodeText(ID, 'acme', 'railp', 'partner_collected', 'none') }]);
+    expect(await alerts()).toEqual([{ k: `fundmode:${ID}`, m: fundmodeRoutedText(ID, 'acme', 'railp', 'none') }]);
+    expect((await alerts())[0].m).not.toMatch(/with Issue refund/);
   });
 
   it('a b2b ach_pull row passes with no record', async () => {

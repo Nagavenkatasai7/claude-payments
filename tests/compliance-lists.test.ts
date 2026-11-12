@@ -5,7 +5,7 @@ import {
   RECIPIENT_WATCHLIST_REASON,
 } from '@/lib/compliance';
 import { inputHash } from '@/lib/sanctions/evidence';
-import { MockSanctionsScreener } from '@/lib/providers/sanctions-provider';
+import { MockSanctionsScreener, setListSourceForTests } from '@/lib/providers/sanctions-provider';
 import { LIST_SET_NAMES, listSetList, primeListSet, restoreOfacSource } from './helpers-sanctions';
 
 // Fix pack 5 T29 (R08, P25, P26): under the opt-in SANCTIONS_LIST=lists the
@@ -138,6 +138,30 @@ describe('screenTransfer under SANCTIONS_LIST=lists: destination floor, lists[],
     const raw = JSON.stringify(r.evidence);
     for (const n of [...Object.values(LIST_SET_NAMES), CLEAN_SENDER]) expect(raw).not.toContain(n);
     expect(raw).not.toContain('unscreened');
+  });
+
+  it('GA2: a member that rejects on the recipient screen and loads again for the sender -> list_unavailable keeps the not-checked identity (never the composite read after the screens)', async () => {
+    primeListSet({});
+    const mha = listSetList('in-mha-uapa');
+    let calls = 0;
+    setListSourceForTests('in-mha-uapa', {
+      load: async () => {
+        calls += 1;
+        if (calls === 1) throw new Error('transient');
+        return mha;
+      },
+      warm: async () => {},
+      checkedAt: () => new Date(Date.now() - 3_600_000),
+    });
+    const r = await screen({ destinationCountry: 'IN' });
+    expect(calls).toBeGreaterThanOrEqual(2);
+    expect(r.status).toBe('flagged');
+    expect(r.reasons).toEqual([LIST_UNAVAILABLE_REASON]);
+    const e = r.evidence!;
+    expect(e).toMatchObject({ decision: 'list_unavailable', listSource: COMPOSITE_IN, listVersion: 'unavailable', listHash: '', listFitness: 'not_live' });
+    expect('listCheckedAt' in e).toBe(false);
+    expect('listBaseHash' in e).toBe(false);
+    expect(e.lists!.find((l) => l.source === 'in-mha-uapa')).toEqual({ source: 'in-mha-uapa', version: 'unavailable', hash: '', fitness: 'not_live' });
   });
 
   it('an explicit input.screener that is not multi: fitness via listFitness, no lists key', async () => {

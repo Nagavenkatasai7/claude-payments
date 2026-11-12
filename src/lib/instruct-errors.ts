@@ -68,6 +68,23 @@ export class InstructTravelRuleError extends Error {
   }
 }
 
+/** How long a refund waits for a running (or deadline-parked) instruct of its transfer. */
+export const REFUND_WAITS_FOR_INSTRUCT_DEFER_SEC = 60;
+
+/**
+ * Truth check F10 (F1): a real-money partner-collected funding.refund that is not
+ * routed waits while a settlement.instruct row for its transfer runs or is parked
+ * after its row deadline (outboxRepo.hasRunningInstruction): that handler may still
+ * record and POST the payout. Deferred UNCHARGED (no alert); the refund stays
+ * pending, never spends the attempt budget and is never dead-lettered by waiting.
+ */
+export class RefundWaitsForInstructError extends Error {
+  constructor(readonly delaySec: number = REFUND_WAITS_FOR_INSTRUCT_DEFER_SEC) {
+    super('refund_waits_for_running_instruct');
+    this.name = 'RefundWaitsForInstructError';
+  }
+}
+
 /**
  * G17 (and the reverse record): the rail message could not be recorded before
  * sending, so nothing was sent. A charged retry under the row kind's policy,
@@ -128,6 +145,32 @@ export function isTransientInstructError(err: unknown): boolean {
     if (transientSelf(err)) return true;
     if (typeof err !== 'object' || err === null) return false;
     return transientSelf(field(err, 'cause'));
+  } catch {
+    return false;
+  }
+}
+
+/** P7: a message that names the field-crypto key configuration (field-crypto.ts key-ring errors). */
+const KEY_CONFIG_MESSAGE = /FIELD_ENCRYPTION_KEY|FIELD_ENCRYPTION_PREVIOUS_KEYS|FIELD_ENCRYPTION_CURRENT_KID|unknown key id/;
+
+function keyConfigSelf(v: unknown): boolean {
+  if (typeof v === 'string') return KEY_CONFIG_MESSAGE.test(v);
+  if (!(v instanceof Error)) return false;
+  const message = field(v, 'message');
+  return typeof message === 'string' && KEY_CONFIG_MESSAGE.test(message);
+}
+
+/**
+ * P7 (G1, and G15 since review round 1 RA2): true when the error, or its
+ * direct `cause` (an Error, or a string cause; one level), names the key
+ * configuration. A key-ring misconfiguration heals when the env is fixed, so
+ * both gates keep today's charged retry for it instead of dead-lettering. A
+ * top-level non-Error is false. Never throws.
+ */
+export function isKeyConfigError(err: unknown): boolean {
+  try {
+    if (!(err instanceof Error)) return false;
+    return keyConfigSelf(err) || keyConfigSelf(field(err, 'cause'));
   } catch {
     return false;
   }

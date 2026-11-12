@@ -65,20 +65,28 @@ let recordDown = false;
 /** rail_messages rows seen at the moment of each fetch call. */
 let rowsAtFetch: number[] = [];
 
-/** The real db, except that an insert into rail_messages throws while `recordDown`. */
-function recordingDb(): Db {
-  return new Proxy(db, {
-    get(target, prop, receiver) {
+/**
+ * The real db, except that an insert into rail_messages throws while `recordDown`.
+ * Truth check F10 (F1): the settle record is written inside a transaction (the
+ * re-check under the row lock), so a transaction handle is wrapped the same way.
+ */
+function recordingDb(target: object = db): Db {
+  return new Proxy(target, {
+    get(t, prop, receiver) {
       if (prop === 'insert') {
         return (table: unknown) => {
           if (table === railMessages && recordDown) throw Object.assign(new Error('x'), { name: 'NeonDbError' });
-          return target.insert(table as never);
+          return (t as Db).insert(table as never);
         };
       }
-      const v = Reflect.get(target, prop, receiver);
-      return typeof v === 'function' ? v.bind(target) : v;
+      if (prop === 'transaction') {
+        return (fn: (tx: unknown) => unknown, ...rest: unknown[]) =>
+          (t as unknown as { transaction: (f: (tx: object) => unknown, ...r: unknown[]) => unknown }).transaction((tx) => fn(recordingDb(tx)), ...rest);
+      }
+      const v = Reflect.get(t, prop, receiver);
+      return typeof v === 'function' ? v.bind(t) : v;
     },
-  });
+  }) as Db;
 }
 
 function deps(): WorkerDeps {
@@ -151,6 +159,13 @@ beforeEach(async () => {
 afterEach(() => invalidateFlagCache(db));
 
 describe('settlement.instruct records the settle message before the POST (G17, G18)', { retry: 0 }, () => {
+  // Review round 2 GF1: Date frozen (after the top-level freshDb()) so the
+  // worker's railrecord:<hour> and the expected key read the same instant.
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+  });
+  afterEach(() => vi.useRealTimers());
+
   it('the settle row exists BEFORE the POST with the exact bytes, hash and header that were POSTed', async () => {
     await enqueueInstruct();
     expect((await drainOnce(deps(), 'w1')).processed).toBe(1);
@@ -288,7 +303,37 @@ describe('settlement.instruct records the settle message before the POST (G17, G
   });
 });
 
+// Review round 2 GF1: the railrecord:<hour> key is read from the clock by the
+// worker; a test that reads it AGAIN after the drain goes red when the run
+// crosses an hour boundary. This case pins the clock to the last millisecond of
+// an hour (in the past, so the row is due against Postgres now()), drains, and
+// moves into the next hour before it asserts.
+describe('railrecord:<hour> across an hour boundary (review round 2 GF1)', { retry: 0 }, () => {
+  afterEach(() => vi.useRealTimers());
+
+  it('the alert carries the key of the hour the drain ran in, read once from the pinned clock', async () => {
+    const H = 3_600_000;
+    const hourStart = Math.floor(Date.now() / H) * H;
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(hourStart - 1); // HH:59:59.999 of the previous hour
+    const expected = railRecordAlertKey(); // read ONCE, before the action
+    recordDown = true;
+    await enqueueInstruct();
+    expect((await drainOnce(deps(), 'w1')).failed).toBe(1);
+    vi.setSystemTime(hourStart); // the next hour
+    expect((await alerts()).map((x) => x.k)).toEqual([expected]);
+    expect(expected).toBe(railRecordAlertKey(hourStart - 1));
+  });
+});
+
 describe('funding.refund partner-pulled reverse records before its POST', { retry: 0 }, () => {
+  // Review round 2 GF1: Date frozen (after the top-level freshDb()) so the
+  // worker's railrecord:<hour> and the expected key read the same instant.
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+  });
+  afterEach(() => vi.useRealTimers());
+
   it("a partner-pulled reverse is recorded (kind 'reverse') before its POST with the exact bytes and header", async () => {
     await store.saveTransfer(pulledFixture());
     fetchFn.mockImplementation(async () => {

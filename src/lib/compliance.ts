@@ -248,7 +248,11 @@ export async function screenTransfer(input: {
     // break every send. Any other screener error propagates as before.
     if (!(err instanceof SanctionsListUnavailableError)) throw err;
     // Fix pack 2 (R02): the amount and velocity flags are kept next to it.
-    const info = screener.listInfo();
+    // GA2 (lists only): like LF1-D1, the not-checked identity, never the
+    // composite read after the screens (a member may have loaded again).
+    const info: SanctionsListInfo = multi
+      ? { source: screener.listInfo().source, version: 'unavailable', hash: '' }
+      : screener.listInfo();
     const unscreened = (role: 'recipient' | 'sender', name: string): ScreeningEvidenceParty =>
       ({ role, inputHash: inputHash(name), matched: false, matchScore: 0, ...(multi ? { unscreened: true as const } : {}) });
     return {

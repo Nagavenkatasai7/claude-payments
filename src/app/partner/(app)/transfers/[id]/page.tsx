@@ -5,8 +5,7 @@ import { notFound } from 'next/navigation';
 import { FlaskConical, ShieldAlert } from 'lucide-react';
 import { requirePartnerStaff } from '@/lib/auth';
 import { getDb } from '@/db/client';
-import { refundWithoutCharge } from '@/lib/funding-class';
-import { realMoneyFor } from '@/lib/live-gate';
+import { cardRefundUnavailableView, collectedOnRealMoneyView } from '@/lib/funding-class';
 import { loadPartnerTransferDetail } from '@/db/repos/partner-transfer-reads';
 import { getAuthStore } from '@/lib/auth-store';
 import { PARTNER_ADMIN, PARTNER_OPS } from '@/lib/partner-access';
@@ -171,8 +170,12 @@ export default async function PartnerTransferDetailPage({ params }: { params: Pr
   // Lost-features restore p1: the controls this viewer may use (UX only; each action re-checks).
   // Fix pack 5 T15 (P15, M3): a real-money partner-collected row has no fundingRef; Issue refund
   // is its exit. The rail is read only when fundingRef is null.
-  const collectedOnRealMoney = !transfer.fundingRef && refundWithoutCharge(transfer, await realMoneyFor(getDb(), transfer));
-  const opsFor = transferOpsFor(transfer, ctx, { collectedOnRealMoney });
+  // Review round 1 (RC2, RF1): not on a routed row, and only when its settle went to the rail after go-live.
+  const collectedOnRealMoney = !transfer.fundingRef && (await collectedOnRealMoneyView(getDb(), transfer));
+  const opsBase = transferOpsFor(transfer, ctx, { collectedOnRealMoney });
+  // Review round 2 GE1: a real-money card payment (class 'stripe') cannot be refunded from
+  // SmartRemit yet (issueRefund refuses it), so no button; the rail is read only for that class.
+  const opsFor = opsBase.refund && (await cardRefundUnavailableView(getDb(), transfer)) ? { ...opsBase, refund: false } : opsBase;
   const assignOptions = opsFor.assign ? toStaffOptions(tenantTransferAssignees(await getAuthStore().listStaff(), ctx.partnerId)) : [];
   const anyOp = opsFor.assign || opsFor.resend || opsFor.cancel;
   // Issue refund (admin only): offered when eligible; a paid or delivered transfer another network

@@ -116,6 +116,24 @@ export async function withInstructDeliveryLog(
   return { res, logged };
 }
 
+/**
+ * Truth check F10 (F2): was a settlement instruction for this transfer ever POSTed to this rail
+ * partner, by any build? Older builds keep no rail record (rail_messages) but write one row here
+ * per instruct POST (kind 'settlement.instruct', subject_id = the transfer id, partner_id = the
+ * rail partner), whatever its outcome: a POST that timed out may still have reached the rail.
+ * Read-only, ids only (no body, URL or customer field), scoped to the rail partner. A failed read
+ * THROWS (never true, never false).
+ */
+export async function hasInstructDelivery(db: DbOrTx, railPartnerId: string, transferId: string): Promise<boolean> {
+  const d = partnerWebhookDeliveries;
+  const rows = await db
+    .select({ id: d.id })
+    .from(d)
+    .where(and(eq(d.partnerId, railPartnerId), eq(d.kind, 'settlement.instruct'), eq(d.subjectId, transferId)))
+    .limit(1);
+  return rows.length > 0;
+}
+
 // ── The /partner delivery log reader ─────────────────────────────────────────────────────────────
 
 /** Rows per page of the partner delivery log. */

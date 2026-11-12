@@ -420,5 +420,66 @@ describe('sanctions screening spec says what pack 5 does', () => {
     for (const k of ['`mockfund:<id>`', '`fundmode:<id>`', '`mockfund:stuck:<id>`', '`fundmode:stuck:<id>`', '`nofunds-<id>`', 'Issue refund']) {
       expect(rest, k).toContain(k);
     }
+    // Review round 2 GE1: a real-money card payment is refused by Issue refund; its alerts name partner_psp or the Stripe dashboard.
+    for (const k of ['funding class `stripe`', '`partner_psp`', "the partner's Stripe dashboard", 'review round 2 GE1']) {
+      expect(rest, k).toContain(k);
+    }
+    // Final check F8 (X1, U1, TR1): the exits per class. A card payment's travelrule:<id> names the Stripe dashboard too;
+    // a partner-collected row held before its first instruction is refunded with no reverse (refund pending, refundheld:<id>);
+    // a routed one cannot be refunded here.
+    expect(rest).not.toContain('(the rail never got the transfer)');
+    for (const k of [
+      'its `fundmode:<id>`, `travelrule:<id>` and `fundmode:stuck:<id>` / `travelrule:stuck:<id>` alerts name instead',
+      // Truth check F10 (F1, F2): what SmartRemit recorded, not what the rail did; the uncharged wait; an unrecorded send.
+      'For a partner-collected row (final check F8) held at either step before its first instruction, Issue refund sends no reverse (SmartRemit has no record of an instruction for it): the refund stays `pending` with one `refundheld:<id>` alert',
+      'while an instruct for the row runs, or is parked after its row deadline, the refund waits, uncharged',
+      'when its provider reference or delivery log shows that a build that keeps no rail record sent an instruction, no reverse is sent either and the refund stays `pending` with one `refundunrecorded:<id>` alert',
+      // Final check R3 (F8-D1): a row held again on the stuck-paid re-instruct after a recorded send gets the signed reverse.
+      'a row held again on the stuck-paid re-instruct after a recorded instruction reached the rail gets the signed reverse instead',
+      // Truth check F10 (F1): the gate record re-checks the row under its lock.
+      '`record` re-reads the transfer under its row lock in the same transaction that writes the settle record and applies the `not_payable` / `not_paid` rule again (`instructPayability`',
+      'a transfer that was cancelled, delivered, blocked or put into a refund after the early steps gets no record and is not sent (on every rail, the simulator too); the POST follows the commit',
+      'a routed partner-collected row cannot be refunded from SmartRemit, so its texts do not offer Issue refund',
+    ]) {
+      expect(rest, k).toContain(k);
+    }
+  });
+});
+
+// Fix pack 5 review round 1 RE1: outside SANCTIONS_LIST=lists only the
+// screening and its evidence are byte-identical; the instruction's compliance
+// block is version 2 in every mode. Section 2 names the lists-mode evidence
+// fields and the lists-mode entry-id prefixes (the ones the loaders write).
+describe('sanctions screening spec: lists-mode evidence and the version 2 block (RE1)', () => {
+  it('section 3 says the screening and its evidence are byte-identical and the compliance block is version 2 in every mode', () => {
+    const s3 = section('## 3.');
+    expect(s3).not.toContain('everything is byte-identical');
+    expect(s3).toContain('the screening and its evidence are byte-identical to before fix pack 5');
+    expect(s3).toContain("the instruction's compliance block is version 2 in every mode (`names_screened`, `funding`)");
+    // Review round 1 R1 (F3-D2): each claim names the test that pins it.
+    expect(s3).not.toContain('(both pinned by `tests/sanctions-golden-modes.test.ts`)');
+    expect(s3).toContain('version 2 and `funding` are pinned by `tests/compliance-block-schema.test.ts`');
+    expect(s3).toContain('the screening keys and the absent `lists` key are pinned by `tests/sanctions-golden-modes.test.ts`');
+    const schema = readFileSync(join(ROOT, 'tests/compliance-block-schema.test.ts'), 'utf8');
+    expect(schema).toContain('expect(block.version).toBe(2);');
+    expect(schema).toContain('expect(Object.keys(block.funding)).toEqual(FUNDING_KEYS);');
+    const golden = readFileSync(join(ROOT, 'tests/sanctions-golden-modes.test.ts'), 'utf8');
+    expect(golden).toContain('names_screened');
+  });
+
+  it('section 2 lists lists[], parties[].unscreened and the lists-mode entry-id prefixes the loaders write', () => {
+    const s2 = section('## 2.');
+    expect(s2).toContain('`lists[]` (`source`, `version`, `hash`, `fitness`, `checkedAt`)');
+    expect(s2).toContain('`parties[].unscreened`');
+    expect(s2).toContain('this party was not screened; never a clear');
+    const src = srcText();
+    for (const [prefix, code] of [
+      ['cons:<uid>', "idPrefix: 'cons'"],
+      ['unsc:<ref>', 'id: `unsc:${ref}`'],
+      ['inmha:<id>', 'id: `inmha:${id}`'],
+    ] as const) {
+      expect(s2, prefix).toContain(`\`${prefix}\``);
+      expect(src, code).toContain(code);
+    }
   });
 });

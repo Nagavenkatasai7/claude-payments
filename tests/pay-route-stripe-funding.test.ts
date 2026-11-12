@@ -11,7 +11,7 @@
  *    unchanged and still green).
  * The processor is never reached: fetch is stubbed.
  */
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach, onTestFinished } from 'vitest';
 import { NextRequest } from 'next/server';
 import { sql } from 'drizzle-orm';
 import { createStore } from '@/lib/store';
@@ -248,6 +248,11 @@ describe('pay route — Stripe async capture (flag ON)', () => {
     };
 
     it('a new row: 402 payment_failed, no processor call, no intent bound, one stripekey:<partner>:<hour> alert with no key fragment; a second pay this hour adds none', async () => {
+      // Review round 2 GF1: Date frozen so both pays fall in ONE stripekey:<hour> bucket.
+      vi.useFakeTimers({ toFake: ['Date'] });
+      onTestFinished(() => {
+        vi.useRealTimers();
+      });
       fundingConfig.value = { providerType: 'stripe', secretKey: SK, webhookSecrets: ['w'] };
       await store.saveTransfer(makeTransfer({ id: 'k1' }));
       const res = await post('k1');

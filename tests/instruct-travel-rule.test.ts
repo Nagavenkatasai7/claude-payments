@@ -71,8 +71,22 @@ const PHONE = '15551239876';
 const RAIL_URL = 'https://rail.acme-test.com/settle';
 const ADDRESS = '1 Test Street, Testville';
 
-const travelRuleText = (id: string, rail: string) =>
-  `transfer ${id} (rail ${rail}) is paid but was not instructed: the travel rule needs the sender's address or date of birth, which is not on file or cannot go to a routed rail. It waits and is checked every 15 minutes. Return the sender's money with Issue refund in the dashboard (Cancel does not apply to a paid transfer).`;
+// Final check F8 (X1, U1, TR1): the text per funding class. Every other class
+// keeps the pack 5 text byte for byte (pinned in the spec, section 11; mock
+// rows stop at funding_mode before this gate). A partner-collected
+// row not routed (Issue refund sends no reverse for a row the rail never got);
+// routed (Issue refund refuses it, RF1); a card payment (Issue refund refuses it, GE1).
+const travelRuleHead = (id: string, rail: string) =>
+  `transfer ${id} (rail ${rail}) is paid but was not instructed: the travel rule needs the sender's address or date of birth, which is not on file or cannot go to a routed rail. It waits and is checked every 15 minutes. `;
+const travelRulePcText = (id: string, rail: string) =>
+  travelRuleHead(id, rail) +
+  "Stop it with Issue refund in the dashboard (Cancel does not apply to a paid transfer): if SmartRemit has no record of an instruction for this transfer, no reverse is sent, the refund stays pending and a person arranges the return of the sender's money with the partner; if a recorded instruction reached the rail after it went live, the signed reverse goes to the rail.";
+const travelRuleRoutedText = (id: string, rail: string) =>
+  travelRuleHead(id, rail) +
+  "Issue refund is not available for a transfer that another partner pays out: a person must arrange the return of the sender's money with the owner partner.";
+const travelRuleStripeText = (id: string, rail: string) =>
+  travelRuleHead(id, rail) +
+  "Return the sender's money in the partner's Stripe dashboard (SmartRemit cannot refund a card payment yet, and Cancel does not apply to a paid transfer). The ledger cannot record that refund yet, so the transfer then stays paid and held here.";
 
 let db: Db;
 let store: ReturnType<typeof createStore>;
@@ -148,6 +162,20 @@ beforeEach(async () => {
 afterEach(() => invalidateFlagCache(db));
 
 describe('settlement.instruct travel_rule gate G16 (pack 5 T23)', { retry: 0 }, () => {
+  it('final check F8 TR1: a card payment (class stripe, owner partner_psp) held by the travel rule: its text names the Stripe dashboard, never Issue refund', async () => {
+    await certifyPartnerForTest(db, 'acme', { fundingMode: 'partner_psp' });
+    await paidRealMoneyTransfer(db, { id: ID, fundingProvider: 'stripe', fundingRef: 'pi_tr_1', fundingMethod: 'debit_card' });
+    await db.execute(sql`UPDATE transfers SET funding_state = 'succeeded' WHERE id = ${ID}`);
+    await enqueueInstruct();
+    await drainOnce(deps(), 'w1');
+    expect(fetchFn).not.toHaveBeenCalled();
+    expectDeferred(await rowState());
+    const a = await travelAlerts();
+    expect(a).toEqual([{ k: `travelrule:${ID}`, m: travelRuleStripeText(ID, 'acme') }]);
+    expect(a[0].m).not.toContain('Issue refund');
+    expect(a[0].m).not.toContain('pi_tr_1');
+  });
+
   it('real money, no address on file: no POST, no rail_messages row, ONE travelrule:<id> alert (ids only), deferred 900 s uncharged; a second drain adds no alert', async () => {
     await paidRealMoneyTransfer(db, { id: ID });
     await enqueueInstruct();
@@ -156,7 +184,7 @@ describe('settlement.instruct travel_rule gate G16 (pack 5 T23)', { retry: 0 }, 
     expect(fetchFn).not.toHaveBeenCalled();
     expect(await railMessageCount()).toBe(0);
     expectDeferred(await rowState());
-    expect(await travelAlerts()).toEqual([{ k: `travelrule:${ID}`, m: travelRuleText(ID, 'acme') }]);
+    expect(await travelAlerts()).toEqual([{ k: `travelrule:${ID}`, m: travelRulePcText(ID, 'acme') }]);
     await dueNow();
     await drainOnce(deps(), 'w1');
     expect(fetchFn).not.toHaveBeenCalled();
@@ -174,7 +202,7 @@ describe('settlement.instruct travel_rule gate G16 (pack 5 T23)', { retry: 0 }, 
     expect(fetchFn).not.toHaveBeenCalled();
     expect(await railMessageCount()).toBe(0);
     expectDeferred(await rowState());
-    expect(await travelAlerts()).toEqual([{ k: `travelrule:${ID}`, m: travelRuleText(ID, 'railp') }]);
+    expect(await travelAlerts()).toEqual([{ k: `travelrule:${ID}`, m: travelRuleRoutedText(ID, 'railp') }]);
   });
 
   it('DOB band ($1,500 to DE) with an address but no DOB: deferred', async () => {
@@ -248,7 +276,7 @@ describe('settlement.instruct travel_rule gate G16 (pack 5 T23)', { retry: 0 }, 
     expect(fetchFn).not.toHaveBeenCalled();
     expect(await railMessageCount()).toBe(0);
     expectDeferred(await rowState());
-    expect(await travelAlerts()).toEqual([{ k: `travelrule:${ID}`, m: travelRuleText(ID, 'acme') }]);
+    expect(await travelAlerts()).toEqual([{ k: `travelrule:${ID}`, m: travelRulePcText(ID, 'acme') }]);
   });
 
   it('the defence check in the DOB band: address built but no date_of_birth -> deferred', async () => {

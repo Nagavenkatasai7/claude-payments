@@ -76,7 +76,7 @@ Instructions also carry a `compliance` object, after every other key. The value 
 
 A cancelled transfer whose funds your rail pulled gets a signed **reverse** instruction. It has `"action": "reverse"` and its own `reference` (`reverse-` plus our transfer ID), distinct from the original instruction's, so your rail can tell a reverse from a replay. A reverse for a debit that never happened must be a no-op on your side.
 
-A refund of a real-money transfer whose funds you collected yourself is a signed reverse too, with `"method": "partner_collected"`:
+A refund of a real-money transfer whose funds you collected yourself is a signed reverse too, with `"method": "partner_collected"`, when SmartRemit holds the record of its settlement instruction to your rail after you went live. For any other transfer you collected (for example one for which SmartRemit holds no record of a settlement instruction to your rail, one that was settled before you went live, or one that another partner pays out), no reverse is sent and SmartRemit staff arrange that return with you directly. An example:
 
 ```json
 { "action": "reverse", "reference": "reverse-tr_abc123", "partner_id": "acme",
@@ -120,8 +120,8 @@ Content-Type: application/json
 | `created` | Awaiting payment (no change). |
 | `funded` | Paid: the customer was charged on your side. |
 | `paid_out` | Delivered. Triggers the delivery notifications. |
-| `failed` | Cancelled. If SmartRemit captured the charge it is refunded; a partner-pulled debit gets a signed `reverse`; otherwise you return the funds on your side. The customer is told. |
-| `returned` | Cancelled, as for `failed`: if SmartRemit captured the charge it is refunded; a partner-pulled debit gets a signed `reverse`; otherwise you return the funds on your side. The customer is told. |
+| `failed` | Cancelled: a partner-pulled debit gets a signed `reverse`; SmartRemit cannot refund a card payment made through your own Stripe account (`partner_psp`) yet: refund it in your Stripe dashboard (see <GuideLink slug="funding">Funding</GuideLink>); SmartRemit refunds a demo payment, which moved no real money; for any other transfer you return the funds on your side. SmartRemit tells the customer that the transfer could not be delivered, unless a refund of it had already completed or failed. |
+| `returned` | Cancelled, as for `failed`: a partner-pulled debit gets a signed `reverse`; SmartRemit cannot refund a card payment made through your own Stripe account (`partner_psp`) yet: refund it in your Stripe dashboard (see <GuideLink slug="funding">Funding</GuideLink>); SmartRemit refunds a demo payment, which moved no real money; for any other transfer you return the funds on your side. SmartRemit tells the customer that the transfer could not be delivered, unless a refund of it had already completed or failed. |
 
 - The state machine only moves forward, so replays and out-of-order callbacks are safe.
 - A `failed` or `returned` may carry an optional `reason` string. It is stored on the transfer for your operations team and ours, cut to <Fact name="failureReasonMaxChars" /> characters.
@@ -138,9 +138,9 @@ Content-Type: application/json
 | `200` `{ "ok": true, "duplicate": true }` | We already processed this exact signed message. Do not act on it again. |
 | `200` `{ "ok": true, "held": true }` | Not applied: the transfer is held for our operations team (for example a `paid_out` whose amount differs). Stop retrying. |
 | `200` `{ "ok": true, "ignored": true }` | Nothing to apply (an unknown status). |
-| `401` `{ "ok": false }` | Unsigned, mis-signed or out of window, or signed with only the legacy `x-signature` header. |
+| `401` `{ "ok": false }` | Unsigned, mis-signed or out of window, or signed with only the legacy `x-signature` header. Also a callback whose `reference` is missing or is a `reference` we cannot resolve to a transfer: we check the signature with the key of the transfer the reference names, so without one your signature cannot be checked. Check the `reference` before you retry. |
 | `422` `{ "ok": false, "error": "amount_required" }` | A `paid_out` without `amount.destination` and `destination_currency`. Nothing was saved: send it again with the amount. |
-| `422` `{ "ok": false, "error": "reference_unresolved" }` | A `paid_out` whose `reference` does not name a transfer we know. Nothing was saved. |
+| `422` `{ "ok": false, "error": "reference_unresolved" }` | Defensive: the transfer we read from the callback differs from the one its `reference` names. We read both from the same `reference`, so a correctly signed callback that names a real transfer never gets it. Nothing was saved. |
 | `500` `{ "ok": false }` | We could not record the callback. Nothing was applied: retry. |
 
 ## Signatures

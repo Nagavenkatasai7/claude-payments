@@ -7,11 +7,15 @@
  *   - a 400 fieldErrors.senderAddress | senderDob shows the FIXED copy under the field.
  */
 import { describe, it, expect } from 'vitest';
-import { createElement } from 'react';
+import { createElement, isValidElement, type ReactElement, type ReactNode } from 'react';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { renderToStaticMarkup } from 'react-dom/server';
 import {
   OriginatorFields,
   PayForm,
+  formatDobInput,
+  normalizeDobForBody,
   originatorBody,
   originatorFieldErrors,
   originatorMissing,
@@ -72,6 +76,99 @@ describe('originatorShown / originatorBody / originatorMissing', () => {
     expect(originatorMissing({ address: true, dob: true }, { address: 'x', dob: '' })).toBe(true);
     expect(originatorMissing({ address: true, dob: true }, { address: 'x', dob: 'y' })).toBe(false);
     expect(originatorMissing({ address: false, dob: false }, { address: '', dob: '' })).toBe(false);
+  });
+});
+
+// Review round 2 (GB1): the DOB field keeps the number pad (no hyphen key on an
+// iPhone), so the field inserts the hyphens as the customer types and the body
+// builder turns exactly 8 digits into YYYY-MM-DD. The server stays strict.
+describe('formatDobInput / normalizeDobForBody (GB1)', () => {
+  it('keeps digits only, at most 8, with hyphens after the 4th and the 6th digit', () => {
+    const cases: Array<[string, string]> = [
+      ['', ''],
+      ['1', '1'],
+      ['1980', '1980'],
+      ['19800', '1980-0'],
+      ['198001', '1980-01'],
+      ['1980010', '1980-01-0'],
+      ['19800102', '1980-01-02'],
+      ['198001029', '1980-01-02'],
+      ['1980-01-02', '1980-01-02'],
+      ['1980/01/02', '1980-01-02'],
+      ['1980.01.02', '1980-01-02'],
+      [' 1980 01 02 ', '1980-01-02'],
+      ['ab19c80d0102', '1980-01-02'],
+      ['abc', ''],
+    ];
+    for (const [typed, shown] of cases) expect(formatDobInput(typed), JSON.stringify(typed)).toBe(shown);
+  });
+
+  it('deleting works: a trailing hyphen left by a backspace goes, digits shrink', () => {
+    expect(formatDobInput('1980-')).toBe('1980');
+    expect(formatDobInput('1980-01-')).toBe('1980-01');
+    expect(formatDobInput('1980-01-0')).toBe('1980-01-0');
+    expect(formatDobInput('1980-0')).toBe('1980-0');
+  });
+
+  it('the body normaliser: exactly 8 digits -> YYYY-MM-DD; anything else unchanged (trimmed)', () => {
+    expect(normalizeDobForBody('19800102')).toBe('1980-01-02');
+    expect(normalizeDobForBody(' 19800102 ')).toBe('1980-01-02');
+    expect(normalizeDobForBody('1980-01-02')).toBe('1980-01-02');
+    for (const v of ['1980010', '198001023', '1980/01/02', '01/02/1980', 'abc', '']) {
+      expect(normalizeDobForBody(v), v).toBe(v.trim());
+    }
+  });
+
+  it('originatorBody sends 8 typed digits as YYYY-MM-DD and leaves a wrong value for the server to refuse', () => {
+    expect(originatorBody({ address: false, dob: true }, { address: '', dob: '19800102' })).toEqual({
+      senderDob: '1980-01-02',
+    });
+    expect(originatorBody({ address: false, dob: true }, { address: '', dob: '1980010' })).toEqual({
+      senderDob: '1980010',
+    });
+    expect(originatorBody({ address: false, dob: true }, { address: '', dob: '01/02/1980' })).toEqual({
+      senderDob: '01/02/1980',
+    });
+  });
+
+  function findInput(node: ReactNode, name: string): ReactElement<{ onChange: (e: { target: { value: string } }) => void }> | null {
+    if (Array.isArray(node)) {
+      for (const n of node) {
+        const hit = findInput(n, name);
+        if (hit) return hit;
+      }
+      return null;
+    }
+    if (!isValidElement(node)) return null;
+    const props = node.props as { name?: string; children?: ReactNode };
+    if (node.type === 'input' && props.name === name) {
+      return node as ReactElement<{ onChange: (e: { target: { value: string } }) => void }>;
+    }
+    return findInput(props.children, name);
+  }
+
+  it('the field formats as typed: onChange hands onDob the hyphenated value', () => {
+    const seen: string[] = [];
+    const tree = OriginatorFields({
+      shown: { address: false, dob: true },
+      address: '',
+      dob: '',
+      onAddress: () => {},
+      onDob: (v) => seen.push(v),
+    });
+    const input = findInput(tree, 'senderDob');
+    expect(input).not.toBeNull();
+    for (const typed of ['19800102', '1980/01/02', '1980-', '19801']) input!.props.onChange({ target: { value: typed } });
+    expect(seen).toEqual(['1980-01-02', '1980-01-02', '1980', '1980-1']);
+  });
+
+  it('the payment-link form uses the same field and body builder (the fix reaches it)', () => {
+    const src = readFileSync(join(process.cwd(), 'src/app/pay/l/[token]/link-pay-form.tsx'), 'utf8');
+    expect(src).toMatch(/from '@\/app\/pay\/\[transferId\]\/pay-form'/);
+    expect(src).toContain('...originatorBody(shownOrig, { address: senderAddress, dob: senderDob })');
+    expect(src).toContain('<OriginatorFields');
+    // the link form builds its body only through originatorBody (no raw senderDob key)
+    expect(src).not.toMatch(/senderDob:\s*senderDob/);
   });
 });
 

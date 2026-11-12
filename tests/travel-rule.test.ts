@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi, afterEach } from 'vitest';
 import {
   DOB_DESTINATIONS,
   LIMIT_NEEDS_ADDRESS_COPY,
@@ -19,10 +19,19 @@ import type { CountryCode } from '@/lib/types';
 const ADDRESS = { band: 'address', address: true, dateOfBirth: false } as const;
 const FULL = { band: 'address_dob', address: true, dateOfBirth: true } as const;
 
-/** YYYY-MM-DD (UTC) of `now` moved by whole years, then by `days`. */
+/**
+ * YYYY-MM-DD (UTC) of `now` moved by whole years, then by `days`. Built from
+ * the UTC year, month and day parts; 29 February clamps to 28 February in a
+ * target year that is not a leap year (setUTCFullYear would roll it over to
+ * 1 March, review round 1 RG1).
+ */
 function ymd(now: Date, years: number, days = 0): string {
-  const d = new Date(now.getTime());
-  d.setUTCFullYear(d.getUTCFullYear() + years);
+  const y = now.getUTCFullYear() + years;
+  const m = now.getUTCMonth();
+  const leap = (y % 4 === 0 && y % 100 !== 0) || y % 400 === 0;
+  const day = m === 1 && now.getUTCDate() === 29 && !leap ? 28 : now.getUTCDate();
+  const d = new Date(Date.UTC(y, m, day));
+  d.setUTCFullYear(y); // Date.UTC maps years 0-99 to 1900-1999
   d.setUTCDate(d.getUTCDate() + days);
   return d.toISOString().slice(0, 10);
 }
@@ -96,30 +105,107 @@ describe('validateSenderAddress', () => {
       expect(validateSenderAddress(v as string), JSON.stringify(v)).toEqual({ ok: false });
     }
   });
+
+  // Fix pack 5 review round 2 (GB3): a dot before a US state / territory code, "us" or
+  // "in" with no space is an address, not a web address. Only the bare-domain rule is
+  // relaxed, and only for the clashing endings ca, co, de, in, me, us.
+  it('accepts a dot before a clashing state / country code (no space)', () => {
+    for (const v of [
+      '12 Elm St, Denver.CO 80202',
+      'Indianapolis.IN 46204',
+      '9 Main St, Sacramento.ca 95814',
+      '4 Front St, Dover.DE',
+      '7 Pine Rd, Portland.Me 04101',
+      '1 Liberty Ave, Anytown.US',
+      // Review round 2 R2 (F5-D2): a period that only closes the code.
+      '12 Elm St, Denver.CO. 80202',
+      'Indianapolis.IN.',
+      // Final check F9 (R2-T1): an ideographic full stop before the code folds to "." and is accepted.
+      'Denver\u3002CO 80202',
+    ]) {
+      expect(validateSenderAddress(v), v).toEqual({ ok: true, value: v });
+    }
+  });
+
+  it('still refuses a scheme, www., an IPv4 address, another ending, or a clashing ending used as a host', () => {
+    for (const v of [
+      'pay at evil.com now',
+      'http://x.co/a',
+      'www.evil.co',
+      '10.0.0.1',
+      'see evil.co/a',
+      'evil.co:8080 Main St',
+      'pay.evil.co now',
+      'mail me at a@evil.co',
+      'send to evil.uk now',
+      'evil[.]co please',
+      // Review round 2 R2 (F5-D1): full-width "/", ":" and "@", a query and a fragment.
+      'evil.co\uFF0Fpath here',
+      'evil.co\uFF1A8080 Main',
+      'a\uFF20evil.co main st',
+      'evil.co?x=1 main',
+      'evil.co#x main',
+      // (F5-D2): a dot that continues a chain or a path is still a host.
+      'x.co.uk main',
+      'evil.co./path',
+      'evil.co]/path',
+      'evil\u3002co/path',
+      // Final check F9 (R2-T1): pins the ideographic-dot fold and the bracket in the lookbehind.
+      'evil.co\u3002/path',
+      'pay.[]evil.co here',
+    ]) {
+      expect(validateSenderAddress(v), v).toEqual({ ok: false });
+    }
+  });
 });
+
+/** The 18 / 120 / 121 year boundaries at `now` (shared by the today and the leap-day cases). */
+function expectAgeBoundsAccepted(now: Date): void {
+  const at18 = ymd(now, -18);
+  const at120 = ymd(now, -120);
+  expect(validateSenderDob(at18, now)).toEqual({ ok: true, value: at18 });
+  expect(validateSenderDob(at120, now)).toEqual({ ok: true, value: at120 });
+  expect(validateSenderDob(ymd(now, -40), now)).toEqual({ ok: true, value: ymd(now, -40) });
+}
+
+function expectAgeBoundsRefused(now: Date): void {
+  const bad: unknown[] = [
+    ymd(now, -18, 1), // 17 years and 364 (or 365) days
+    ymd(now, -121),
+    ymd(now, -121, -1),
+    ymd(now, 1),
+    '2020-02-30', '2000-1-01', '01/02/1990', ' 1990-01-02 ', '1990-01-02T00:00:00Z', 19900102, null, undefined,
+  ];
+  for (const v of bad) {
+    expect(validateSenderDob(v as string, now), JSON.stringify(v)).toEqual({ ok: false });
+  }
+}
 
 describe('validateSenderDob', () => {
   const now = new Date(Date.now());
 
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
   it('accepts exactly 18 and exactly 120 years old at now (UTC)', () => {
-    const at18 = ymd(now, -18);
-    const at120 = ymd(now, -120);
-    expect(validateSenderDob(at18, now)).toEqual({ ok: true, value: at18 });
-    expect(validateSenderDob(at120, now)).toEqual({ ok: true, value: at120 });
-    expect(validateSenderDob(ymd(now, -40), now)).toEqual({ ok: true, value: ymd(now, -40) });
+    expectAgeBoundsAccepted(now);
   });
 
   it('refuses 17 years 364 days, 121 years, an impossible date, loose formats, padding and a non-string', () => {
-    const bad: unknown[] = [
-      ymd(now, -18, 1), // 17 years and 364 (or 365) days
-      ymd(now, -121),
-      ymd(now, -121, -1),
-      ymd(now, 1),
-      '2020-02-30', '2000-1-01', '01/02/1990', ' 1990-01-02 ', '1990-01-02T00:00:00Z', 19900102, null, undefined,
-    ];
-    for (const v of bad) {
-      expect(validateSenderDob(v as string, now), JSON.stringify(v)).toEqual({ ok: false });
-    }
+    expectAgeBoundsRefused(now);
+  });
+
+  // Review round 1 RG1: on 29 February the year-shifted test dates must not
+  // roll over to 1 March (the one case where a fixed calendar date is the
+  // point of the test).
+  it('the same 18 / 120 / 121 year boundaries hold when today is 29 February (2028-02-29)', () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date('2028-02-29T12:00:00Z'));
+    const leapNow = new Date(Date.now());
+    expect(ymd(leapNow, -18)).toBe('2010-02-28');
+    expectAgeBoundsAccepted(leapNow);
+    expectAgeBoundsRefused(leapNow);
   });
 
   it('a now that is not a valid date refuses every value', () => {

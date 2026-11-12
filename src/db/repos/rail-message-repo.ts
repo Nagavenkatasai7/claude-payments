@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { and, asc, eq, sql } from 'drizzle-orm';
+import { and, asc, eq, max, sql } from 'drizzle-orm';
 import { railMessages } from '@/db/schema';
 import type { DbOrTx } from '@/db/client';
 import { defaultProvider, encryptField, type EncryptionKeyProvider } from '@/lib/field-crypto';
@@ -22,9 +22,10 @@ import type { PartnerId } from '@/lib/types';
 //    hash, signature header), so a replayed delivery is ON CONFLICT DO NOTHING.
 //    An outbound id is random: one row per POSTed attempt.
 //  • NEVER LOGGED: no body, header or name leaves this module in a log.
-//  • ONE READER, METADATA ONLY: listForTransfer is tenant-scoped and returns no
+//  • READERS, METADATA ONLY: listForTransfer is tenant-scoped and returns no
 //    body, no signature and no rail partner id (only `routed`), so an owner
-//    never learns which tenant's rail settled a routed row.
+//    never learns which tenant's rail settled a routed row. lastSettleOutAt
+//    (review round 1 RC2, the refund path) returns one time, nothing else.
 
 export const RAIL_OUT = 1 as const;
 export const RAIL_IN = 2 as const;
@@ -130,6 +131,29 @@ export function createRailMessageRepo(db: DbOrTx, provider: EncryptionKeyProvide
         createdAt: new Date(r.createdAt).toISOString(),
         routed: r.routed === true,
       }));
+    },
+
+    /**
+     * Review round 1 RC2: when this transfer's newest outbound 'settle' was
+     * recorded for THIS rail partner; null when none. Tenant-scoped (owner id
+     * in the WHERE), ids in, one time out: no body read, no decrypt. THROWS on
+     * a failed read.
+     */
+    async lastSettleOutAt(partnerId: PartnerId, transferId: string, railPartnerId: PartnerId): Promise<Date | null> {
+      const rows = await db
+        .select({ last: max(railMessages.createdAt) })
+        .from(railMessages)
+        .where(
+          and(
+            eq(railMessages.partnerId, partnerId),
+            eq(railMessages.transferId, transferId),
+            eq(railMessages.railPartnerId, railPartnerId),
+            eq(railMessages.direction, RAIL_OUT),
+            eq(railMessages.kind, 'settle'),
+          ),
+        );
+      const last = rows[0]?.last;
+      return last === null || last === undefined ? null : new Date(last);
     },
   };
 }

@@ -353,13 +353,17 @@ describe('link route, real money: the originator rule before the code (P21)', { 
     await liveOwner();
     seam.writeThrows = true;
     const before = consoleLines.length;
+    // Review round 2 GF1: the hour is read before and after the action; the key is one of them.
+    const hourBefore = new Date().toISOString().slice(0, 13);
     const res = await call(await payBody({ senderAddress: ADDRESS }));
+    const hourAfter = new Date().toISOString().slice(0, 13);
     expect(res.status).toBe(503);
     expect(await res.json()).toEqual({ ok: false, reason: 'approval_not_recorded', error: PAY_APPROVAL_NOT_RECORDED_COPY });
     expect(await transfersN()).toBe(0);
     expect(await linkStatus()).toBe('open');
     const rows = await outboxRows();
-    expect(rows.map((r) => [r.kind, r.dedupe_key])).toEqual([['ops.alert', `payevidence:${new Date().toISOString().slice(0, 13)}`]]);
+    expect(rows.map((r) => r.kind)).toEqual(['ops.alert']);
+    expect([`payevidence:${hourBefore}`, `payevidence:${hourAfter}`]).toContain(rows[0].dedupe_key);
     expect(JSON.stringify(rows[0].payload)).toContain('(link)');
     const lines = consoleLines.slice(before);
     expect(lines.find((l) => l.includes('paylink.originator_write'))).toContain('TypeError');

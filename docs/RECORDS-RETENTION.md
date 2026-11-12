@@ -38,7 +38,7 @@ The 5-year period follows the proposal in the sanctions spec, section 8, so that
 - Append-only is against application code only: the table owner role can still TRUNCATE the table or disable the trigger (0039's header, "NOT a privilege boundary").
 - An erasure or correction request cannot be applied to `rail_messages` or to a stored sender address/DOB by any app path (append-only trigger; set-once fields).
 - A crash after the record and before the POST leaves an attempted-send row.
-- A failing rail adds up to 56 rows per transfer (one per POSTed attempt).
+- A failing rail adds one row per POSTed attempt, with no fixed limit per transfer: up to 56 per outbox run of the settlement instruction (`INSTRUCT_MAX_ATTEMPTS`), another run of up to 56 after each ops Retry or partner Replay of a dead instruction (both set its attempts back to 0), at most one reconcile re-instruction of a stuck paid transfer (`reinstruct:<id>`, its own 56), plus one `reverse` row per `funding.refund` attempt that reaches the POST (up to 8 per run, again after each Retry).
 - A build older than fix pack 5 sends unrecorded instructions (`docs/ROLLBACK.md`).
 - The reference rail's inbound side, the simulator's own callback POST and funding webhooks are not recorded.
 - There is no reader of the bodies yet: a staff reader with a `pii.reveal` audit and an export are follow-ups.

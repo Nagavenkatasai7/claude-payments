@@ -14,17 +14,18 @@ import type { Transfer } from '@/lib/types';
 // slots are filled (funding_mode T14, travel_rule T23); alertStuckHeld is the pack 3 I1 rule
 // (alertStuckLivegate) for the rows those slots will hold on purpose.
 
-// A switch that makes the real-money read throw (the helper must still return
-// null), and a count of its calls. The rest of live-gate stays real.
+// A switch that makes the rail-type read throw (the helper must still return
+// null), and a count of its calls. The rest of live-gate stays real. Review
+// round 1 (RA1): instructHeldOnPurpose reads readRailProviderType directly.
 const liveGateSeam = vi.hoisted(() => ({ throws: false, calls: 0 }));
 vi.mock('@/lib/live-gate', async (orig) => {
   const real = await orig<typeof import('@/lib/live-gate')>();
   return {
     ...real,
-    realMoneyFor: async (...a: Parameters<typeof real.realMoneyFor>) => {
+    readRailProviderType: async (...a: Parameters<typeof real.readRailProviderType>) => {
       liveGateSeam.calls += 1;
       if (liveGateSeam.throws) throw new TypeError('rail read exploded');
-      return real.realMoneyFor(...a);
+      return real.readRailProviderType(...a);
     },
   };
 });
@@ -64,6 +65,26 @@ vi.mock('@/db/repos/customer-repo', async (orig) => {
     },
   };
 });
+// Fix pack 5 review round 1 (RA1): a switch that makes the rail-type column read
+// (integrations-repo paymentProviderType) throw. readRailProviderType swallows it
+// and returns undefined, which realMoneyRail reads as real money.
+const integrationsSeam = vi.hoisted(() => ({ throws: false }));
+vi.mock('@/db/repos/integrations-repo', async (orig) => {
+  const real = await orig<typeof import('@/db/repos/integrations-repo')>();
+  return {
+    ...real,
+    createIntegrationsRepo: (...a: Parameters<typeof real.createIntegrationsRepo>) => {
+      const r = real.createIntegrationsRepo(...a);
+      return {
+        ...r,
+        paymentProviderType: async (...x: Parameters<typeof r.paymentProviderType>) => {
+          if (integrationsSeam.throws) throw new Error('rail type read exploded for 15551230000');
+          return r.paymentProviderType(...x);
+        },
+      };
+    },
+  };
+});
 const logSpy = vi.hoisted(() => ({ warn: vi.fn() }));
 vi.mock('@/lib/log', async (orig) => {
   const real = await orig<typeof import('@/lib/log')>();
@@ -79,6 +100,8 @@ import {
   alertStuckHeld,
   heldStuckDedupeKey,
   instructHeldOnPurpose,
+  instructNotPaidMessage,
+  instructPayability,
   stuckHeldMessage,
   travelRuleBlockIncomplete,
   travelRuleBlocksInstruct,
@@ -87,6 +110,48 @@ import {
 } from '@/lib/instruct-gates';
 
 const provider = new EnvKeyProvider(Buffer.alloc(32, 7));
+
+// Truth check F10 (F1): the G3/G4 rule as ONE pure helper, used at G3/G4 and
+// again under the row lock at the gate `record` (so the two can never drift).
+describe('instructPayability (G3/G4, and the re-check at record)', () => {
+  const STATUSES = ['awaiting_payment', 'paid', 'in_review', 'delivered', 'cancelled', 'blocked'] as const;
+  const REFUNDS = [undefined, 'none', 'requested', 'pending', 'completed', 'failed'] as const;
+  const COMPLIANCE = ['cleared', 'flagged', 'blocked'] as const;
+  function expected(status: string, refund: string, compliance: string): 'ok' | 'skip' | 'retry' {
+    if (status === 'cancelled' || status === 'delivered' || compliance === 'blocked' || refund === 'pending' || refund === 'completed') return 'skip';
+    if (status !== 'paid' || refund !== 'none') return 'retry';
+    return 'ok';
+  }
+  it('a gone row is not payable (skip)', () => {
+    expect(instructPayability(null)).toBe('skip');
+  });
+  it('the table over status x refund status x compliance status', () => {
+    let n = 0;
+    for (const status of STATUSES) {
+      for (const refundStatus of REFUNDS) {
+        for (const complianceStatus of COMPLIANCE) {
+          const row = { status, refundStatus, complianceStatus } as unknown as Pick<Transfer, 'status' | 'refundStatus' | 'complianceStatus'>;
+          expect(instructPayability(row), `${status}/${refundStatus}/${complianceStatus}`).toBe(expected(status, refundStatus ?? 'none', complianceStatus));
+          n++;
+        }
+      }
+    }
+    expect(n).toBe(STATUSES.length * REFUNDS.length * COMPLIANCE.length);
+    // Spot pins.
+    expect(instructPayability({ status: 'paid', complianceStatus: 'cleared' } as Transfer)).toBe('ok');
+    expect(instructPayability({ status: 'paid', complianceStatus: 'cleared', refundStatus: 'pending' } as Transfer)).toBe('skip');
+    expect(instructPayability({ status: 'paid', complianceStatus: 'cleared', refundStatus: 'requested' } as Transfer)).toBe('retry');
+    expect(instructPayability({ status: 'paid', complianceStatus: 'blocked', refundStatus: 'requested' } as Transfer)).toBe('skip');
+  });
+  it('the G4 error text, byte for byte', () => {
+    expect(instructNotPaidMessage({ status: 'paid', refundStatus: 'requested' } as Transfer)).toBe(
+      'Settlement instruction held: transfer is paid with refund requested — retrying',
+    );
+    expect(instructNotPaidMessage({ status: 'in_review' } as Transfer)).toBe(
+      'Settlement instruction held: transfer is in_review with refund none — retrying',
+    );
+  });
+});
 const ID = 'ig_t1';
 const REASONS: InstructHeldReason[] = ['mockfund', 'fundmode', 'travelrule'];
 
@@ -119,6 +184,7 @@ const instructRow = async (id: string, status: string) => {
 beforeEach(async () => {
   liveGateSeam.throws = false;
   liveGateSeam.calls = 0;
+  integrationsSeam.throws = false;
   partnerSeam.throws = false;
   customerSeam.throws = false;
   logSpy.warn.mockReset();
@@ -198,6 +264,34 @@ describe('instructHeldOnPurpose (P9; funding_mode slot filled by T14)', () => {
   });
 });
 
+describe('instructHeldOnPurpose: a failed rail-type read (review round 1, RA1)', () => {
+  it("a simulator demo row (environment 'live', funding provider 'mock') whose rail-type read fails -> null (as today), never 'mockfund'; the warn holds ids only", async () => {
+    await createIntegrationsRepo(db, provider).saveIntegrations('acme', {
+      kyc: {},
+      payment: { providerType: 'simulator', credentials: { signingSecret: 'sgn' }, webhookSecret: 'whk' },
+      whatsapp: {},
+    });
+    integrationsSeam.throws = true;
+    const t = fixture({ environment: 'live', fundingProvider: 'mock', fundingRef: `mockfund-${ID}` } as Partial<Transfer>);
+    await expect(instructHeldOnPurpose(db, t)).resolves.toBeNull();
+    expect(logSpy.warn).toHaveBeenCalledWith('instruct-gates.held', 'rail_read_failed', { transferId: ID });
+    expect(JSON.stringify(logSpy.warn.mock.calls)).not.toContain('15551230000');
+  });
+
+  it('the same row with the read succeeding -> null (simulator is not real money); an http rail -> mockfund as before', async () => {
+    await createIntegrationsRepo(db, provider).saveIntegrations('acme', {
+      kyc: {},
+      payment: { providerType: 'simulator', credentials: { signingSecret: 'sgn' }, webhookSecret: 'whk' },
+      whatsapp: {},
+    });
+    const t = fixture({ environment: 'live', fundingProvider: 'mock', fundingRef: `mockfund-${ID}` } as Partial<Transfer>);
+    expect(await instructHeldOnPurpose(db, t)).toBeNull();
+    await seedRealMoneyRail(db, 'acme');
+    await certifyPartnerForTest(db, 'acme');
+    expect(await instructHeldOnPurpose(db, t)).toBe('mockfund');
+  });
+});
+
 describe('travel_rule slot (P9, P22; filled by T23)', () => {
   const clearOriginator = () =>
     db.execute(sql`UPDATE customers SET residential_address_enc = NULL, date_of_birth_enc = NULL WHERE partner_id = 'acme' AND phone = '15551230000'`);
@@ -271,7 +365,8 @@ describe('alertStuckHeld (P9, the pack 3 I1 rule)', () => {
     await instructRow(ID, 'done');
     expect(await alertStuckHeld(db, fixture(), reason)).toBe(true);
     const a = await alerts();
-    expect(a).toEqual([{ k: `${reason}:stuck:${ID}`, m: stuckHeldMessage(ID, reason) }]);
+    // fixture() is a partner-collected row (final check F8: its own variant).
+    expect(a).toEqual([{ k: `${reason}:stuck:${ID}`, m: stuckHeldMessage(ID, reason, 'partner_collected', false) }]);
     expect(heldStuckDedupeKey(reason, ID)).toBe(`${reason}:stuck:${ID}`);
     for (const pii of ['15551230000', 'Anita', '919876543210', '123456789012', '200']) expect(a[0].m).not.toContain(pii);
   });
@@ -315,6 +410,72 @@ describe('alertStuckHeld (P9, the pack 3 I1 rule)', () => {
       expect(stuckHeldMessage(ID, r)).toContain('Issue refund');
       expect(stuckHeldMessage(ID, r)).not.toMatch(/cancel/i);
     }
+  });
+
+  // Review round 2 GE1: a stripe-class row is never sent to Issue refund (it
+  // cannot refund a card payment yet); every other class keeps the text above.
+  it('a stripe-class row: the fundmode and travelrule texts name partner_psp / the Stripe dashboard, never Issue refund', () => {
+    expect(stuckHeldMessage(ID, 'fundmode', 'stripe')).toBe(
+      `transfer ${ID} is paid with no delivery confirmation and no instruction waiting, and it is held on purpose (fundmode), so it is not re-instructed. ` +
+        "If the partner's own payment provider collects card payments, record the funding mode partner_psp on the go-live card (then the stuck-paid sweep re-instructs it once); " +
+        "otherwise return the sender's money in the partner's Stripe dashboard (SmartRemit cannot refund a card payment yet, so the transfer then stays paid and held here).",
+    );
+    expect(stuckHeldMessage(ID, 'travelrule', 'stripe')).toBe(
+      `transfer ${ID} is paid with no delivery confirmation and no instruction waiting, and it is held on purpose (travelrule), so it is not re-instructed. ` +
+        "Return the sender's money in the partner's Stripe dashboard (SmartRemit cannot refund a card payment yet, so the transfer then stays paid and held here).",
+    );
+    for (const r of ['fundmode', 'travelrule'] as const) {
+      expect(stuckHeldMessage(ID, r, 'stripe')).not.toContain('Issue refund');
+      expect(stuckHeldMessage(ID, r, 'stripe')).not.toMatch(/cancel/i);
+    }
+    for (const cls of ['mock', 'partner_pull', 'sandbox'] as const) {
+      for (const r of REASONS) expect(stuckHeldMessage(ID, r, cls)).toBe(stuckHeldMessage(ID, r));
+    }
+    for (const r of ['fundmode', 'travelrule'] as const) expect(stuckHeldMessage(ID, r, 'stripe', true)).toBe(stuckHeldMessage(ID, r, 'stripe'));
+  });
+
+  // Final check F8 (X1, U1): a partner-collected row. Not routed: Issue refund
+  // is admitted, but when the rail never got the transfer no reverse is sent
+  // and the refund stays pending. Routed: Issue refund is refused (RF1), so the
+  // text never names it. The first sentence is byte for byte; mockfund unchanged.
+  it('a partner-collected row: its own fundmode and travelrule texts, routed or not; mockfund unchanged; every other class unchanged', () => {
+    const head = (r: string) =>
+      `transfer ${ID} is paid with no delivery confirmation and no instruction waiting, and it is held on purpose (${r}), so it is not re-instructed. `;
+    expect(stuckHeldMessage(ID, 'fundmode', 'partner_collected', false)).toBe(
+      head('fundmode') +
+        "Record the right funding mode on the go-live card (then the stuck-paid sweep re-instructs it once) or stop it with Issue refund; if SmartRemit has no record of an instruction for this transfer, no reverse is sent, the refund stays pending and a person arranges the return of the sender's money with the partner.",
+    );
+    expect(stuckHeldMessage(ID, 'travelrule', 'partner_collected', false)).toBe(
+      head('travelrule') +
+        "Stop it with Issue refund; if SmartRemit has no record of an instruction for this transfer, no reverse is sent, the refund stays pending and a person arranges the return of the sender's money with the partner.",
+    );
+    expect(stuckHeldMessage(ID, 'fundmode', 'partner_collected', true)).toBe(
+      head('fundmode') +
+        "Record the right funding mode on the go-live card (then the stuck-paid sweep re-instructs it once). Issue refund is not available for a transfer that another partner pays out: a person must arrange the return of the sender's money with the owner partner.",
+    );
+    expect(stuckHeldMessage(ID, 'travelrule', 'partner_collected', true)).toBe(
+      head('travelrule') +
+        "Issue refund is not available for a transfer that another partner pays out: a person must arrange the return of the sender's money with the owner partner.",
+    );
+    for (const r of ['fundmode', 'travelrule'] as const) {
+      expect(stuckHeldMessage(ID, r, 'partner_collected', true)).not.toMatch(/with Issue refund|or Issue refund/);
+      expect(stuckHeldMessage(ID, r, 'partner_collected', false)).not.toMatch(/cancel/i);
+    }
+    for (const routed of [false, true]) expect(stuckHeldMessage(ID, 'mockfund', 'partner_collected', routed)).toBe(stuckHeldMessage(ID, 'mockfund'));
+    for (const cls of ['mock', 'partner_pull', 'sandbox', undefined] as const) {
+      for (const r of REASONS) expect(stuckHeldMessage(ID, r, cls, true)).toBe(stuckHeldMessage(ID, r));
+    }
+  });
+
+  it('alertStuckHeld passes the routed fact: a routed partner-collected row gets the routed text', async () => {
+    expect(await alertStuckHeld(db, fixture({ settlementPartnerId: 'railp' }), 'travelrule')).toBe(true);
+    expect(await alerts()).toEqual([{ k: `travelrule:stuck:${ID}`, m: stuckHeldMessage(ID, 'travelrule', 'partner_collected', true) }]);
+    expect((await alerts())[0].m).not.toBe(stuckHeldMessage(ID, 'travelrule', 'partner_collected', false));
+  });
+
+  it('alertStuckHeld reads the class from the row: a stripe-funded row gets the stripe text', async () => {
+    expect(await alertStuckHeld(db, fixture({ fundingProvider: 'stripe', fundingRef: 'pi_x' }), 'fundmode')).toBe(true);
+    expect(await alerts()).toEqual([{ k: `fundmode:stuck:${ID}`, m: stuckHeldMessage(ID, 'fundmode', 'stripe') }]);
   });
 });
 

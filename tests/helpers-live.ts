@@ -227,3 +227,30 @@ export async function seedOriginatorForTest(
     await repo.setDateOfBirthIfUnset(partnerId, phone, dob);
   }
 }
+
+// Fix pack 5 review round 1 (RC2): a partner-collected refund sends its signed
+// reverse only when the row's settle instruction was recorded (rail_messages,
+// outbound 'settle') for THIS rail partner at or after its go-live. This writes
+// that record, `agoMs` before now (default: now, so after certifyPartnerForTest's
+// certification a minute ago). Inserted directly so the time can be placed (the
+// table is append-only: no UPDATE); the body is never read by the lookup.
+export async function seedSettleRecordForTest(
+  db: Db,
+  o: { transferId: string; partnerId: PartnerId; railPartnerId?: PartnerId; agoMs?: number },
+): Promise<void> {
+  const { randomUUID } = await import('node:crypto');
+  const { railMessages } = await import('@/db/schema');
+  const { RAIL_OUT, railBodySha256 } = await import('@/db/repos/rail-message-repo');
+  await db.insert(railMessages).values({
+    id: randomUUID(),
+    partnerId: o.partnerId,
+    railPartnerId: o.railPartnerId ?? o.partnerId,
+    transferId: o.transferId,
+    direction: RAIL_OUT,
+    kind: 'settle',
+    bodyEnc: 'not-read-by-the-lookup',
+    bodySha256: railBodySha256('{}'),
+    signatureHeader: null,
+    createdAt: new Date(Date.now() - (o.agoMs ?? 0)),
+  });
+}

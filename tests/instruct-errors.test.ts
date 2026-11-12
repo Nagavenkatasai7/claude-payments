@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { DrizzleQueryError } from 'drizzle-orm/errors';
 import {
   ComplianceBlockUnavailableError,
@@ -8,6 +8,9 @@ import {
   InstructPermanentError,
   InstructTravelRuleError,
   RailRecordError,
+  REFUND_WAITS_FOR_INSTRUCT_DEFER_SEC,
+  RefundWaitsForInstructError,
+  isKeyConfigError,
   isTransientInstructError,
   railRecordAlertKey,
 } from '@/lib/instruct-errors';
@@ -97,6 +100,33 @@ describe('isTransientInstructError (P7 allow-list)', () => {
   });
 });
 
+describe('isKeyConfigError (P7, review round 1 RA2)', () => {
+  it('names the key configuration in the error itself or in its direct cause (Error or string), one level deep', () => {
+    for (const m of [
+      'field-crypto: unknown key id',
+      'FIELD_ENCRYPTION_KEY missing or not 32 bytes',
+      'field-crypto: FIELD_ENCRYPTION_PREVIOUS_KEYS has a malformed entry',
+      'field-crypto: FIELD_ENCRYPTION_CURRENT_KID is not a valid key id',
+    ]) {
+      expect(isKeyConfigError(new Error(m))).toBe(true);
+      expect(isKeyConfigError(new Error('wrapper', { cause: new Error(m) }))).toBe(true);
+      expect(isKeyConfigError(new Error('wrapper', { cause: m }))).toBe(true);
+    }
+  });
+
+  it('anything else is false: another decrypt failure, two levels deep, a non-Error, a throwing getter', () => {
+    expect(isKeyConfigError(new Error('field-crypto: malformed blob'))).toBe(false);
+    expect(isKeyConfigError(new Error('Unsupported state or unable to authenticate data'))).toBe(false);
+    expect(isKeyConfigError(new Error('a', { cause: new Error('b', { cause: new Error('field-crypto: unknown key id') }) }))).toBe(false);
+    expect(isKeyConfigError('field-crypto: unknown key id')).toBe(false);
+    expect(isKeyConfigError(null)).toBe(false);
+    expect(isKeyConfigError(undefined)).toBe(false);
+    const evil = new Error('x');
+    Object.defineProperty(evil, 'cause', { get() { throw new Error('boom'); } });
+    expect(isKeyConfigError(evil)).toBe(false);
+  });
+});
+
 describe('railRecordAlertKey (P30)', () => {
   it('is railrecord:<hour>; two instants in the same hour share it', () => {
     const H = 3_600_000;
@@ -104,7 +134,15 @@ describe('railRecordAlertKey (P30)', () => {
     expect(railRecordAlertKey(base)).toBe(`railrecord:${base / H}`);
     expect(railRecordAlertKey(base + H - 1)).toBe(railRecordAlertKey(base + 1));
     expect(railRecordAlertKey(base + H)).not.toBe(railRecordAlertKey(base));
-    expect(railRecordAlertKey()).toBe(`railrecord:${Math.floor(Date.now() / H)}`);
+    // Review round 2 GF1: the default reads the clock; the clock is pinned mid-hour
+    // so the key and the expected value read the same instant.
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      vi.setSystemTime(base + H / 2);
+      expect(railRecordAlertKey()).toBe(`railrecord:${base / H}`);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 
@@ -133,6 +171,13 @@ describe('the instruct error classes (P7)', () => {
     expect(r.message).toBe('rail_record_failed:t1');
     expect(r.transferId).toBe('t1');
     expect(r instanceof RailInstructError).toBe(false);
+
+    // Truth check F10 (F1): a refund waits for a running instruct, uncharged, 60 s.
+    expect(REFUND_WAITS_FOR_INSTRUCT_DEFER_SEC).toBe(60);
+    const w = new RefundWaitsForInstructError();
+    expect(w.name).toBe('RefundWaitsForInstructError');
+    expect(w.message).toBe('refund_waits_for_running_instruct');
+    expect(w.delaySec).toBe(60);
 
     expect(INSTRUCT_FUNDING_MODE_DEFER_SEC).toBe(900);
     const f = new InstructFundingModeError();

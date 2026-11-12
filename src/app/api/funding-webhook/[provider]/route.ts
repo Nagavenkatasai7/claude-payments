@@ -3,7 +3,7 @@ import { getDb } from '@/db/client';
 import { createTransferRepo } from '@/db/repos/transfer-repo';
 import { createOutboxRepo } from '@/db/repos/outbox-repo';
 import { getFundingProvider } from '@/lib/providers/funding-provider';
-import { realMoneyFor } from '@/lib/live-gate';
+import { railPartnerOf, readRailProviderType, realMoneyRail } from '@/lib/live-gate';
 import { pokeWorker } from '@/lib/outbox';
 import { logWarn } from '@/lib/log';
 import { verifyWebhookSignature } from '@/lib/providers/payment-webhook-verify';
@@ -23,9 +23,9 @@ import type { Transfer } from '@/lib/types';
 // harmless no-ops. NO WhatsApp sends here — the refund-engine worker owns
 // customer messaging. HMAC FAIL-CLOSED for every provider including 'mock'
 // (no carve-out: see money-01 / F42).
-// Fix pack 5 T13a (P13): on a row whose rail moves real money (realMoneyFor:
-// the settlement partner's rail is 'http', the row is not sandbox, an
-// unreadable rail counts as real money) EVERY state change is refused, with
+// Fix pack 5 T13a (P13): on a row whose rail moves real money (the settlement
+// partner's rail is 'http' and the row is not sandbox; an unreadable rail is a
+// 503, review round 2 GE2 below) EVERY state change is refused, with
 // 200 { ok: true, ignored: true } and no write:
 //  - captured      ⇒ one ops alert fundcapture:<transferId> (this generic
 //                    route cannot confirm a real charge)
@@ -34,6 +34,10 @@ import type { Transfer } from '@/lib/types';
 //                    Stripe refund (the funding.refund handler) completes it
 // Demo, simulator, mock, sandbox and default-tenant rows are recorded as
 // before. The alerts carry ids and the event name only.
+// Review round 2 GE2: the rail type is read directly (a 'test' row makes no
+// read). A failed read is NOT read as real money here: the route answers 503
+// { ok: false } with no write and no alert, so the signed sender retries; the
+// ignore branch runs only when the type was read and the rail is real money.
 
 export async function POST(
   req: NextRequest,
@@ -73,11 +77,18 @@ export async function POST(
 
   const repo = createTransferRepo(getDb());
   const t = await repo.getTransfer(event.transferId);
-  if (t && (await realMoneyFor(getDb(), t))) {
-    if (event.event === 'captured') await alertFundCaptureRefused(t);
-    else await alertFundRefundRefused(t, event.event);
-    pokeWorker(); // the ops.alert row is ready now
-    return NextResponse.json({ ok: true, ignored: true });
+  if (t && t.environment !== 'test') {
+    const railProviderType = await readRailProviderType(getDb(), railPartnerOf(t));
+    if (railProviderType === undefined) {
+      // readRailProviderType already logged the partner id; nothing is written.
+      return NextResponse.json({ ok: false }, { status: 503 });
+    }
+    if (realMoneyRail({ environment: t.environment, railProviderType })) {
+      if (event.event === 'captured') await alertFundCaptureRefused(t);
+      else await alertFundRefundRefused(t, event.event);
+      pokeWorker(); // the ops.alert row is ready now
+      return NextResponse.json({ ok: true, ignored: true });
+    }
   }
   switch (event.event) {
     case 'captured':
@@ -117,7 +128,10 @@ async function alertFundRefundRefused(t: Transfer, event: 'refunded' | 'refund_f
   const message =
     `⚠️ SmartRemit ops: a funding "${event}" callback for transfer ${t.id} (partner ${t.partnerId}) was refused: ` +
     'its rail moves real money, and the generic funding webhook cannot confirm a real refund. The refund stays pending; ' +
-    "only the partner's signed reverse or the Stripe refund completes it. Check the payment provider and the partner before acting.";
+    // Final check R3 (F9-D2): the worker also closes a refund with nothing
+    // collected on the live rail as nofunds-<id> (mock class, demo era).
+    // Truth check R5 (F10-D1): refundunrecorded:<id> is the third no-reverse exit.
+    "A refund here completes only on the partner's signed reverse, or as nofunds-<id> when nothing was collected on the live rail (a mock-funded or demo-era transfer). A card payment is refunded in the partner's Stripe dashboard and is not recorded here; any other partner-collected refund with no reverse waits for a person (refundrouted:<id>, refundheld:<id> or refundunrecorded:<id>). Check the payment provider and the partner before acting.";
   try {
     await createOutboxRepo(getDb()).enqueue('ops.alert', { message }, { dedupeKey: `fundrefund:${t.id}` });
   } catch (err) {

@@ -55,7 +55,8 @@ vi.mock('@/db/repos/integrations-repo', async (orig) => {
 // made to throw. Fix pack 5 T5 (P10): the block now fails CLOSED: a
 // non-transient throw dead-letters the instruct at once, a driver-shaped
 // (transient) one is a charged retry; nothing is POSTed without the block.
-const customerRepoFault = vi.hoisted(() => ({ throwOnGet: false, transient: false }));
+// Review round 1 (RA2): `error` makes getCustomer throw that exact error.
+const customerRepoFault = vi.hoisted(() => ({ throwOnGet: false, transient: false, error: null as Error | null }));
 vi.mock('@/db/repos/customer-repo', async (orig) => {
   const real = await orig<typeof import('@/db/repos/customer-repo')>();
   return {
@@ -65,6 +66,7 @@ vi.mock('@/db/repos/customer-repo', async (orig) => {
       return {
         ...repo,
         getCustomer: async (...a: Parameters<typeof repo.getCustomer>) => {
+          if (customerRepoFault.error) throw customerRepoFault.error;
           if (customerRepoFault.transient) throw Object.assign(new Error('connection reset'), { code: '08006', severity: 'ERROR' });
           if (customerRepoFault.throwOnGet) throw new Error('decrypt failed for 15551230000');
           return repo.getCustomer(...a);
@@ -408,6 +410,7 @@ describe('drainOnce — settlement.instruct compliance block (Program-Fix 31)', 
   beforeEach(async () => {
     customerRepoFault.throwOnGet = false;
     customerRepoFault.transient = false;
+    customerRepoFault.error = null;
     await store.saveTransfer({ ...transferFixture(), recipientLegalName: 'Anita Legal', purpose: 'family_support' });
     const { createCustomerRepo } = await import('@/db/repos/customer-repo');
     // Seeded under the OWNER ('acme') with the default key provider — the
@@ -432,6 +435,7 @@ describe('drainOnce — settlement.instruct compliance block (Program-Fix 31)', 
   afterEach(() => {
     customerRepoFault.throwOnGet = false;
     customerRepoFault.transient = false;
+    customerRepoFault.error = null;
   });
 
   it('the POSTed body = every legacy key unchanged + compliance v2 with the OWNER-keyed originator; x-signature verifies over the final body', async () => {
@@ -551,6 +555,30 @@ describe('drainOnce — settlement.instruct compliance block (Program-Fix 31)', 
       warn.mockRestore();
     }
   });
+
+  // Review round 1 (RA2, owner Q8): a key-ring misconfiguration heals when the
+  // env is fixed, so at G15 it is TRANSIENT (charged retry), never dead.
+  for (const [label, mk] of [
+    ['the error itself', () => new Error('field-crypto: unknown key id')],
+    ['a wrapper whose cause carries it', () => new Error('customer read failed', { cause: new Error('field-crypto: unknown key id') })],
+  ] as Array<[string, () => Error]>) {
+    it(`a key-configuration error at G15 (${label}) => no POST, charged retry (failed, attempts 1), not dead, no dead alert`, async () => {
+      customerRepoFault.error = mk();
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      try {
+        fetchFn.mockResolvedValue({ ok: true, json: async () => ({ providerRef: 'rail-c7' }) });
+        await outbox.enqueue('settlement.instruct', { transferId: 'wk_t1' }, { dedupeKey: 'instruct:wk_t1' });
+        const r = await drainOnce(deps(), 'w1');
+        expect(r).toMatchObject({ failed: 1, dead: 0 });
+        expect(fetchFn).not.toHaveBeenCalled();
+        expect(await instructRow()).toMatchObject({ status: 'failed', attempts: 1, last_error: 'compliance_block_unavailable:wk_t1' });
+        expect((await opsAlerts()).some((a) => a.dedupe_key.startsWith('dead:'))).toBe(false);
+        expect((await store.getTransfer('wk_t1'))!.paymentProviderRef).toBeFalsy();
+      } finally {
+        warn.mockRestore();
+      }
+    });
+  }
 
   it('ROUTED (non-exempt, real money): deferred by the travel rule (owner Q1, fix pack 5 T23), no POST, one travelrule:<id> with no sender data', async () => {
     await seedPartner(db, 'railp');
