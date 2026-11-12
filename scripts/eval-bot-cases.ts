@@ -1499,14 +1499,16 @@ export const EVAL_CASES: EvalCase[] = [
       const body = hinglishAt[0] === 0 ? lines.slice(1) : lines;
       // F4-D1: the confirmation question is not the quote lead line ("Shall I go ahead with this
       // quote?"); on the question's own line only the text before the question CLAUSE counts:
-      // from the last question opener to the end (R2-D1: "Here is your quote, shall I go ahead?"
-      // keeps its lead), or, with no opener, the whole last question sentence.
-      const QUESTION_OPENER = /\b(?:shall|should|can|could|may|would you like|do you want|want me to|ready to)\b/gi;
+      // inside the last question sentence, from its FIRST question opener to the end (R2-D1:
+      // "Here is your quote, shall I go ahead?" keeps its lead; R3 F7-D1: a second opener in the
+      // question, "..., or would you like to change it?", never keeps the question's own words),
+      // or, with no opener, the whole last question sentence.
+      const QUESTION_OPENER = /\b(?:shall|should|can|could|may|would you like|do you want|want me to|ready to)\b/i;
       const leadText = (l: string) => {
         if (l !== question) return l;
-        const openers = [...l.matchAll(QUESTION_OPENER)];
-        const last = openers[openers.length - 1];
-        return last?.index !== undefined ? l.slice(0, last.index) : l.replace(/[^.!?]*\?\s*$/, '');
+        const sentStart = l.match(/[^.!?]*\?\s*$/)?.index ?? l.length;
+        const opener = l.slice(sentStart).search(QUESTION_OPENER);
+        return l.slice(0, opener >= 0 ? sentStart + opener : sentStart);
       };
       const quoteLead = body.find((l) => /\b(?:quote|here(?:'s| is| are)|details|summary|breakdown)\b/i.test(leadText(l)));
       return fail(
