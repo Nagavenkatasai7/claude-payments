@@ -379,3 +379,92 @@ export function decisionRoute(i: {
   const allReleased = others.every((o) => cycleOf(o).some((r) => r.final && dispositionReleases(r.disposition)));
   return allReleased ? { kind: 'release' } : { kind: 'record' };
 }
+
+// ---------------------------------------------------------------------------
+// P15 (T17): the partner hold queue view. Pure: groups a queue partner's held
+// rows by hold class and state for /partner/reviews.
+
+export type QueueState = 'awaiting_first' | 'awaiting_second' | 'waits_smartremit' | 'waits_list' | 'waits_data';
+/** P15 row-state priority, highest first (also the group order inside a class). */
+export const QUEUE_STATES: readonly QueueState[] = Object.freeze([
+  'waits_list', 'waits_data', 'awaiting_second', 'awaiting_first', 'waits_smartremit',
+] as const);
+export interface QueueRow { transferId: string; holdClass: HoldClass; state: QueueState; heldSince: string; ageHours: number }
+export interface QueueGroup { holdClass: HoldClass; state: QueueState; rows: QueueRow[] }
+export interface QueueInputRow {
+  id: string;
+  complianceReasons?: readonly unknown[] | null;
+  complianceStatus?: string;
+  paidAt?: string;
+  createdAt: string;
+}
+
+/**
+ * P15 (T17): one QueueRow per held transfer, grouped by (class, state).
+ * Per open class (openHoldClasses): list_wait -> waits_list; a nobody-decided
+ * data_missing -> waits_data (with its data on file it is SmartRemit's, P4);
+ * a partner class with a non-final review row under its CURRENT
+ * classReasonsFp -> awaiting_second, else awaiting_first; anything else ->
+ * waits_smartremit. On a blocked row nothing is the partner's (P5 rule 2), so
+ * its partner classes read waits_smartremit too. The row takes the highest
+ * state by QUEUE_STATES and the first class (HOLD_CLASSES order) in it; a row
+ * with no open class reads waits_smartremit with its first class (SmartRemit
+ * sees it in reconcile). Flags: a missing entry reads `null` (fail closed) on
+ * a row with SENDER_SCREENING_REASON, else `undefined` (not read).
+ * Groups: HOLD_CLASSES then QUEUE_STATES order; rows oldest first by
+ * `paidAt ?? createdAt` (an unparseable time last), ties by transferId.
+ */
+export function holdQueueView(
+  rows: readonly QueueInputRow[],
+  reviews: ReadonlyMap<string, readonly ReviewRowLite[]>,
+  flags: ReadonlyMap<string, CustomerScreeningFlags | null>,
+  owner: ClassifyOwner,
+  dataOnFile: ReadonlyMap<string, boolean>,
+  now: Date,
+): QueueGroup[] {
+  const rank = (s: QueueState) => QUEUE_STATES.indexOf(s);
+  const nowMs = now.getTime();
+  const out: Array<QueueRow & { ms: number }> = [];
+  for (const r of rows) {
+    const reasons = Array.isArray(r.complianceReasons) ? r.complianceReasons : [];
+    const hasSender = reasons.includes(SENDER_SCREENING_REASON);
+    const f = flags.has(r.id) ? flags.get(r.id) : hasSender ? null : undefined;
+    const blocked = r.complianceStatus === 'blocked';
+    const classes = classifyHold(r.complianceReasons, f, owner, { blocked, dataOnFile: dataOnFile.get(r.id) === true });
+    const cycle = reviews.get(r.id) ?? [];
+    const open = openHoldClasses(classes, cycle, f);
+    const stateOf = (c: ClassifiedClass): QueueState => {
+      if (c.holdClass === 'list_wait') return 'waits_list';
+      if (c.holdClass === 'data_missing' && c.decider === 'nobody') return 'waits_data';
+      if (c.decider === 'partner' && !blocked) {
+        const fp = classReasonsFp(c, f);
+        return cycle.some((v) => v.holdClass === c.holdClass && v.reasonsFp === fp && !v.final) ? 'awaiting_second' : 'awaiting_first';
+      }
+      return 'waits_smartremit';
+    };
+    let holdClass: HoldClass = classes[0]?.holdClass ?? 'unknown';
+    let state: QueueState = 'waits_smartremit';
+    let best = Number.POSITIVE_INFINITY;
+    for (const c of open) {
+      const s = stateOf(c);
+      if (rank(s) < best) { best = rank(s); state = s; holdClass = c.holdClass; }
+    }
+    const heldSince = r.paidAt ?? r.createdAt;
+    const ms = Date.parse(heldSince);
+    const ageHours = Number.isFinite(ms) ? Math.max(0, Math.floor((nowMs - ms) / 3_600_000)) : 0;
+    out.push({ transferId: r.id, holdClass, state, heldSince, ageHours, ms: Number.isFinite(ms) ? ms : Number.POSITIVE_INFINITY });
+  }
+  const sorted = [...out].sort((a, b) =>
+    HOLD_CLASSES.indexOf(a.holdClass) - HOLD_CLASSES.indexOf(b.holdClass)
+    || rank(a.state) - rank(b.state)
+    || (a.ms === b.ms ? 0 : a.ms < b.ms ? -1 : 1)
+    || (a.transferId < b.transferId ? -1 : a.transferId > b.transferId ? 1 : 0));
+  const groups: QueueGroup[] = [];
+  for (const { ms: _ms, ...q } of sorted) {
+    void _ms;
+    const last = groups.at(-1);
+    if (last && last.holdClass === q.holdClass && last.state === q.state) last.rows.push(q);
+    else groups.push({ holdClass: q.holdClass, state: q.state, rows: [q] });
+  }
+  return groups;
+}

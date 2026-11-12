@@ -899,6 +899,12 @@ export const en = {
   'partner.holdDecision.class.data_missing': 'Missing details',
   'partner.holdDecision.class.blocked': 'Blocked',
   'partner.holdDecision.class.unknown': 'Other review',
+  // Fix pack 7 T17 (P15, P31): the queue states on /partner/reviews. DRAFT texts.
+  'partner.holdDecision.state.awaiting_first': 'Waiting for your decision',
+  'partner.holdDecision.state.awaiting_second': 'Waiting for a second approver',
+  'partner.holdDecision.state.waits_smartremit': 'SmartRemit decides',
+  'partner.holdDecision.state.waits_list': 'Waiting for the screening list',
+  'partner.holdDecision.state.waits_data': 'Waiting for missing details',
   'partner.holdDecision.disposition.documents_verified': 'Release: documents verified',
   'partner.holdDecision.disposition.activity_explained': 'Release: activity explained',
   'partner.holdDecision.disposition.customer_not_verified': 'Reject: customer not verified',
@@ -2027,6 +2033,7 @@ export const en = {
   'partner.reviews.held.caption': 'Held live transfers, newest first',
   'partner.reviews.held.empty': 'No transfers are on hold.',
   'partner.reviews.held.more': 'Showing the newest {n}. Open Transfers to see the rest.',
+  'partner.reviews.held.age': 'Held {n} h', // Fix pack 7 T17 (P15)
   'partner.reviews.kyc.title': 'KYC awaiting a decision',
   'partner.reviews.kyc.subDelegated': 'Open a customer to approve or reject their verification.',
   'partner.reviews.kyc.caption': 'Customers awaiting a KYC decision',
